@@ -55,6 +55,13 @@ Following every Codex release is not required; a bump is made when it is worth i
 
 ## Releasing
 
-The release workflow takes a version, checks it, signs every file, and uploads the deployment to
-Maven Central. Nothing is published until a maintainer presses **Publish** on the Central Portal's
-Deployments page.
+The **Release** workflow (Actions → Release → Run workflow) takes a version, checks its form,
+sets it, builds and tests, signs every file, and uploads the deployment to Maven Central. Nothing is
+published until a maintainer presses **Publish** on the Central Portal's Deployments page.
+
+It needs four repository secrets: `CENTRAL_TOKEN_USERNAME` and `CENTRAL_TOKEN_PASSWORD`, a Central
+Portal user token, and `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, a signing key whose public half is on
+`keyserver.ubuntu.com`.
+
+CI also downloads Codex through the published jar on every push, and checks the recorded checksums
+and the App Server protocol against OpenAI's package.

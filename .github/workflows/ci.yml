@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Build and test
+        run: mvn -B verify
+      - name: Build the published jar, its sources and Javadoc
+        run: mvn -B -Ppublish package -DskipTests
+      - name: Check the published jar carries only its own packages and names no dependency
+        run: |
+          jar=$(ls shifting-codej/target/shifting-codej-*.jar | grep -v -e sources -e javadoc -e original-)
+          outside=$(unzip -Z1 "$jar" | grep '\.class$' | grep -v '^io/github/shiftinglabs/codej/' || true)
+          [ -z "$outside" ] || { echo "Classes outside io/github/shiftinglabs/codej:"; echo "$outside"; exit 1; }
+          python3 - shifting-codej/target/dependency-reduced-pom.xml <<'PY'
+          import re, sys
+          pom = open(sys.argv[1]).read()
+          leaked = [d for d in re.findall(r"<dependency>(.*?)</dependency>", pom, re.S) if "<scope>test</scope>" not in d]
+          sys.exit("The published POM names dependencies:\n" + "\n".join(leaked) if leaked else 0)
+          PY
+      - name: Download Codex through the published jar, as a user's first build does
+        run: |
+          jar=$(ls shifting-codej/target/shifting-codej-*.jar | grep -v -e sources -e javadoc -e original-)
+          java --enable-native-access=ALL-UNNAMED -cp "$jar" scripts/CodexDownloadCheck.java "$RUNNER_TEMP/codex-state"
+
+  codex:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check the recorded Codex release against OpenAI's npm package
+        run: |
+          node scripts/codex-checksums.mjs --arch arm64 | sort > printed.txt
+          grep -v '^#' shifting-codej/src/main/resources/io/github/shiftinglabs/codej/sdk/impl/codex-checksums.properties | sort > recorded.txt
+          diff recorded.txt printed.txt
+      - name: Check the App Server protocol of the pinned Codex
+        run: |
+          version=$(node -e 'import("./scripts/codex-release.mjs").then(release => console.log(release.version()))')
+          npm install --global "@openai/codex@$version"
+          node scripts/codex-app-server-compat.mjs
