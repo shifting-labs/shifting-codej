@@ -102,6 +102,7 @@ public final class DriverAgent
             Optional<String> account,
             Optional<Gateway> gateway,
             Optional<Supplier<String>> deepSeekKey,
+            Optional<Supplier<String>> apiKey,
             Optional<Duration> keepSessions,
             Optional<Executor> callbackExecutor,
             ToolServer toolServer) {}
@@ -186,6 +187,11 @@ public final class DriverAgent
                 CodexGateway codexGateway = new CodexGateway(gateway.baseUrl().toString(), () -> Optional.ofNullable(gateway.token().get()));
                 driver = CodexCliDriver.gateway(executable, Codex.VERSION, mapper, state.supervisor(), CodexHome.prepare(home), broker,
                         lane(AgentLaneId.CODEX_ACCOUNT_PREFIX, home), "Codex gateway", codexGateway);
+            }
+            else if (settings.apiKey().isPresent()) {
+                Supplier<String> key = settings.apiKey().orElseThrow();
+                driver = CodexCliDriver.apiKey(executable, Codex.VERSION, mapper, state.supervisor(), CodexHome.prepare(home), broker,
+                        lane(AgentLaneId.CODEX_ACCOUNT_PREFIX, home), "Codex · OpenAI API key", () -> Optional.ofNullable(key.get()));
             }
             else if (settings.account().isPresent()) {
                 String email = settings.account().orElseThrow();

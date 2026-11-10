@@ -95,6 +95,8 @@ final class CodexAppServerClient
     private final ProcessSpec processSpec;
     private final SecretRedactor redactor;
     private final Optional<DeepSeekLoopback> deepSeekLoopback;
+    /** The OpenAI API key this App Server signs in with right after it starts; never in its environment or its home. */
+    private final Optional<String> apiKey;
     private final CodexProtocolCodec codec;
     private final Object lifecycleLock = new Object();
     private final Object writeLock = new Object();
@@ -120,7 +122,14 @@ final class CodexAppServerClient
 
     CodexAppServerClient(ProcessSupervisor supervisor, ProcessSpec processSpec, ObjectMapper objectMapper, SecretRedactor redactor, Optional<DeepSeekLoopback> deepSeekLoopback)
     {
+        this(supervisor, processSpec, objectMapper, redactor, deepSeekLoopback, Optional.empty());
+    }
+
+    CodexAppServerClient(ProcessSupervisor supervisor, ProcessSpec processSpec, ObjectMapper objectMapper, SecretRedactor redactor, Optional<DeepSeekLoopback> deepSeekLoopback,
+            Optional<String> apiKey)
+    {
         this.supervisor = requireNonNull(supervisor, "supervisor is null");
+        this.apiKey = requireNonNull(apiKey, "apiKey is null");
         this.processSpec = requireNonNull(processSpec, "processSpec is null");
         this.redactor = requireNonNull(redactor, "redactor is null");
         this.deepSeekLoopback = requireNonNull(deepSeekLoopback, "deepSeekLoopback is null");
@@ -255,6 +264,15 @@ final class CodexAppServerClient
                         .orElse(null));
                 sendNotification("initialized", new CodexProtocol.EmptyParams());
                 timing("codex.initialize.end");
+                if (apiKey.isPresent()) {
+                    CodexProtocol.JsonRpcEnvelope login = awaitRequest("account/login/start", new CodexProtocol.ApiKeyLoginParams("apiKey", apiKey.orElseThrow()), START_TIMEOUT);
+                    String type = login.result()
+                            .map(result -> codec.decodeResult(result, CodexProtocol.LoginAccountResponse.class).type())
+                            .orElse("");
+                    if (!type.equals("apiKey")) {
+                        throw new AgentUnavailableException("Codex did not sign in with the OpenAI API key");
+                    }
+                }
             }
             catch (RuntimeException failure) {
                 process.cancel();

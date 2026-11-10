@@ -311,6 +311,7 @@ static <T> ListenableFuture<T> listenable(CompletionStage<T> stage)
 Agent work = Codex.builder().home(workHome).account("me@example.com").keepSessionsFor(Duration.ofDays(30)).build();
 Agent proxy = Codex.builder().gateway(URI.create("https://llm.example.com/v1"), vault::gatewayToken).build();
 Agent deepSeek = Codex.builder().deepSeek(vault::deepSeekKey).build();
+Agent openAi = Codex.builder().apiKey(vault::openAiKey).build();
 Agent claude = Claude.builder()
         .runOutsideSandbox("mvn", "./mvnw")
         .allowUnixSocket(Path.of("/var/run/docker.sock"))
@@ -324,6 +325,9 @@ Agent claude = Claude.builder()
 - Secrets are a `Supplier<String>`, read when a process starts, passed only in its environment, and
   never written to disk.
 - `deepSeek(key)` runs DeepSeek models through Codex, with no ChatGPT login.
+- `apiKey(key)` signs Codex in with an OpenAI API key instead. Each Codex process signs in with it
+  right after it starts and keeps it only in memory, so Codex's environment, its home and the
+  commands the agent runs never see it.
 - Both CLIs keep every conversation's transcript forever. `keepSessionsFor(age)` has the agent delete
   the ones unused for longer, while it runs; a deleted conversation can't be resumed.
 - On Claude, `runOutsideSandbox` and `allowUnixSocket` apply only to sessions that may use the

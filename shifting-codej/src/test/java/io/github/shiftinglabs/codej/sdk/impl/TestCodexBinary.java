@@ -286,7 +286,7 @@ class TestCodexBinary
         CodexBinary unreachable = new CodexBinary(cache, mirror, CLASSIFIER, recorded(archive(files("codex"), false, false), files("codex")),
                 Duration.ofSeconds(5), Duration.ofSeconds(5));
         DriverAgent.CodexSettings settings = new DriverAgent.CodexSettings(Optional.empty(), Optional.empty(), Optional.of(state), Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.empty(), Optional.empty(), ToolServer.DEFAULT);
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), ToolServer.DEFAULT);
 
         try (Agent codex = DriverAgent.codex(settings, unreachable)) {
             AgentStatus status = codex.status();

@@ -107,6 +107,10 @@ final class CodexLaunchProfile
             gatewayProviderConfig(options.gatewayUrl().orElseThrow()).forEach((key, value) ->
                     arguments.add("-c", "model_providers." + options.toolServer().gateway() + "." + key + "=" + (value instanceof String text ? tomlString(text) : value)));
         }
+        else if (options.apiKeyLogin()) {
+            // The client signs in with the key after initialize; the in-memory store keeps it out of the Codex home.
+            arguments.add("-c", "cli_auth_credentials_store=\"ephemeral\"");
+        }
         else {
             // forced_login_method synthesizes managed requirements; the isolation guard checks account/read instead.
             arguments.add("-c", "cli_auth_credentials_store=\"file\"");
@@ -313,7 +317,8 @@ final class CodexLaunchProfile
             boolean asksUser,
             Optional<DeepSeekProfile> deepSeek,
             Optional<String> gatewayUrl,
-            ToolServer toolServer)
+            ToolServer toolServer,
+            boolean apiKeyLogin)
     {
         Options
         {
@@ -322,7 +327,7 @@ final class CodexLaunchProfile
             fixedWritableRoots = ImmutableList.copyOf(fixedWritableRoots);
             requireNonNull(deepSeek, "deepSeek is null");
             requireNonNull(gatewayUrl, "gatewayUrl is null");
-            checkArgument(deepSeek.isEmpty() || gatewayUrl.isEmpty(), "A launch uses one provider");
+            checkArgument((deepSeek.isPresent() ? 1 : 0) + (gatewayUrl.isPresent() ? 1 : 0) + (apiKeyLogin ? 1 : 0) <= 1, "A launch uses one provider");
             boolean fixed = !fixedWritableRoots.isEmpty();
             checkArgument(!network || !textOnly, "A text-only Codex profile has no network");
             checkArgument(!webSearch || !textOnly, "A text-only Codex profile has no web search");
@@ -338,7 +343,13 @@ final class CodexLaunchProfile
         Options(ChildProfile childProfile, boolean textOnly, List<String> fixedWritableRoots, boolean network, boolean webSearch, boolean readOnlySubagents,
                 boolean asksUser, Optional<DeepSeekProfile> deepSeek, Optional<String> gatewayUrl)
         {
-            this(childProfile, textOnly, fixedWritableRoots, network, webSearch, readOnlySubagents, asksUser, deepSeek, gatewayUrl, ToolServer.DEFAULT);
+            this(childProfile, textOnly, fixedWritableRoots, network, webSearch, readOnlySubagents, asksUser, deepSeek, gatewayUrl, ToolServer.DEFAULT, false);
+        }
+
+        Options(ChildProfile childProfile, boolean textOnly, List<String> fixedWritableRoots, boolean network, boolean webSearch, boolean readOnlySubagents,
+                boolean asksUser, Optional<DeepSeekProfile> deepSeek, Optional<String> gatewayUrl, ToolServer toolServer)
+        {
+            this(childProfile, textOnly, fixedWritableRoots, network, webSearch, readOnlySubagents, asksUser, deepSeek, gatewayUrl, toolServer, false);
         }
 
         boolean fixedSandbox()

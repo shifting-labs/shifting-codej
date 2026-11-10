@@ -213,6 +213,8 @@ public final class CodexCliDriver
     private final Optional<Path> deepSeekCatalog;
     private final Optional<CodexGateway> gateway;
     private final Optional<String> loginEmail;
+    /** An OpenAI API key the App Server signs in with; read at each launch, never written to the Codex home. */
+    private final Optional<Supplier<Optional<String>>> openAiKey;
     private final String executable;
     private final String minimumVersion;
     private final Version minimumRelease;
@@ -235,7 +237,7 @@ public final class CodexCliDriver
     public CodexCliDriver(String executable, String minimumVersion, ObjectMapper objectMapper, ProcessSupervisor supervisor, Path codexHome, PermissionBroker permissions)
     {
         this(executable, minimumVersion, objectMapper, supervisor, ProviderCli.inheritedEnvironment(System.getenv(), INHERITED_ENVIRONMENT), codexHome, permissions,
-                DEFAULT_QUIESCENCE_TIMEOUT, AgentLaneId.CODEX_CLI, "Codex", Optional.empty(), Optional.empty(), Optional.empty());
+                DEFAULT_QUIESCENCE_TIMEOUT, AgentLaneId.CODEX_CLI, "Codex", Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     /** One saved DeepSeek key becomes one Codex App Server lane with its own isolated home. */
@@ -254,7 +256,7 @@ public final class CodexCliDriver
         checkArgument(laneId.value().startsWith("deepseek-key-"), "DeepSeek lane ID must identify a saved key");
         checkArgument(!label.isBlank(), "label is blank");
         return new CodexCliDriver(executable, minimumVersion, objectMapper, supervisor, ProviderCli.inheritedEnvironment(System.getenv(), INHERITED_ENVIRONMENT),
-                codexHome, permissions, DEFAULT_QUIESCENCE_TIMEOUT, laneId, label, Optional.of(secretSupplier), Optional.empty(), Optional.empty());
+                codexHome, permissions, DEFAULT_QUIESCENCE_TIMEOUT, laneId, label, Optional.of(secretSupplier), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     public static CodexCliDriver gateway(
@@ -270,7 +272,7 @@ public final class CodexCliDriver
     {
         checkArgument(laneId.value().startsWith(AgentLaneId.CODEX_ACCOUNT_PREFIX), "Codex gateway lane must identify an account");
         return new CodexCliDriver(executable, minimumVersion, objectMapper, supervisor, ProviderCli.inheritedEnvironment(System.getenv(), INHERITED_ENVIRONMENT),
-                codexHome, permissions, DEFAULT_QUIESCENCE_TIMEOUT, laneId, label, Optional.empty(), Optional.of(gateway), Optional.empty());
+                codexHome, permissions, DEFAULT_QUIESCENCE_TIMEOUT, laneId, label, Optional.empty(), Optional.of(gateway), Optional.empty(), Optional.empty());
     }
 
     public static CodexCliDriver account(
@@ -286,7 +288,25 @@ public final class CodexCliDriver
     {
         checkArgument(laneId.value().startsWith(AgentLaneId.CODEX_ACCOUNT_PREFIX), "Codex login lane must identify an account");
         return new CodexCliDriver(executable, minimumVersion, objectMapper, supervisor, ProviderCli.inheritedEnvironment(System.getenv(), INHERITED_ENVIRONMENT),
-                codexHome, permissions, DEFAULT_QUIESCENCE_TIMEOUT, laneId, label, Optional.empty(), Optional.empty(), Optional.of(email));
+                codexHome, permissions, DEFAULT_QUIESCENCE_TIMEOUT, laneId, label, Optional.empty(), Optional.empty(), Optional.of(email), Optional.empty());
+    }
+
+    /** An OpenAI API key becomes a lane whose App Server signs in with it and keeps it only in memory. */
+    public static CodexCliDriver apiKey(
+            String executable,
+            String minimumVersion,
+            ObjectMapper objectMapper,
+            ProcessSupervisor supervisor,
+            Path codexHome,
+            PermissionBroker permissions,
+            AgentLaneId laneId,
+            String label,
+            Supplier<Optional<String>> key)
+    {
+        requireNonNull(key, "key is null");
+        checkArgument(laneId.value().startsWith(AgentLaneId.CODEX_ACCOUNT_PREFIX), "Codex API key lane must identify an account");
+        return new CodexCliDriver(executable, minimumVersion, objectMapper, supervisor, ProviderCli.inheritedEnvironment(System.getenv(), INHERITED_ENVIRONMENT),
+                codexHome, permissions, DEFAULT_QUIESCENCE_TIMEOUT, laneId, label, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(key));
     }
 
     CodexCliDriver(
@@ -299,7 +319,7 @@ public final class CodexCliDriver
             PermissionBroker permissions,
             Duration quiescenceTimeout)
     {
-        this(executable, minimumVersion, objectMapper, supervisor, environment, codexHome, permissions, quiescenceTimeout, AgentLaneId.CODEX_CLI, "Codex", Optional.empty(), Optional.empty(), Optional.empty());
+        this(executable, minimumVersion, objectMapper, supervisor, environment, codexHome, permissions, quiescenceTimeout, AgentLaneId.CODEX_CLI, "Codex", Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     private CodexCliDriver(
@@ -315,9 +335,11 @@ public final class CodexCliDriver
             String laneLabel,
             Optional<Supplier<Optional<String>>> deepSeekSecret,
             Optional<CodexGateway> gateway,
-            Optional<String> loginEmail)
+            Optional<String> loginEmail,
+            Optional<Supplier<Optional<String>>> openAiKey)
     {
         this.loginEmail = requireNonNull(loginEmail, "loginEmail is null");
+        this.openAiKey = requireNonNull(openAiKey, "openAiKey is null");
         this.gateway = requireNonNull(gateway, "gateway is null");
         this.laneId = requireNonNull(laneId, "laneId is null");
         this.laneLabel = requireNonNull(laneLabel, "laneLabel is null");
@@ -406,8 +428,10 @@ public final class CodexCliDriver
         Optional<String> gatewayToken = gateway.map(value -> value.token().get().filter(token -> !token.isBlank())
                 .orElseThrow(() -> new AgentUnavailableException("Codex gateway token removed or unavailable")));
         gatewayToken.ifPresent(token -> processEnvironment.put(CodexGateway.TOKEN_VARIABLE, token));
+        Optional<String> openAiApiKey = openAiKey.map(value -> value.get().filter(token -> !token.isBlank())
+                .orElseThrow(() -> new AgentUnavailableException("OpenAI API key removed or unavailable")));
         Map<String, String> launchEnvironment = processEnvironment.buildOrThrow();
-        SecretRedactor baseRedactor = key.or(() -> gatewayToken).map(redactor::withSecret).orElse(redactor);
+        SecretRedactor baseRedactor = key.or(() -> gatewayToken).or(() -> openAiApiKey).map(redactor::withSecret).orElse(redactor);
         SecretRedactor launchRedactor = registration.map(value -> baseRedactor.withSecret(value.token())).orElse(baseRedactor);
         Optional<DeepSeekLoopback> loopback = key.map(value -> DeepSeekLoopback.start(value, permissions, registration, objectMapper));
         try {
@@ -424,7 +448,7 @@ public final class CodexCliDriver
             // keep them to read the checkout at all, and is contained by its sandbox.
             CodexLaunchProfile.Options options = new CodexLaunchProfile.Options(
                     childProfile, shellOff(access), fixedWritableRoots, network, webSearch, readOnlySubagents, asksUser, deepSeek, gateway.map(CodexGateway::baseUrl),
-                    permissions.server());
+                    permissions.server(), openAiKey.isPresent());
             return new ClientLaunch(new CodexAppServerClient(
                     supervisor,
                     new ProcessSpec(
@@ -438,7 +462,8 @@ public final class CodexCliDriver
                             PROCESS_CANCELLATION_GRACE),
                     objectMapper,
                     launchRedactor,
-                    loopback), launchRedactor, options, tools.map(CodexLaunchProfile.ManagedToolsLaunch::endpoint), reviewGate);
+                    loopback,
+                    openAiApiKey), launchRedactor, options, tools.map(CodexLaunchProfile.ManagedToolsLaunch::endpoint), reviewGate);
         }
         catch (RuntimeException failure) {
             loopback.ifPresent(DeepSeekLoopback::close);
@@ -519,6 +544,13 @@ public final class CodexCliDriver
                 CodexIsolationGuard.rejectRuleFiles(codexHome);
                 return status(AgentProviderStatus.Readiness.READY, Optional.of(version), "Gateway configured; access is checked when a task runs");
             }
+            if (openAiKey.isPresent()) {
+                if (openAiKey.flatMap(Supplier::get).filter(token -> !token.isBlank()).isEmpty()) {
+                    return status(AgentProviderStatus.Readiness.AUTHENTICATION_REQUIRED, Optional.of(version), "OpenAI API key removed or unavailable");
+                }
+                CodexIsolationGuard.rejectRuleFiles(codexHome);
+                return status(AgentProviderStatus.Readiness.READY, Optional.of(version), "OpenAI API key configured; OpenAI checks it when a task runs");
+            }
             ProviderCli.Result login = loginEmail.isPresent()
                     ? run(executable, "-c", "cli_auth_credentials_store=\"file\"", "login", "status")
                     : run(executable, "login", "status");
@@ -577,6 +609,9 @@ public final class CodexCliDriver
     {
         if (gateway.isPresent()) {
             return new ProviderQuotaSnapshot(Optional.empty(), ImmutableList.of(), Optional.of("Check your gateway for usage limits."));
+        }
+        if (openAiKey.isPresent()) {
+            return new ProviderQuotaSnapshot(Optional.empty(), ImmutableList.of(), Optional.of("Check your OpenAI organization's usage page for limits."));
         }
         requireAvailable();
         try (CodexAppServerClient client = appServerClient("codex-usage", codexHome, CodexLaunchProfile.ChildProfile.NONE)) {
@@ -691,7 +726,8 @@ public final class CodexCliDriver
         if (deepSeekSecret.isPresent() && savedKey.filter(key -> !key.isBlank()).isEmpty()) {
             throw new AgentUnavailableException("DeepSeek key removed or unavailable");
         }
-        SecretRedactor toolRedactor = savedKey.or(() -> gateway.flatMap(value -> value.token().get())).map(redactor::withSecret).orElse(redactor);
+        SecretRedactor toolRedactor = savedKey.or(() -> gateway.flatMap(value -> value.token().get())).or(() -> openAiKey.flatMap(Supplier::get))
+                .map(redactor::withSecret).orElse(redactor);
         List<String> fixedWritableRoots = context.scope().fixedSandbox() ? fixedWritableRoots(context.worktree(), context.scope()) : ImmutableList.of();
         // A task tool token lives exactly as long as this session; the App Server reaches the
         // host task MCP endpoint with it and never learns the task's filesystem identity.
@@ -827,8 +863,16 @@ public final class CodexCliDriver
         String safeDetail = redactor.redact(detail == null || detail.isBlank() ? failure.getClass().getSimpleName() : detail);
         return new AgentUnavailableException(
                 "Codex CLI " + rememberAppServerVersion() + " failed during " + operation + ": "
-                        + (deepSeekSecret.isPresent() ? deepSeekFailure(safeDetail) : safeDetail),
+                        + (deepSeekSecret.isPresent() ? deepSeekFailure(safeDetail) : openAiKey.isPresent() ? openAiKeyFailure(safeDetail) : safeDetail),
                 failure);
+    }
+
+    static String openAiKeyFailure(String detail)
+    {
+        String normalized = detail.toLowerCase(Locale.ROOT);
+        return normalized.matches("(?s).*\\b(401|403)\\b.*") || normalized.contains("invalid api key") || normalized.contains("incorrect api key")
+                ? "OpenAI rejected the API key. Check the key this agent was given, then retry this turn."
+                : detail;
     }
 
     static String deepSeekFailure(String detail)
@@ -1141,7 +1185,7 @@ public final class CodexCliDriver
         @Override
         public synchronized void allowReuse()
         {
-            reuseAllowed = gateway.isEmpty() && deepSeekSecret.isEmpty() && fixedWritableRoots.isEmpty()
+            reuseAllowed = gateway.isEmpty() && deepSeekSecret.isEmpty() && openAiKey.isEmpty() && fixedWritableRoots.isEmpty()
                     && reference.contractVersion() == REVIEW_DYNAMIC_CONTRACT_VERSION && guardedReviewTools.isPresent()
                     && !context.scratchWorktree()
                     // A task's own session may carry the host's catalog tools; one-shot sessions never keep their process.
@@ -2689,6 +2733,9 @@ public final class CodexCliDriver
                     .orElse("Codex turn " + turn.status().name().toLowerCase());
             if (deepSeekSecret.isPresent()) {
                 detail = deepSeekFailure(detail);
+            }
+            else if (openAiKey.isPresent()) {
+                detail = openAiKeyFailure(detail);
             }
             Optional<String> reason = switch (state) {
                 case COMPLETED -> Optional.empty();

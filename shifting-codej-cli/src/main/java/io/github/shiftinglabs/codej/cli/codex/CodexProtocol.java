@@ -1519,6 +1519,30 @@ final class CodexProtocol
         }
     }
 
+    /** Signs the App Server in with an OpenAI API key; under the in-memory credential store it is kept nowhere else. */
+    record ApiKeyLoginParams(String type, String apiKey)
+    {
+        ApiKeyLoginParams
+        {
+            checkIdentifier(type, "type");
+            requireNonNull(apiKey, "apiKey is null");
+        }
+
+        @Override
+        public String toString()
+        {
+            return "ApiKeyLoginParams[type=" + type + "]";
+        }
+    }
+
+    record LoginAccountResponse(String type)
+    {
+        LoginAccountResponse
+        {
+            requireNonNull(type, "type is null");
+        }
+    }
+
     record TextInput(String type, String text)
             implements UserInput
     {

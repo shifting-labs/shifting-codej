@@ -72,6 +72,9 @@ class TestBuilders
     {
         assertThatThrownBy(() -> Codex.builder().account("me@example.com").gateway(URI.create("https://llm.example.com/v1"), () -> "token").build())
                 .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> Codex.builder().apiKey(() -> "sk-test").deepSeek(() -> "deepseek-key").build())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("apiKey");
         assertThatThrownBy(() -> Claude.builder().account("me@example.com").gateway(URI.create("https://llm.example.com"), () -> "token").build())
                 .isInstanceOf(IllegalStateException.class);
     }

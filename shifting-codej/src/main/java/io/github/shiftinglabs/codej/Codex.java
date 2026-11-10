@@ -63,6 +63,7 @@ public final class Codex
         private Optional<URI> gatewayUrl = Optional.empty();
         private Optional<Supplier<String>> gatewayToken = Optional.empty();
         private Optional<Supplier<String>> deepSeekKey = Optional.empty();
+        private Optional<Supplier<String>> apiKey = Optional.empty();
         private Optional<Duration> keepSessions = Optional.empty();
         private Optional<Executor> callbackExecutor = Optional.empty();
         private ToolServer toolServer = ToolServer.DEFAULT;
@@ -151,6 +152,20 @@ public final class Codex
         }
 
         /**
+         * Signs Codex in with an OpenAI API key instead of a ChatGPT login. Each Codex process signs in with the key right after it
+         * starts and keeps it only in memory: it is in neither the process's environment nor the {@linkplain #home(Path) home}, and
+         * the commands the agent runs never see it.
+         *
+         * @param key read each time a process starts, so a rotated key needs no new agent
+         * @return this builder
+         */
+        public Builder apiKey(Supplier<String> key)
+        {
+            this.apiKey = Optional.of(key);
+            return this;
+        }
+
+        /**
          * Deletes the transcripts of this agent's conversations once they were last used longer ago than {@code age}, while the agent
          * is open: first two minutes after it is built, then every six hours. A deleted conversation can no longer be resumed. Agents
          * that share a home share one sweep, which keeps the shortest time any of them sets. Default: nothing is deleted, as the CLI
@@ -203,16 +218,16 @@ public final class Codex
          * fails, the agent is still built and {@link Agent#status()} says why.
          *
          * @return the agent; close it to stop its sessions
-         * @throws IllegalStateException when more than one of {@link #account}, {@link #gateway} and {@link #deepSeek} is set
+         * @throws IllegalStateException when more than one of {@link #account}, {@link #gateway}, {@link #deepSeek} and {@link #apiKey} is set
          * @throws AgentException when the home or the state folder cannot be prepared
          */
         public Agent build()
         {
-            long logins = (account.isPresent() ? 1 : 0) + (gatewayUrl.isPresent() ? 1 : 0) + (deepSeekKey.isPresent() ? 1 : 0);
-            checkState(logins <= 1, "Choose one of account, gateway and deepSeek");
+            long logins = (account.isPresent() ? 1 : 0) + (gatewayUrl.isPresent() ? 1 : 0) + (deepSeekKey.isPresent() ? 1 : 0) + (apiKey.isPresent() ? 1 : 0);
+            checkState(logins <= 1, "Choose one of account, gateway, deepSeek and apiKey");
             return DriverAgent.codex(new DriverAgent.CodexSettings(
                     executable, home, stateDirectory, account, gatewayUrl.map(url -> new DriverAgent.Gateway(url, gatewayToken.orElseThrow())), deepSeekKey,
-                    keepSessions, callbackExecutor, toolServer));
+                    apiKey, keepSessions, callbackExecutor, toolServer));
         }
     }
 }

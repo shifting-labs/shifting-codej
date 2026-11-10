@@ -71,6 +71,7 @@ final class CodexIsolationGuard
     private final Optional<CodexLaunchProfile.DeepSeekProfile> deepSeek;
     private final Optional<String> gatewayUrl;
     private final ToolServer toolServer;
+    private final boolean apiKeyLogin;
     private final Optional<String> loginEmail;
     private boolean accountVerified;
 
@@ -92,6 +93,7 @@ final class CodexIsolationGuard
         this.deepSeek = options.deepSeek();
         this.gatewayUrl = options.gatewayUrl();
         this.toolServer = options.toolServer();
+        this.apiKeyLogin = options.apiKeyLogin();
         this.loginEmail = requireNonNull(loginEmail, "loginEmail is null");
     }
 
@@ -288,6 +290,13 @@ final class CodexIsolationGuard
                     || provider.hasNonNull("http_headers") || provider.hasNonNull("env_http_headers")
                     || provider.hasNonNull("auth") || provider.hasNonNull("gateway_oauth")) {
                 throw unavailable("Codex gateway inherited additional authentication settings");
+            }
+        }
+        if (apiKeyLogin) {
+            requireTextValue(config, "cli_auth_credentials_store", "ephemeral");
+            // The key reaches OpenAI's own provider only; a configured provider or login method would send it elsewhere.
+            if (config.hasNonNull("forced_login_method") || (config.hasNonNull("model_provider") && !config.path("model_provider").asText().equals("openai"))) {
+                throw unavailable("Codex API key launch inherited another provider or login method");
             }
         }
         if (fixed) {
@@ -532,6 +541,12 @@ final class CodexIsolationGuard
             JsonNode account = response.path("account");
             if (response.path("requiresOpenaiAuth").asBoolean(true) || !(account.isNull() || account.isMissingNode())) {
                 throw unavailable("Gateway launch can reach an OpenAI account");
+            }
+            return;
+        }
+        if (apiKeyLogin) {
+            if (!response.path("requiresOpenaiAuth").asBoolean(false) || !response.path("account").path("type").asText().equals("apiKey")) {
+                throw unavailable("Codex must use the OpenAI API key it was given");
             }
             return;
         }

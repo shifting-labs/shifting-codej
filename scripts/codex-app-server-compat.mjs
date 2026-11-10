@@ -559,6 +559,12 @@ const referenceRecordBindings = [
     component("sandbox", "sandbox", "workspace-write"),
     component("developerInstructions", "developerInstructions", ""),
   ]),
+  recordBinding("ApiKeyLoginParams", "encode", [
+    schemaSource("v2", "LoginAccountParams", "type", "apiKey"),
+  ], [component("type"), component("apiKey")]),
+  recordBinding("LoginAccountResponse", "decode", [
+    schemaSource("v2", "LoginAccountResponse", "type", "apiKey"),
+  ], [component("type")]),
   recordBinding("TextInput", "encode", [
     schemaSource("v2", "UserInput", "type", "text"),
   ], [component("type"), component("text")]),
@@ -689,6 +695,7 @@ const experimentalMethods = [
 ];
 
 const stableMethods = [
+  "account/login/start",
   "account/read",
   "model/list",
   "config/read",

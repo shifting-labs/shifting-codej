@@ -212,6 +212,42 @@ class TestCodexCliDriver
     }
 
     @Test
+    void anApiKeyLaneSignsInWithTheKeyAndKeepsItOutOfArgumentsAndEnvironment()
+            throws Exception
+    {
+        supervisor.versionOutput = "codex-cli 0.164.0";
+        CodexHome.prepare(codexHome());
+        AtomicReference<Optional<String>> key = new AtomicReference<>(Optional.of("sk-fake-openai-key"));
+        CodexCliDriver driver = CodexCliDriver.apiKey("/fake/codex", "0.164.0", objectMapper, supervisor, codexHome(),
+                new PermissionBroker(objectMapper),
+                new AgentLaneId("codex-account-123e4567-e89b-12d3-a456-426614174001"), "Codex · OpenAI API key", key::get);
+        assertThat(driver.probe().available()).isTrue();
+        assertThat(driver.quota().windows()).isEmpty();
+        try (AgentSession session = driver.open(context(Optional.empty(), new AtomicReference<>()), events::add)) {
+            RunningTurn turn = session.start(command("explain this"));
+            assertThat(supervisor.server().loginRequests).containsExactly(objectMapper.readTree("{\"type\":\"apiKey\",\"apiKey\":\"sk-fake-openai-key\"}"));
+            assertThat(supervisor.serverArgv.getLast()).contains("cli_auth_credentials_store=\"ephemeral\"")
+                    .noneMatch(argument -> argument.contains("sk-fake-openai-key") || argument.contains("model_provider"));
+            assertThat(supervisor.environments.getLast()).doesNotContainValue("sk-fake-openai-key").doesNotContainKey("OPENAI_API_KEY");
+            supervisor.server().completeTurnWithSummary("[{\"type\":\"agentMessage\",\"id\":\"answer\",\"text\":\"Explained. sk-fake-openai-key\",\"phase\":\"final_answer\"}]");
+            AgentTurnResult result = turn.completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertThat(result.state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(result.finalResponse()).contains("Explained. [REDACTED]");
+        }
+        key.set(Optional.of(" "));
+        assertThat(driver.probe().readiness()).isEqualTo(AgentProviderStatus.Readiness.AUTHENTICATION_REQUIRED);
+        assertThatThrownBy(() -> driver.open(context(Optional.empty(), new AtomicReference<>()), events::add)).hasMessageContaining("OpenAI API key removed");
+    }
+
+    @Test
+    void namesARejectedOpenAiKey()
+    {
+        assertThat(CodexCliDriver.openAiKeyFailure("unexpected status 401 Unauthorized: Incorrect API key provided: sk-proj-***"))
+                .isEqualTo("OpenAI rejected the API key. Check the key this agent was given, then retry this turn.");
+        assertThat(CodexCliDriver.openAiKeyFailure("stream disconnected before completion")).isEqualTo("stream disconnected before completion");
+    }
+
+    @Test
     void readOnlyDiscussionsReceiveTheirContextToolWithoutWritePermissions()
             throws Exception
     {
@@ -4930,6 +4966,7 @@ class TestCodexCliDriver
         private final List<String> turnSettings = new CopyOnWriteArrayList<>();
         private final List<String> turnInputs = new CopyOnWriteArrayList<>();
         private final List<JsonNode> threadRequests = new CopyOnWriteArrayList<>();
+        private final List<JsonNode> loginRequests = new CopyOnWriteArrayList<>();
         private final List<JsonNode> turnRequests = new CopyOnWriteArrayList<>();
         private final List<String> steerRequests = new CopyOnWriteArrayList<>();
         private volatile boolean refuseSteer;
@@ -5237,10 +5274,16 @@ class TestCodexCliDriver
                     }
                     respond(id, requirements);
                 }
+                case "account/login/start" -> {
+                    loginRequests.add(message.path("params").deepCopy());
+                    respond(id, "{\"type\":\"apiKey\"}");
+                }
                 case "account/read" -> {
                     accountReads.incrementAndGet();
-                    // What Codex 0.164.0 reports for a provider that does not use OpenAI auth with ephemeral credentials.
-                    respond(id, (argv.contains("model_provider=\"deepseek\"") || argv.contains("model_provider=\"codej_gateway\"")) ? "{\"account\":null,\"requiresOpenaiAuth\":false}" : account.get());
+                    // What Codex 0.164.0 reports for a provider that does not use OpenAI auth with ephemeral credentials,
+                    // and for an App Server signed in with an API key.
+                    respond(id, (argv.contains("model_provider=\"deepseek\"") || argv.contains("model_provider=\"codej_gateway\"")) ? "{\"account\":null,\"requiresOpenaiAuth\":false}"
+                            : loginRequests.isEmpty() ? account.get() : "{\"requiresOpenaiAuth\":true,\"account\":{\"type\":\"apiKey\"}}");
                 }
                 case "config/read" -> respond(id, configReadResponse().toString());
                 case "skills/list" -> respond(id, "{\"data\":[{\"cwd\":\""

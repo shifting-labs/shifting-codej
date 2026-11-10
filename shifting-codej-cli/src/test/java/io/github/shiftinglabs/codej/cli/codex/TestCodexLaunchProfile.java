@@ -131,6 +131,23 @@ class TestCodexLaunchProfile
     }
 
     @Test
+    void signsInWithAnApiKeyThroughTheInMemoryStoreAndOpenAisOwnProvider()
+    {
+        CodexLaunchProfile.Options options = new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false,
+                Optional.empty(), Optional.empty(), ToolServer.DEFAULT, true);
+
+        List<String> arguments = CodexLaunchProfile.arguments("codex", options, Optional.empty());
+
+        assertThat(arguments).containsSequence("-c", "cli_auth_credentials_store=\"ephemeral\"")
+                .noneMatch(argument -> argument.contains("model_provider") || argument.contains("cli_auth_credentials_store=\"file\""));
+        assertThat(CodexLaunchProfile.threadConfig(options, false)).doesNotContainKey("model_provider");
+        assertThatThrownBy(() -> new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false,
+                Optional.empty(), Optional.of("https://gateway.example.com/v1"), ToolServer.DEFAULT, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("one provider");
+    }
+
+    @Test
     void namesTheToolServerAndGatewayAfterTheHostApplication()
     {
         CodexLaunchProfile.ManagedToolsLaunch tools = new CodexLaunchProfile.ManagedToolsLaunch(

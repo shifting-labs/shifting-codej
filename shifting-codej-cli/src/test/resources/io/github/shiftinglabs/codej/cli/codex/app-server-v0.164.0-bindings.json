@@ -3273,6 +3273,45 @@
       ]
     },
     {
+      "javaType": "ApiKeyLoginParams",
+      "mode": "encode",
+      "sources": [
+        "v2#LoginAccountParams[type=apiKey]"
+      ],
+      "components": [
+        {
+          "javaName": "type",
+          "wireName": "type",
+          "required": true,
+          "nullable": false,
+          "sample": "apiKey"
+        },
+        {
+          "javaName": "apiKey",
+          "wireName": "apiKey",
+          "required": true,
+          "nullable": false,
+          "sample": "value"
+        }
+      ]
+    },
+    {
+      "javaType": "LoginAccountResponse",
+      "mode": "decode",
+      "sources": [
+        "v2#LoginAccountResponse[type=apiKey]"
+      ],
+      "components": [
+        {
+          "javaName": "type",
+          "wireName": "type",
+          "required": true,
+          "nullable": false,
+          "sample": "apiKey"
+        }
+      ]
+    },
+    {
       "javaType": "TextInput",
       "mode": "encode",
       "sources": [
