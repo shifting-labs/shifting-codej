@@ -1,0 +1,95 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.shiftinglabs.codej.cli.codex;
+
+import io.github.shiftinglabs.codej.cli.ProviderSessions;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
+import java.util.Set;
+
+import static java.util.Objects.requireNonNull;
+
+/**
+ * The SDK's own Codex home.
+ *
+ * <p>Every Codex process the SDK starts runs with {@code CODEX_HOME} pointing here, so its login,
+ * config, sessions and rules are the SDK's alone and nothing from the user's {@code ~/.codex}
+ * (rules, hooks, plugins, MCP servers) reaches a task. The user signs this home in once with the
+ * command readiness shows; the SDK never reads, copies or links the user's own credentials.
+ */
+public final class CodexHome
+{
+    /** Codex writes its rollout transcripts into {@code sessions/YYYY/MM/DD}. */
+    private static final String SESSIONS = "sessions";
+    private static final int DAY_DEPTH = 3;
+
+    private CodexHome() {}
+
+    /**
+     * Creates the home if it does not exist and keeps it owner-only, with an empty user config so
+     * Codex has a user layer that grants nothing. A login already stored there is left alone.
+     *
+     * @param home the directory to prepare
+     * @return the same path, for chaining into the driver
+     * @throws IOException when the directory or its config cannot be created
+     */
+    public static Path prepare(Path home)
+            throws IOException
+    {
+        requireNonNull(home, "home is null");
+        Files.createDirectories(home);
+        // Re-applied every start: the user may have created the directory by signing in first.
+        Files.setPosixFilePermissions(home, PosixFilePermissions.fromString("rwx------"));
+        Path config = home.resolve("config.toml");
+        if (Files.notExists(config)) {
+            Files.createFile(config);
+            Files.setPosixFilePermissions(config, PosixFilePermissions.fromString("rw-------"));
+        }
+        return home;
+    }
+
+    /**
+     * Deletes the day partitions whose rollouts have all gone untouched since a cutoff.
+     *
+     * @param home the Codex home to prune
+     * @param deleteBefore the instant every rollout in a day must predate for that day to be deleted
+     * @return how many day directories were deleted
+     * @throws IOException when the sessions tree cannot be read or a day cannot be deleted
+     */
+    public static int pruneSessions(Path home, Instant deleteBefore)
+            throws IOException
+    {
+        requireNonNull(home, "home is null");
+        return ProviderSessions.prune(home.resolve(SESSIONS), DAY_DEPTH, deleteBefore);
+    }
+
+    static void writeAtomically(Path target, byte[] content, Set<PosixFilePermission> permissions)
+            throws IOException
+    {
+        Path staged = Files.createTempFile(target.getParent(), ".codej-", ".tmp", PosixFilePermissions.asFileAttribute(permissions));
+        try {
+            Files.write(staged, content);
+            Files.move(staged, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        }
+        finally {
+            Files.deleteIfExists(staged);
+        }
+    }
+}

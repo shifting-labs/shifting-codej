@@ -1,0 +1,475 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.shiftinglabs.codej.cli.codex;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.github.shiftinglabs.codej.cli.mcp.ToolServer;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class TestCodexLaunchProfile
+{
+    @TempDir
+    private Path temporary;
+
+    @Test
+    void sharesInteractiveCodexPermissionsWithDeepSeek()
+            throws Exception
+    {
+        Path catalog = temporary.resolve("home/deepseek-models.json");
+        DeepSeekModelCatalog.prepare(catalog);
+        DeepSeekModelCatalog.verify(catalog);
+        JsonNode models = new ObjectMapper().readTree(Files.readString(catalog)).path("models");
+        assertThat(models.size()).isEqualTo(2);
+        for (JsonNode model : models) {
+            assertThat(model.path("slug").asText()).isNotBlank();
+            assertThat(model.path("auto_review_model_override").asText()).isEqualTo(model.path("slug").asText());
+        }
+        URI proxy = URI.create("http://127.0.0.1:12345/fixture/");
+        CodexLaunchProfile.DeepSeekProfile deepSeek = new CodexLaunchProfile.DeepSeekProfile(catalog, proxy);
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V1, false, ImmutableList.of(), true, true, false, false, Optional.of(deepSeek)),
+                Optional.empty());
+        List<String> codexArguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V1, false, ImmutableList.of(), true, true, false, false, Optional.empty()),
+                Optional.empty());
+        assertThat(arguments).containsSequence("-c", "model_provider=\"deepseek\"");
+        assertThat(arguments).containsSequence("-c", "model_providers.deepseek.base_url=\"" + proxy + "\"");
+        assertThat(arguments).containsSequence("-c", "model_providers.deepseek.request_max_retries=0");
+        assertThat(arguments.subList(arguments.indexOf("web_search=\"live\"") - 1, arguments.size()))
+                .containsExactlyElementsOf(codexArguments.subList(codexArguments.indexOf("web_search=\"live\"") - 1, codexArguments.size()));
+        assertThat(arguments).noneMatch(value -> value.contains("DEEPSEEK_API_KEY") || value.contains("sk-secret")
+                || value.contains("experimental_bearer_token") || value.contains("chatgpt") || value.contains("default_permissions"));
+        assertThat(CodexLaunchProfile.expectedShellEnvironmentIncludeOnly())
+                .doesNotContain("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "CODEX_HOME");
+        var threadConfig = CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V1, false, ImmutableList.of(), true, true, false, false, Optional.of(deepSeek)),
+                false);
+        var codexThreadConfig = CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V1, false, ImmutableList.of(), true, true, false, false, Optional.empty()),
+                false);
+        assertThat(threadConfig)
+                .containsEntry("model_provider", "deepseek")
+                .containsEntry("model_catalog_json", catalog.toString())
+                .containsAllEntriesOf(codexThreadConfig)
+                .hasSize(codexThreadConfig.size() + 3)
+                .doesNotContainKeys("default_permissions", "permissions");
+        assertThatThrownBy(() -> {
+            Files.writeString(catalog, "{}");
+            DeepSeekModelCatalog.verify(catalog);
+        }).hasMessageContaining("does not match the SDK's launch profile");
+        Files.writeString(catalog.getParent().resolve("config.toml"), "web_search = \"live\"\n");
+        DeepSeekModelCatalog.prepare(catalog);
+        DeepSeekModelCatalog.verify(catalog);
+        Path linkedHome = temporary.resolve("linked-home");
+        assertThatThrownBy(() -> {
+            Files.createSymbolicLink(linkedHome, catalog.getParent());
+            DeepSeekModelCatalog.verifyHome(linkedHome);
+        }).hasMessageContaining("cannot use a symbolic link");
+    }
+
+    @Test
+    void acceptsCodexProjectTrustAndOtherUserConfiguration()
+            throws Exception
+    {
+        Path catalog = temporary.resolve("home/deepseek-models.json");
+        DeepSeekModelCatalog.prepare(catalog);
+        Path config = catalog.getParent().resolve("config.toml");
+        String trustedProjects = "[projects.\"" + temporary.resolve("repository") + "\"]\n"
+                + "trust_level = \"trusted\"\n\n"
+                + "[projects.\"" + temporary.resolve("other-repository") + "\"]\n"
+                + "trust_level = \"trusted\"\n";
+        Files.writeString(config, trustedProjects);
+
+        DeepSeekModelCatalog.verifyHome(catalog.getParent());
+        DeepSeekModelCatalog.prepare(catalog);
+        DeepSeekModelCatalog.verify(catalog);
+
+        Files.writeString(config, trustedProjects + "web_search = \"live\"\n");
+        DeepSeekModelCatalog.verifyHome(catalog.getParent());
+        DeepSeekModelCatalog.prepare(catalog);
+        DeepSeekModelCatalog.verify(catalog);
+    }
+
+    @Test
+    void givesActionableDeepSeekTurnErrorsWithoutEchoingProviderDetails()
+    {
+        assertThat(CodexCliDriver.deepSeekFailure("HTTP 401: invalid api key sk-secret"))
+                .contains("rejected this saved API key")
+                .doesNotContain("sk-secret");
+        assertThat(CodexCliDriver.deepSeekFailure("HTTP 402: insufficient_balance"))
+                .contains("insufficient balance")
+                .contains("explicitly retry");
+        assertThat(CodexCliDriver.deepSeekFailure("model_not_found: deepseek-old"))
+                .contains("selected model")
+                .doesNotContain("deepseek-old");
+    }
+
+    @Test
+    void namesTheToolServerAndGatewayAfterTheHostApplication()
+    {
+        CodexLaunchProfile.ManagedToolsLaunch tools = new CodexLaunchProfile.ManagedToolsLaunch(
+                URI.create("http://127.0.0.1:12346/task/mcp"), "Task tools", ImmutableList.of("report"), true, Optional.empty());
+        CodexLaunchProfile.Options options = new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false,
+                Optional.empty(), Optional.of("https://gateway.example.com/v1"), new ToolServer("my_app"));
+
+        List<String> arguments = CodexLaunchProfile.arguments("codex", options, Optional.of(tools));
+
+        assertThat(arguments).containsSequence("-c", "mcp_servers.my_app.url=\"" + tools.endpoint() + "\"");
+        assertThat(arguments).contains("mcp_servers.my_app.tools={\"report\"={approval_mode=\"approve\"}}", "model_provider=\"my_app_gateway\"");
+        assertThat(arguments).noneMatch(argument -> argument.contains("codej"));
+        assertThat(CodexLaunchProfile.threadConfig(options, true)).containsEntry("model_provider", "my_app_gateway");
+    }
+
+    @Test
+    void keepsTaskMcpBearerOutOfCodexArguments()
+    {
+        CodexLaunchProfile.DeepSeekProfile profile = new CodexLaunchProfile.DeepSeekProfile(
+                temporary.resolve("deepseek-models.json"), URI.create("http://127.0.0.1:12345/responses/"));
+        CodexLaunchProfile.ManagedToolsLaunch tools = new CodexLaunchProfile.ManagedToolsLaunch(
+                URI.create("http://127.0.0.1:12346/task/mcp"), "Task tools", ImmutableList.of("development_result_report"), false, Optional.empty());
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false, Optional.of(profile)),
+                Optional.of(tools));
+        assertThat(arguments).containsSequence("-c", "mcp_servers.codej.url=\"" + tools.endpoint() + "\"");
+        assertThat(arguments).contains("mcp_servers.codej.tools={\"development_result_report\"={approval_mode=\"approve\"}}");
+        assertThat(arguments).noneMatch(argument -> argument.contains("bearer_token_env_var") || argument.contains("CODEJ_TOOL_TOKEN"));
+    }
+
+    @Test
+    void sharesCiCodexPermissionsWithDeepSeek()
+    {
+        List<String> roots = ImmutableList.of("/task", "/repo/.git/worktrees/task", "/repo/.git/refs/heads/task.lock");
+        CodexLaunchProfile.DeepSeekProfile profile = new CodexLaunchProfile.DeepSeekProfile(
+                temporary.resolve("deepseek-models.json"), URI.create("http://127.0.0.1:12345/responses/"));
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, roots, true, false, false, false, Optional.of(profile)),
+                Optional.empty());
+        List<String> codexArguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, roots, true, false, false, false, Optional.empty()),
+                Optional.empty());
+        assertThat(arguments).containsSequence("-c", "approval_policy=\"on-request\"");
+        assertThat(arguments.subList(arguments.indexOf("web_search=\"disabled\"") - 1, arguments.size()))
+                .containsExactlyElementsOf(codexArguments.subList(codexArguments.indexOf("web_search=\"disabled\"") - 1, codexArguments.size()));
+        var codexThreadConfig = CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, roots, true, false, false, false, Optional.empty()),
+                false);
+        assertThat(CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, roots, true, false, false, false, Optional.of(profile)),
+                false))
+                .containsEntry("approval_policy", "on-request")
+                .containsAllEntriesOf(codexThreadConfig)
+                .hasSize(codexThreadConfig.size() + 3)
+                .doesNotContainKeys("default_permissions", "permissions");
+    }
+
+    @Test
+    void isolatesCatalogCapabilitiesWithoutSubagents()
+    {
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "/usr/local/bin/codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                Optional.empty());
+
+        assertCommonIsolation(arguments);
+        assertThat(arguments).containsSequence("--disable", "multi_agent");
+        assertThat(arguments).containsSequence("--disable", "multi_agent_v2");
+        assertThat(arguments).doesNotContain("agents.max_depth=2");
+    }
+
+    @Test
+    void enablesOnlyV1AtRecursiveDepthTwo()
+    {
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "/usr/local/bin/codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V1, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                Optional.empty());
+
+        assertCommonIsolation(arguments);
+        assertThat(arguments).containsSequence("--enable", "multi_agent");
+        assertThat(arguments).containsSequence("--disable", "multi_agent_v2");
+        assertThat(arguments).containsSequence("-c", "agents.max_depth=2");
+    }
+
+    @Test
+    void enablesOnlyV2WithoutAV1DepthSetting()
+    {
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "/usr/local/bin/codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V2, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                Optional.empty());
+
+        assertCommonIsolation(arguments);
+        assertThat(arguments).containsSequence("--disable", "multi_agent");
+        assertThat(arguments).containsSequence("--enable", "multi_agent_v2");
+        assertThat(arguments).doesNotContain("agents.max_depth=2");
+    }
+
+    @Test
+    void disablesAndReportsEveryExecutionFeatureForTextOnlyRequests()
+    {
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "/usr/local/bin/codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, true, ImmutableList.of(), false, false, false, false, Optional.empty()),
+                Optional.empty());
+
+        assertThat(arguments).containsSequence("-c", "web_search=\"disabled\"");
+        assertThat(arguments).containsSequence("-c", "approvals_reviewer=\"auto_review\"");
+        assertThat(arguments).containsSequence("--disable", "guardian_approval");
+        assertThat(CodexLaunchProfile.expectedFeatures(CodexLaunchProfile.ChildProfile.NONE, true, false, false))
+                .containsEntry("guardian_approval", false);
+        assertThat(CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, true, ImmutableList.of(), false, false, false, false, Optional.empty()),
+                false))
+                .containsEntry("web_search", "disabled");
+        for (String feature : List.of("code_mode", "js_repl", "shell_snapshot", "shell_tool", "unified_exec")) {
+            assertThat(arguments).containsSequence("--disable", feature);
+            assertThat(CodexLaunchProfile.expectedFeatures(CodexLaunchProfile.ChildProfile.NONE, true, false, false))
+                    .containsEntry(feature, false);
+        }
+    }
+
+    @Test
+    void turnsOnTheQuestionToolOnlyForASessionThatMayAskTheUser()
+    {
+        List<String> asking = CodexLaunchProfile.arguments(
+                "/usr/local/bin/codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, true, Optional.empty()),
+                Optional.empty());
+        List<String> silent = CodexLaunchProfile.arguments(
+                "/usr/local/bin/codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                Optional.empty());
+
+        assertThat(asking).containsSequence("--enable", CodexLaunchProfile.ASK_USER_FEATURE);
+        assertThat(silent).doesNotContain(CodexLaunchProfile.ASK_USER_FEATURE);
+        // The isolation guard checks config/read against these, and a resumed thread repeats them.
+        assertThat(CodexLaunchProfile.expectedFeatures(CodexLaunchProfile.ChildProfile.NONE, false, false, true)).containsEntry(CodexLaunchProfile.ASK_USER_FEATURE, true);
+        assertThat(CodexLaunchProfile.expectedFeatures(CodexLaunchProfile.ChildProfile.NONE, false, false, false)).doesNotContainKey(CodexLaunchProfile.ASK_USER_FEATURE);
+        assertThat(CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, true, Optional.empty()),
+                false))
+                .containsEntry("features", CodexLaunchProfile.expectedFeatures(CodexLaunchProfile.ChildProfile.NONE, false, false, true));
+    }
+
+    @Test
+    void pinsAgentEnablementAtProcessAndResumedThreadScope()
+    {
+        for (CodexLaunchProfile.ChildProfile childProfile : CodexLaunchProfile.ChildProfile.values()) {
+            boolean enabled = childProfile != CodexLaunchProfile.ChildProfile.NONE;
+            assertThat(CodexLaunchProfile.arguments(
+                    "codex",
+                    new CodexLaunchProfile.Options(childProfile, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                    Optional.empty()))
+                    .containsSequence("-c", "agents.enabled=" + enabled);
+            assertThat(CodexLaunchProfile.threadConfig(new CodexLaunchProfile.Options(childProfile, false, ImmutableList.of(), false, true, false, false, Optional.empty()), false))
+                    .containsEntry("agents", childProfile == CodexLaunchProfile.ChildProfile.V1
+                            ? ImmutableMap.of("enabled", true, "max_depth", 2)
+                            : ImmutableMap.of("enabled", enabled));
+        }
+    }
+
+    @Test
+    void offersThePlanToolAtProcessAndThreadScopeExceptForTextOnlyRequests()
+    {
+        CodexLaunchProfile.Options task =
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false, Optional.empty());
+        assertThat(CodexLaunchProfile.arguments("/usr/local/bin/codex", task, Optional.empty())).containsSequence("-c", "tools.update_plan.enabled=true");
+        assertThat(CodexLaunchProfile.threadConfig(task, false)).containsEntry("tools", ImmutableMap.of("update_plan", ImmutableMap.of("enabled", true)));
+
+        CodexLaunchProfile.Options textOnly =
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, true, ImmutableList.of(), false, false, false, false, Optional.empty());
+        assertThat(CodexLaunchProfile.arguments("/usr/local/bin/codex", textOnly, Optional.empty())).doesNotContain("tools.update_plan.enabled=true");
+        assertThat(CodexLaunchProfile.threadConfig(textOnly, false)).doesNotContainKey("tools");
+    }
+
+    @Test
+    void enablesLiveWebForEveryTaskThreadProfile()
+    {
+        for (CodexLaunchProfile.ChildProfile childProfile : CodexLaunchProfile.ChildProfile.values()) {
+            assertThat(CodexLaunchProfile.threadConfig(new CodexLaunchProfile.Options(childProfile, false, ImmutableList.of(), false, true, false, false, Optional.empty()), false))
+                    .containsEntry("web_search", "live");
+            assertThat(CodexLaunchProfile.threadConfig(new CodexLaunchProfile.Options(childProfile, false, ImmutableList.of(), false, true, false, false, Optional.empty()), true))
+                    .containsEntry("web_search", "live");
+        }
+    }
+
+    @Test
+    void disablesNativeMemoriesAtProcessAndResumedThreadScope()
+    {
+        CodexLaunchProfile.ManagedToolsLaunch launch = new CodexLaunchProfile.ManagedToolsLaunch(
+                URI.create("http://127.0.0.1:9000/mcp"), "Learn", ImmutableList.of("repository_context_read"), true, Optional.empty());
+        for (CodexLaunchProfile.ChildProfile childProfile : CodexLaunchProfile.ChildProfile.values()) {
+            assertThat(CodexLaunchProfile.arguments(
+                    "codex",
+                    new CodexLaunchProfile.Options(childProfile, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                    Optional.of(launch)))
+                    .containsSequence("--disable", "memories");
+            assertThat(CodexLaunchProfile.expectedFeatures(childProfile, false, false, false)).containsEntry("memories", false).containsEntry("goals", false);
+            assertThat(CodexLaunchProfile.threadConfig(new CodexLaunchProfile.Options(childProfile, false, ImmutableList.of(), false, true, false, false, Optional.empty()), false))
+                    .containsEntry("features", CodexLaunchProfile.expectedFeatures(childProfile, false, false, false));
+            assertThat(CodexLaunchProfile.threadConfig(new CodexLaunchProfile.Options(childProfile, false, ImmutableList.of(), false, true, false, false, Optional.empty()), true))
+                    .containsEntry("features", CodexLaunchProfile.expectedFeatures(childProfile, false, false, false));
+        }
+    }
+
+    @Test
+    void approvesOnlyTheRegisteredTaskToolInventory()
+    {
+        List<String> tools = ImmutableList.of("repository_context_read", "repository_context_prepare");
+        CodexLaunchProfile.ManagedToolsLaunch launch = new CodexLaunchProfile.ManagedToolsLaunch(URI.create("http://127.0.0.1:9000/mcp"), "Learn", tools, true, Optional.empty());
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                Optional.of(launch));
+        assertThat(arguments).containsSequence("-c", "mcp_servers.codej.tools={"
+                + "\"repository_context_read\"={approval_mode=\"approve\"},\"repository_context_prepare\"={approval_mode=\"approve\"}}");
+        assertThat(arguments).contains("mcp_servers.codej.default_tools_approval_mode=\"approve\"");
+        assertThat(arguments).contains("approval_policy=\"on-request\"");
+        assertThat(CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                Optional.empty()))
+                .noneMatch(argument -> argument.startsWith("mcp_servers."));
+    }
+
+    @Test
+    void toolNamesCannotEscapeTheTaskApprovalTable()
+    {
+        CodexLaunchProfile.ManagedToolsLaunch launch = new CodexLaunchProfile.ManagedToolsLaunch(
+                URI.create("http://127.0.0.1:9000/mcp"), "Learn", ImmutableList.of("review_\".other\\tool"), true, Optional.empty());
+        assertThat(CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), false, true, false, false, Optional.empty()),
+                Optional.of(launch)))
+                .contains("mcp_servers.codej.tools={\"review_\\\".other\\\\tool\"={approval_mode=\"approve\"}}");
+    }
+
+    @Test
+    void pinsUnattendedCiAtProcessAndThreadScopeForEveryChildProfile()
+    {
+        List<String> roots = ImmutableList.of("/task", "/repo/.git/worktrees/task", "/repo/.git/refs/heads/task.lock");
+        for (CodexLaunchProfile.ChildProfile childProfile : CodexLaunchProfile.ChildProfile.values()) {
+            List<String> arguments = CodexLaunchProfile.arguments(
+                    "/usr/local/bin/codex",
+                    new CodexLaunchProfile.Options(childProfile, false, roots, true, false, false, false, Optional.empty()),
+                    Optional.empty());
+            assertThat(arguments).containsSequence("-c", "approval_policy=\"on-request\"");
+            assertThat(arguments).containsSequence("-c", "approvals_reviewer=\"auto_review\"");
+            assertThat(arguments).containsSequence("-c", "web_search=\"disabled\"");
+            assertThat(arguments).containsSequence("--enable", "guardian_approval");
+            assertThat(arguments).containsSequence("-c", "sandbox_workspace_write.network_access=true");
+            assertThat(arguments).containsSequence("-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true");
+            assertThat(arguments).containsSequence("-c", "sandbox_workspace_write.exclude_slash_tmp=true");
+            assertThat(arguments).noneMatch(argument -> argument.startsWith("auto_review.policy="));
+            assertThat(CodexLaunchProfile.threadConfig(new CodexLaunchProfile.Options(childProfile, false, roots, true, false, false, false, Optional.empty()), true))
+                    .containsEntry("approval_policy", "on-request")
+                    .containsEntry("approvals_reviewer", "auto_review")
+                    .containsEntry("web_search", "disabled")
+                    .containsEntry("sandbox_workspace_write", CodexLaunchProfile.fixedSandboxConfig(roots, true))
+                    .containsEntry("project_doc_max_bytes", 0)
+                    .doesNotContainKey("auto_review");
+            assertThat(CodexLaunchProfile.expectedFeatures(childProfile, false, false, false)).containsEntry("guardian_approval", true);
+        }
+    }
+
+    @Test
+    void preservesPunctuationInsideWritablePaths()
+    {
+        List<String> roots = ImmutableList.of("/Work, Projects/task", "/repo/quote\"and\\slash");
+        assertThat(CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, roots, true, false, false, false, Optional.empty()),
+                Optional.empty()))
+                .contains("sandbox_workspace_write.writable_roots=[\"/Work, Projects/task\",\"/repo/quote\\\"and\\\\slash\"]");
+    }
+
+    @Test
+    void keepsCredentialsOutOfTheInteractiveShell()
+    {
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V1, false, ImmutableList.of(), true, true, false, false, Optional.empty()),
+                Optional.empty());
+        assertThat(arguments).contains("shell_environment_policy.inherit=\"core\"", "shell_environment_policy.ignore_default_excludes=false");
+        assertThat(arguments).containsSequence("-c", "sandbox_workspace_write.network_access=true");
+        assertThat(CodexLaunchProfile.expectedShellEnvironmentIncludeOnly())
+                .doesNotContain("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME", "SSH_AUTH_SOCK",
+                        "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "CODEX_HOME", "CODEJ_TOOL_TOKEN", "GH_REPO", "GIT_DIR");
+        assertThat(CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.V1, false, ImmutableList.of(), true, true, false, false, Optional.empty()),
+                false))
+                .containsEntry("shell_environment_policy", CodexLaunchProfile.expectedShellEnvironmentPolicy());
+        assertThat(CodexLaunchProfile.expectedShellEnvironmentIncludeOnly())
+                .doesNotContain("GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME");
+    }
+
+    @Test
+    void privateReviewKeepsCredentialsOutOfTheShell()
+    {
+        List<String> arguments = CodexLaunchProfile.arguments(
+                "codex",
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), true, true, true, false, Optional.empty()),
+                Optional.empty());
+        assertThat(arguments).containsSequence("-c", "approvals_reviewer=\"auto_review\"");
+        assertThat(arguments).containsSequence("--enable", "guardian_approval");
+        assertThat(arguments).contains("shell_environment_policy.inherit=\"core\"", "shell_environment_policy.ignore_default_excludes=false");
+        assertThat(CodexLaunchProfile.expectedShellEnvironmentIncludeOnly())
+                .doesNotContain("GH_HOST", "GH_CONFIG_DIR", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME",
+                        "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+                        "OPENAI_API_KEY", "CODEX_HOME", "CODEJ_TOOL_TOKEN");
+        assertThat(CodexLaunchProfile.threadConfig(
+                new CodexLaunchProfile.Options(CodexLaunchProfile.ChildProfile.NONE, false, ImmutableList.of(), true, true, true, false, Optional.empty()),
+                false))
+                .containsEntry("shell_environment_policy", CodexLaunchProfile.expectedShellEnvironmentPolicy())
+                .containsEntry("features", CodexLaunchProfile.expectedFeatures(CodexLaunchProfile.ChildProfile.NONE, false, true, false));
+        assertThat(CodexLaunchProfile.expectedFeatures(CodexLaunchProfile.ChildProfile.NONE, false, true, false))
+                .containsEntry("guardian_approval", true);
+    }
+
+    private static void assertCommonIsolation(List<String> arguments)
+    {
+        assertThat(arguments).startsWith("/usr/local/bin/codex", "app-server", "--listen", "stdio://");
+        // Launching without these would accept whatever the host installation defaults to.
+        assertThat(arguments).contains("--strict-config");
+        assertThat(arguments).containsSequence("--enable", "skip_host_skill_discovery");
+        assertThat(arguments).containsSequence("--enable", "guardian_approval");
+        assertThat(arguments).containsSequence("--disable", "guardianv2");
+        assertThat(arguments).containsSequence("--disable", "guardian_ext");
+        assertThat(arguments).containsSequence("-c", "web_search=\"live\"");
+        // The host application supplies the repository's guideline files itself, so Codex must not load AGENTS.md from the worktree.
+        assertThat(arguments).containsSequence("-c", "project_doc_max_bytes=0");
+        assertThat(arguments).contains("shell_environment_policy.include_only=[\"HOME\",\"LANG\",\"LC_ALL\",\"LOGNAME\"," + "\"PATH\",\"SHELL\",\"TERM\",\"TMPDIR\",\"USER\"]");
+        for (String feature : ImmutableList.of("apps", "goals", "hooks", "memories", "plugins", "computer_use", "browser_use", "network_proxy", "skill_search")) {
+            assertThat(arguments).containsSequence("--disable", feature);
+        }
+    }
+}

@@ -1,0 +1,141 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.shiftinglabs.codej.cli.process;
+
+import com.google.common.collect.ImmutableList;
+import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+import static com.google.common.base.Preconditions.checkState;
+import static io.github.shiftinglabs.codej.cli.driver.Checks.isSha;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
+import static java.util.Objects.requireNonNull;
+
+/** Writable Git metadata for one linked task worktree, excluding sibling branches and shared configuration. */
+public final class GitWorktreeWriteRoots
+{
+    private static final int MAXIMUM_METADATA_BYTES = 4096;
+
+    /**
+     * Files in the worktree's Git directory that ordinary work never writes but every Git command reads to find the repository
+     * and its settings. Planted, they would steer the SDK's own unsandboxed Git to another configuration.
+     */
+    public static final List<String> PROTECTED_METADATA = ImmutableList.of("commondir", "gitdir", "config.worktree");
+
+    private GitWorktreeWriteRoots() {}
+
+    public static List<String> writableRoots(Path worktree)
+    {
+        requireNonNull(worktree, "worktree is null");
+        try {
+            Path cwd = worktree.toRealPath();
+            checkState(Files.isDirectory(cwd), "Agent worktree is not a directory");
+            Path gitFile = cwd.resolve(".git");
+            String pointer = metadata(gitFile);
+            checkState(pointer.startsWith("gitdir: "), "Agent Git writes require a linked worktree .git file");
+            Path gitDirectory = canonicalDirectory(cwd.resolve(pointer.substring("gitdir: ".length())));
+            Path commonDirectory = canonicalDirectory(gitDirectory.resolve(metadata(gitDirectory.resolve("commondir"))));
+            checkState(gitDirectory.getParent().equals(commonDirectory.resolve("worktrees")), "Agent Git directory is outside the common worktrees directory");
+            Path backPointer = gitDirectory.resolve(metadata(gitDirectory.resolve("gitdir")));
+            requireUnlinkedPath(backPointer);
+            checkState(backPointer.toRealPath().equals(gitFile), "Agent Git back-pointer does not match the worktree");
+            String head = metadata(gitDirectory.resolve("HEAD"));
+            Path objects = canonicalDirectory(commonDirectory.resolve("objects"));
+            if (!head.startsWith("ref: refs/heads/")) {
+                requireRebase(gitDirectory, head);
+                return ImmutableList.of(cwd.toString(), gitDirectory.toString(), objects.toString());
+            }
+            String ref = head.substring("ref: ".length());
+            checkState(validRef(ref), "Agent branch ref is unsafe");
+            Path branch = commonDirectory.resolve(ref);
+            Path reflog = commonDirectory.resolve("logs").resolve(ref);
+            ImmutableList<Path> roots = ImmutableList.of(cwd, gitDirectory, objects, branch, Path.of(branch + ".lock"), reflog, Path.of(reflog + ".lock"));
+            for (Path root : roots) {
+                requireUnlinkedPath(root);
+            }
+            for (Path root : roots.subList(3, roots.size())) {
+                checkState(!Files.exists(root, NOFOLLOW_LINKS) || Files.isRegularFile(root, NOFOLLOW_LINKS), "Agent branch metadata is not a regular file: %s", root);
+            }
+            return roots.stream().map(Path::toString).collect(ImmutableList.toImmutableList());
+        }
+        catch (IOException failure) {
+            throw new AgentUnavailableException("Agent Git metadata cannot be verified", failure);
+        }
+    }
+
+    private static void requireRebase(Path gitDirectory, String head)
+            throws IOException
+    {
+        checkState(isSha(head), "Agent Git writes require a named local branch or an in-progress rebase");
+        Path merge = gitDirectory.resolve("rebase-merge");
+        Path apply = gitDirectory.resolve("rebase-apply");
+        checkState(Files.exists(merge, NOFOLLOW_LINKS) != Files.exists(apply, NOFOLLOW_LINKS), "Agent Git writes require exactly one rebase state directory");
+        Path rebase = canonicalDirectory(Files.exists(merge, NOFOLLOW_LINKS) ? merge : apply);
+        String ref = metadata(rebase.resolve("head-name"));
+        checkState(ref.startsWith("refs/heads/") && validRef(ref), "Agent rebase branch ref is unsafe");
+        checkState(isSha(metadata(rebase.resolve("orig-head"))) && isSha(metadata(rebase.resolve("onto"))), "Agent rebase commit metadata is unsafe");
+    }
+
+    private static String metadata(Path path)
+            throws IOException
+    {
+        checkState(Files.isRegularFile(path, NOFOLLOW_LINKS), "Agent Git metadata is not a regular file: %s", path);
+        requireUnlinkedPath(path);
+        byte[] bytes;
+        try (InputStream input = Files.newInputStream(path)) {
+            bytes = input.readNBytes(MAXIMUM_METADATA_BYTES + 1);
+        }
+        checkState(bytes.length <= MAXIMUM_METADATA_BYTES, "Agent Git metadata is too large: %s", path);
+        String value = UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString().strip();
+        checkState(!value.isEmpty() && !value.contains("\n") && !value.contains("\r"), "Agent Git metadata must contain one nonempty line: %s", path);
+        return value;
+    }
+
+    private static Path canonicalDirectory(Path path)
+            throws IOException
+    {
+        requireUnlinkedPath(path.toAbsolutePath());
+        Path normalized = path.toAbsolutePath().normalize();
+        requireUnlinkedPath(normalized);
+        checkState(Files.isDirectory(normalized, NOFOLLOW_LINKS), "Agent Git path is not a directory: %s", normalized);
+        return normalized.toRealPath();
+    }
+
+    private static void requireUnlinkedPath(Path path)
+    {
+        for (Path current = path; current != null; current = current.getParent()) {
+            checkState(!Files.isSymbolicLink(current), "Agent Git path contains a symbolic link: %s", current);
+        }
+    }
+
+    private static boolean validRef(String ref)
+    {
+        if (ref.endsWith("/") || ref.endsWith(".") || ref.contains("..") || ref.contains("//") || ref.contains("@{")) {
+            return false;
+        }
+        for (String component : ref.split("/")) {
+            if (component.startsWith(".") || component.endsWith(".lock")) {
+                return false;
+            }
+        }
+        return ref.chars().noneMatch(value -> value <= ' ' || value == 127 || "~^:?*[\\".indexOf(value) >= 0);
+    }
+}

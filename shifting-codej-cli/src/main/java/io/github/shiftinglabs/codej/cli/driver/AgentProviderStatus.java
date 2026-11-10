@@ -1,0 +1,63 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.shiftinglabs.codej.cli.driver;
+
+import java.util.Optional;
+
+import static io.github.shiftinglabs.codej.cli.driver.Checks.checkOptionalText;
+import static io.github.shiftinglabs.codej.cli.driver.Checks.checkText;
+import static java.util.Objects.requireNonNull;
+
+public record AgentProviderStatus(
+        AgentLaneId laneId,
+        Readiness readiness,
+        Optional<String> version,
+        String diagnostic,
+        AgentCapabilities capabilities,
+        Optional<String> signInCommand)
+{
+    public AgentProviderStatus(AgentLaneId laneId, Readiness readiness, Optional<String> version, String diagnostic, AgentCapabilities capabilities)
+    {
+        this(laneId, readiness, version, diagnostic, capabilities, Optional.empty());
+    }
+
+    /**
+     * @param signInCommand the exact command that signs this lane in, when the lane keeps its own
+     * provider home and a generic login would land somewhere else
+     */
+    public AgentProviderStatus
+    {
+        requireNonNull(laneId, "laneId is null");
+        requireNonNull(readiness, "readiness is null");
+        checkOptionalText(version, "version");
+        checkText(diagnostic, "diagnostic");
+        requireNonNull(capabilities, "capabilities is null");
+        checkOptionalText(signInCommand, "signInCommand");
+    }
+
+    public boolean available()
+    {
+        return readiness == Readiness.READY || readiness == Readiness.DEGRADED;
+    }
+
+    public enum Readiness
+    {
+        READY,
+        AUTHENTICATION_REQUIRED,
+        CLI_MISSING,
+        UNSUPPORTED,
+        DEGRADED,
+        TEMPORARILY_UNAVAILABLE
+    }
+}

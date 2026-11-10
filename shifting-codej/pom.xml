@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.shifting-labs</groupId>
+        <artifactId>shifting-codej-parent</artifactId>
+        <version>0.164.0-1-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>shifting-codej</artifactId>
+    <name>shifting-codej</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.shifting-labs</groupId>
+            <artifactId>shifting-codej-api</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>io.github.shifting-labs</groupId>
+            <artifactId>shifting-codej-cli</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jdk8</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <!-- TestVersion holds the version to the Codex release the SDK runs. -->
+                        <codej.version>${project.version}</codej.version>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>publish</id>
+            <build>
+                <plugins>
+                    <!-- The published jar: the three modules' classes, with Guava and Jackson renamed inside it. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-shade-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>shade</goal>
+                                </goals>
+                                <configuration>
+                                    <createDependencyReducedPom>true</createDependencyReducedPom>
+                                    <dependencyReducedPomLocation>${project.build.directory}/dependency-reduced-pom.xml</dependencyReducedPomLocation>
+                                    <createSourcesJar>true</createSourcesJar>
+                                    <shadeSourcesContent>true</shadeSourcesContent>
+                                    <artifactSet>
+                                        <includes>
+                                            <include>io.github.shifting-labs:shifting-codej-api</include>
+                                            <include>io.github.shifting-labs:shifting-codej-cli</include>
+                                            <include>com.google.guava:guava</include>
+                                            <include>com.google.guava:failureaccess</include>
+                                            <include>com.fasterxml.jackson.core:*</include>
+                                            <include>com.fasterxml.jackson.datatype:*</include>
+                                        </includes>
+                                    </artifactSet>
+                                    <relocations>
+                                        <relocation>
+                                            <pattern>com.google</pattern>
+                                            <shadedPattern>io.github.shiftinglabs.codej.internal.google</shadedPattern>
+                                        </relocation>
+                                        <relocation>
+                                            <pattern>com.fasterxml.jackson</pattern>
+                                            <shadedPattern>io.github.shiftinglabs.codej.internal.jackson</shadedPattern>
+                                        </relocation>
+                                    </relocations>
+                                    <filters>
+                                        <filter>
+                                            <artifact>*:*</artifact>
+                                            <excludes>
+                                                <exclude>module-info.class</exclude>
+                                                <!-- Shade does not rename Jackson's per-Java-version copies; its renamed base classes serve every Java. -->
+                                                <exclude>META-INF/versions/**</exclude>
+                                                <exclude>module-info.java</exclude>
+                                                <exclude>META-INF/maven/**</exclude>
+                                                <exclude>META-INF/proguard/**</exclude>
+                                                <exclude>META-INF/*.SF</exclude>
+                                                <exclude>META-INF/*.DSA</exclude>
+                                                <exclude>META-INF/*.RSA</exclude>
+                                            </excludes>
+                                        </filter>
+                                    </filters>
+                                    <transformers>
+                                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                        <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
+                                        <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer"/>
+                                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer"/>
+                                    </transformers>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- One Javadoc for what users call: the API and the two builders, not the internal packages. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>javadoc</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <includeDependencySources>true</includeDependencySources>
+                            <dependencySourceIncludes>
+                                <dependencySourceInclude>io.github.shifting-labs:shifting-codej-api</dependencySourceInclude>
+                            </dependencySourceIncludes>
+                            <excludePackageNames>io.github.shiftinglabs.codej.sdk.*:io.github.shiftinglabs.codej.cli.*</excludePackageNames>
+                            <doclint>all</doclint>
+                            <failOnWarnings>true</failOnWarnings>
+                            <quiet>true</quiet>
+                            <detectOfflineLinks>false</detectOfflineLinks>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

@@ -1,0 +1,45 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.shiftinglabs.codej.cli.driver;
+
+import java.math.BigDecimal;
+import java.util.Optional;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.github.shiftinglabs.codej.cli.driver.Checks.checkOptionalText;
+import static java.util.Objects.requireNonNull;
+
+public record ProviderUsageSample(Optional<String> providerEventId, Semantics semantics, long inputTokens, long cachedInputTokens, long outputTokens, Optional<BigDecimal> cost)
+{
+    public ProviderUsageSample
+    {
+        checkOptionalText(providerEventId, "providerEventId");
+        requireNonNull(semantics, "semantics is null");
+        requireNonNull(cost, "cost is null");
+        checkArgument(inputTokens >= 0 && cachedInputTokens >= 0 && outputTokens >= 0, "token counts must not be negative");
+        checkArgument(cost.stream().noneMatch(value -> value.signum() < 0), "cost must not be negative");
+    }
+
+    public enum Semantics
+    {
+        /** Totals across the task's provider session, including earlier turns. */
+        CUMULATIVE,
+        /** Totals of the current invocation alone: the adapter has already taken out whatever its provider counted before it. */
+        CUMULATIVE_FOR_INVOCATION,
+        DELTA,
+        FINAL_FOR_INVOCATION,
+        /** The tokens of one finished invocation, with a cost the provider counts across the task's whole session, earlier turns included. */
+        FINAL_WITH_SESSION_COST
+    }
+}

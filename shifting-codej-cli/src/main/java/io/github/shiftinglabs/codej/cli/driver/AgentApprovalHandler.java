@@ -1,0 +1,54 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.shiftinglabs.codej.cli.driver;
+
+import java.time.Duration;
+import java.util.concurrent.CompletionStage;
+
+/**
+ * Requests an explicit decision from the host application for a provider permission prompt.
+ *
+ * <p>This provider-facing callback keeps frontend approval handling outside the
+ * driver. A timeout or disconnected frontend results in denial, never implied
+ * approval.
+ */
+@FunctionalInterface
+public interface AgentApprovalHandler
+{
+    /**
+     * How long every driver waits for the user's answer. The app shows each pending
+     * request's deadline from it, so a driver passes this as its timeout.
+     */
+    Duration WAIT = Duration.ofMinutes(5);
+
+    /**
+     * Why a driver stops the turn when an approval or question waited {@link #WAIT}
+     * without an answer; the user reads it wherever the turn's failure shows.
+     */
+    String UNANSWERED = "No answer within " + WAIT.toMinutes() + " minutes";
+
+    /**
+     * Presents one provider permission request to the host application for an explicit decision.
+     *
+     * <p>The returned stage completes with a user decision or a timeout denial. A
+     * provider must not infer approval from a disconnect or incomplete stage. A
+     * provider that settles the request itself cancels the stage, which withdraws
+     * the request without a decision.
+     *
+     * @param request provider-neutral permission request
+     * @param timeout maximum time to await a decision
+     * @return asynchronous allow or deny decision
+     */
+    CompletionStage<ProviderApprovalDecision> request(ProviderApprovalRequest request, Duration timeout);
+}

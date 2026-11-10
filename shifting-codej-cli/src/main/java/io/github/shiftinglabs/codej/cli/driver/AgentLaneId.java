@@ -1,0 +1,42 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.shiftinglabs.codej.cli.driver;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.github.shiftinglabs.codej.cli.driver.Checks.checkText;
+
+public record AgentLaneId(String value)
+{
+    public static final AgentLaneId CODEX_CLI = new AgentLaneId("codex");
+    public static final AgentLaneId CLAUDE_CLI = new AgentLaneId("claude");
+    public static final String CODEX_ACCOUNT_PREFIX = "codex-account-";
+    public static final String CLAUDE_ACCOUNT_PREFIX = "claude-account-";
+
+    public AgentLaneId
+    {
+        checkText(value, "value");
+        checkArgument(value.matches("[a-z0-9]+(?:-[a-z0-9]+)*"), "invalid agent lane ID: " + value);
+    }
+
+    @Override
+    public String toString()
+    {
+        return value;
+    }
+
+    public boolean usesClaude()
+    {
+        return equals(CLAUDE_CLI) || value.startsWith(CLAUDE_ACCOUNT_PREFIX);
+    }
+}
