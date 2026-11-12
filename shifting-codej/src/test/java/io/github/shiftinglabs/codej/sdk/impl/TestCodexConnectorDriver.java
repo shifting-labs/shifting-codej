@@ -31,6 +31,7 @@ import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
 import io.github.shiftinglabs.codej.cli.mcp.PermissionBroker;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.sdk.testing.AbstractTestConnectorDriver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -42,6 +43,8 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -49,6 +52,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestCodexConnectorDriver
+        extends AbstractTestConnectorDriver
 {
     @TempDir
     private Path directory;
@@ -300,19 +304,28 @@ class TestCodexConnectorDriver
         };
         CodexConnectorDriver driver = driver(openingDriver(() -> providerSession));
         driver.open(context(Optional.empty()), event -> {});
-        CompletableFuture<Void> callback = CompletableFuture.runAsync(() -> {
-            synchronized (providerLock) {
-                callbackEntered.countDown();
-                await(closeEntered);
-                assertThatThrownBy(() -> driver.validate(context(Optional.empty()))).isInstanceOf(AgentUnavailableException.class)
-                        .hasMessage("Codex connector is closed");
-            }
-        });
-        assertThat(callbackEntered.await(5, TimeUnit.SECONDS)).isTrue();
-        CompletableFuture<Void> closing = CompletableFuture.runAsync(driver::close);
-        callback.get(5, TimeUnit.SECONDS);
-        closing.get(5, TimeUnit.SECONDS);
-        driver.close();
+        // Both actors must be runnable even when the host limits the common pool to one worker.
+        ExecutorService actors = Executors.newFixedThreadPool(2);
+        try {
+            CompletableFuture<Void> callback = CompletableFuture.runAsync(() -> {
+                synchronized (providerLock) {
+                    callbackEntered.countDown();
+                    await(closeEntered);
+                    assertThatThrownBy(() -> driver.validate(context(Optional.empty()))).isInstanceOf(AgentUnavailableException.class)
+                            .hasMessage("Codex connector is closed");
+                }
+            }, actors);
+            assertThat(callbackEntered.await(5, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture<Void> closing = CompletableFuture.runAsync(driver::close, actors);
+            callback.get(5, TimeUnit.SECONDS);
+            closing.get(5, TimeUnit.SECONDS);
+            driver.close();
+        }
+        finally {
+            closeEntered.countDown();
+            actors.shutdownNow();
+            assertThat(actors.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
     }
 
     private void assertInvalidScope(CodexConnectorDriver driver, AgentPermissionScope scope, String message)
@@ -320,6 +333,12 @@ class TestCodexConnectorDriver
         AgentSessionContext context = context(Optional.empty()).withTaskScope(scope, false);
         assertThatThrownBy(() -> driver.validate(context)).isInstanceOf(IllegalArgumentException.class).hasMessage(message);
         assertThatThrownBy(() -> driver.open(context, event -> {})).isInstanceOf(IllegalArgumentException.class).hasMessage(message);
+    }
+
+    @Override
+    protected CodexConnectorDriver connector(AgentDriver delegate)
+    {
+        return driver(delegate);
     }
 
     private CodexConnectorDriver driver(AgentDriver delegate)

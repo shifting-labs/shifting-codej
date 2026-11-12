@@ -50,6 +50,7 @@
         <lombok.version>1.18.46</lombok.version>
         <junit.version>5.12.2</junit.version>
         <assertj.version>3.27.3</assertj.version>
+        <codej.test.forks>4</codej.test.forks>
     </properties>
 
     <dependencyManagement>
@@ -139,7 +140,7 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.5.3</version>
                     <configuration>
-                        <forkCount>4</forkCount>
+                        <forkCount>${codej.test.forks}</forkCount>
                         <reuseForks>true</reuseForks>
                     </configuration>
                 </plugin>

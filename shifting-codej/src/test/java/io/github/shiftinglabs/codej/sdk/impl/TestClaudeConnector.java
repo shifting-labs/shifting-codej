@@ -34,6 +34,7 @@ import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorDriver;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.sdk.testing.AbstractTestCliConnector;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -54,6 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestClaudeConnector
+        extends AbstractTestCliConnector<DriverAgent.ClaudeSettings>
 {
     private final ClaudeConnector connector = new ClaudeConnector();
     private final CapturingSupervisor supervisor = new CapturingSupervisor();
@@ -202,6 +204,19 @@ class TestClaudeConnector
         assertThat(SessionSweeps.keeps(home)).isEmpty();
         assertThat(supervisor.specs).isEmpty();
         assertThat(supervisor.closes).isZero();
+    }
+
+    @Override
+    protected ClaudeConnector connector()
+    {
+        return connector;
+    }
+
+    @Override
+    protected DriverAgent.ClaudeSettings configuration(Path executable)
+    {
+        return new DriverAgent.ClaudeSettings(Optional.of(executable), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                List.of(), List.of(), List.of(), List.of(), false, Optional.empty(), Optional.empty(), ToolServer.DEFAULT);
     }
 
     private ConnectorContext context(Path home)

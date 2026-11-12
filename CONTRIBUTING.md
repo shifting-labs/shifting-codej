@@ -29,6 +29,58 @@ dependency.
 Every Java file starts with `src/main/license/header.txt`, and `src/main/checkstyle/checks.xml`
 holds the style.
 
+## Connector contract tests
+
+Connector implementations inherit shared contracts, following the same pattern as Trino's
+base connector tests. The bases live in `shifting-codej/src/test/java/io/github/shiftinglabs/codej/sdk/testing`:
+
+- `AbstractTestConnector<C>` checks factory configuration types, stable identities, independent
+  driver instances, null-input rejection, side-effect-free validation, idempotent close,
+  borrowed-service ownership and preservation of saved history.
+- `AbstractTestCliConnector<C>` extends that contract with an explicit missing executable.
+  Construction must not start or install it. Implement `connector()` and `configuration(Path)`;
+  `TestCodexConnector` and `TestClaudeConnector` show the concrete bindings.
+- `AbstractTestConnectorDriver` checks metadata, catalogs, quotas, model-specific probing,
+  resume/model-aware review capability queries and provider failure propagation. Bind an
+  `AgentDriver` delegate through `connector(AgentDriver)`; both existing driver suites inherit it.
+
+These are reusable test-source bases, not new runtime interfaces or a separately published test kit.
+Provider-specific tests retain the session, turn, permission, lifecycle and authentication cases
+that cannot be required of every connector.
+
+[The executable consumer example](shifting-codej-cli/src/test/java/io/github/shiftinglabs/codej/cli/spi/consumer/TestConnectorSpi.java)
+is in a different package and imports only public SPI types. It shows a host creating a typed
+connector, validating before opening, consuming normalized events, waiting for a turn result,
+persisting a session reference, resuming it and closing owned resources. Its in-memory provider
+also exercises the backward-compatible defaults that a minimal third-party driver inherits.
+
+| API surface | Baseline coverage |
+| --- | --- |
+| `AgentConnector.id`, `configurationType`, `create` | Factory base, concrete factory suites and consumer example |
+| `ConnectorContext` constructor and all three accessors | Consumer example, including null/relative paths and unchanged service/path identities |
+| `ConnectorIdentity` constructor and both identifiers | Consumer validation cases and stable factory identity contract |
+| `ConnectorDriver.identity`, `validate`, `close` | Factory/driver bases and concrete validation, ownership and shutdown tests |
+| Concrete factories, `CodexConnectorConfig` and Codex install/version diagnostics | Public-constructor smoke test and existing configuration/authentication/install-failure cases |
+| `AgentDriver.id`, `label`, `capabilities`, both `probe` overloads | Driver base and minimal-driver defaults |
+| `AgentDriver.models`, `quota`, both `reviewChildAgents` overloads | Driver base and minimal-driver defaults |
+| `AgentDriver.open` | Consumer lifecycle/resume example and concrete context/validation tests |
+| `AgentSession.reference`, `start`, `close`, reuse/status methods | Consumer defaults and concrete Codex session forwarding/lifecycle tests |
+| `RunningTurn.reference`, `completion`, `setup`, `steer`, `cancel` | Consumer defaults and existing SDK turn tests |
+
+Run only these in-memory/fake-provider suites with one test worker:
+
+```bash
+mvn -pl shifting-codej -am -Dcodej.test.forks=1 \
+  -Djunit.jupiter.execution.parallel.enabled=false \
+  -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dtest=TestConnectorSpi,TestCodexConnector,TestClaudeConnector,TestCodexConnectorDriver,TestClaudeConnectorDriver verify
+```
+
+`codej.test.forks` retains the existing default of four for ordinary builds. The command above
+uses one fork and disables JUnit parallel execution. These suites do not launch a native CLI or
+run process stress tests. A future direct-model SPI needs its own contract base when that SPI
+is implemented; no `ModelClient` API is claimed or introduced here.
+
 ## Versions
 
 A release is `<Codex.VERSION>-<N>`:
