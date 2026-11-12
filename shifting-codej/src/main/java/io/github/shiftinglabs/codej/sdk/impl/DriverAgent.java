@@ -396,7 +396,7 @@ public final class DriverAgent
     /** The model sessions use when none is named, once the catalog has been read. */
     Optional<String> defaultModel()
     {
-        return models.or(() -> Optional.of(models())).orElseThrow().stream().filter(Model::isDefault).map(Model::id).findFirst();
+        return models.orElseGet(this::models).stream().filter(Model::isDefault).map(Model::id).findFirst();
     }
 
     void forget(DriverSession session)

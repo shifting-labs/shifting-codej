@@ -87,10 +87,11 @@ final class Approvals
                 return CompletableFuture.completedFuture(ProviderApprovalDecision.deny());
             }
             QuestionHandler answering = questions.orElseThrow();
-            return ask(() -> answering.answer(question.orElseThrow()), wait, answers -> answers(question.orElseThrow(), answers), ProviderApprovalDecision::deny);
+            Question asked = question.orElseThrow();
+            return ask(() -> answering.answer(asked), wait, answers -> answers(asked, answers));
         }
         Approval approval = approval(request);
-        return ask(() -> handler.decide(approval), wait, decision -> decision(approval, decision), ProviderApprovalDecision::deny);
+        return ask(() -> handler.decide(approval), wait, decision -> decision(approval, decision));
     }
 
     /** The session closed: later requests are denied without asking. */
@@ -100,12 +101,11 @@ final class Approvals
     }
 
     /**
-     * Asks the handler on the callback executor, and answers the driver with what it says, or with {@code unanswered} when it fails or
+     * Asks the handler on the callback executor, and answers the driver with what it says, or denies when it fails or
      * the wait runs out. A request that ends without the handler's answer, by the wait or by the driver withdrawing it, cancels the
      * handler's stage.
      */
-    private <T> CompletableFuture<ProviderApprovalDecision> ask(Supplier<CompletionStage<T>> handler, Duration wait, Function<T, ProviderApprovalDecision> answered,
-            Supplier<ProviderApprovalDecision> unanswered)
+    private <T> CompletableFuture<ProviderApprovalDecision> ask(Supplier<CompletionStage<T>> handler, Duration wait, Function<T, ProviderApprovalDecision> answered)
     {
         CompletableFuture<ProviderApprovalDecision> answer = new CompletableFuture<>();
         callbacks.execute(() -> {
@@ -114,21 +114,21 @@ final class Approvals
                 stage = handler.get().toCompletableFuture();
             }
             catch (RuntimeException failure) {
-                answer.complete(unanswered.get());
+                answer.complete(ProviderApprovalDecision.deny());
                 return;
             }
             stage.whenComplete((value, failure) -> {
                 try {
-                    answer.complete(failure == null ? answered.apply(value) : unanswered.get());
+                    answer.complete(failure == null ? answered.apply(value) : ProviderApprovalDecision.deny());
                 }
                 catch (RuntimeException broken) {
                     // Such as a stage completed with null.
-                    answer.complete(unanswered.get());
+                    answer.complete(ProviderApprovalDecision.deny());
                 }
             });
             answer.whenComplete((_, _) -> stage.cancel(false));
         });
-        return answer.completeOnTimeout(unanswered.get(), wait.toMillis(), TimeUnit.MILLISECONDS);
+        return answer.completeOnTimeout(ProviderApprovalDecision.deny(), wait.toMillis(), TimeUnit.MILLISECONDS);
     }
 
     /** Anything but an allowing decision the provider offered denies, and a denial's reason reaches the agent. */

@@ -64,7 +64,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -301,10 +300,6 @@ public final class PermissionBroker
             boolean permissionTools,
             List<Tool> sessionTools)
     {
-        SessionAccess access = scope.access();
-        boolean restricted = access.restricted();
-        // A restricted session may carry a real task id, so every bridge is withheld by access
-        // rather than by the caller having invented an id no bridge can resolve.
         // Claude's gate admits read-only children through this flag. Codex registers no permission tools and
         // gates its children through its own launch-time PreToolUse hook.
         boolean readOnlyChildren = permissionTools && scope.readOnlySubagents() && !scope.noSubagents();
@@ -379,7 +374,7 @@ public final class PermissionBroker
         if (name.equals(toolServer.callTool())) {
             return callDiscoveredTool(request.id(), params.arguments(), context);
         }
-        return name.equals("permission_prompt") ? permission(request.id(), params.arguments(), context) : reviewTool(request.id(), params, context);
+        return name.equals("permission_prompt") ? permission(request.id(), params.arguments(), context) : sessionTool(request.id(), params, context);
     }
 
     private McpHttpResponse describeTools(JsonNode id, ToolCallParams params, PermissionContext context)
@@ -402,7 +397,7 @@ public final class PermissionBroker
             }
             result = tool.orElseThrow();
         }
-        return response(id, new ToolResult(ImmutableList.of(new TextContent("text", context.redactor().redact(objectMapper.writeValueAsString(result)))), false));
+        return toolResponse(id, context.redactor().redact(objectMapper.writeValueAsString(result)), false);
     }
 
     private McpHttpResponse callDiscoveredTool(JsonNode id, JsonNode arguments, PermissionContext context)
@@ -420,24 +415,11 @@ public final class PermissionBroker
     }
 
     /**
-     * Publishes the task's verified revision as a draft pull request.
-     *
-     * <p>The caller supplies only a title and body. The destination, the exact revision, and the
-     * lease all come from the host application's own publication follow-up, so a session cannot choose where
-     * its work lands, and a call made outside that follow-up is refused. A refusal is tool text
-     * the agent can report, not a dropped connection.
-     */
-    /**
-     * Pushes the task's branch or closes its pull request through the host application: at once when the user's own words in this turn ask for it,
-     * otherwise after an in-app Allow once.
-     */
-    /** The user's words an action may carry, besides the named fields: empty when the arguments have any other shape. */
-    /**
-     * Runs one review tool for the task the token names. Validation failures come back as tool
+     * Runs one session tool for the task the token names. Validation failures come back as tool
      * text the model can repair from; an unexpected failure is an error result, never a thrown
      * exception that would drop the provider's connection.
      */
-    private McpHttpResponse reviewTool(JsonNode id, ToolCallParams params, PermissionContext context)
+    private McpHttpResponse sessionTool(JsonNode id, ToolCallParams params, PermissionContext context)
             throws JsonProcessingException
     {
         Optional<Tool> tool = context.sessionTools().stream().filter(value -> value.name().equals(params.name())).findFirst();
@@ -458,7 +440,7 @@ public final class PermissionBroker
             text = failureReason(failure);
             failed = true;
         }
-        return response(id, new ToolResult(ImmutableList.of(new TextContent("text", context.redactor().redact(text))), failed));
+        return toolResponse(id, context.redactor().redact(text), failed);
     }
 
     private McpHttpResponse permission(JsonNode id, JsonNode input, PermissionContext context)
@@ -490,7 +472,7 @@ public final class PermissionBroker
         if (refused.isPresent()) {
             // Refused before any card exists: review authority is not extended by a tool approval.
             PermissionResult denied = new PermissionResult("deny", Optional.empty(), refused);
-            return response(id, new ToolResult(ImmutableList.of(new TextContent("text", objectMapper.writeValueAsString(denied))), false));
+            return toolResponse(id, objectMapper.writeValueAsString(denied), false);
         }
         boolean bash = arguments.toolName().equalsIgnoreCase("Bash");
         boolean unsandboxed = bash && (Optional.ofNullable(arguments.input().get("dangerouslyDisableSandbox"))
@@ -500,7 +482,7 @@ public final class PermissionBroker
                 || unsandboxedCommand(context.scope()).matcher(arguments.input().path("command").asText("")).lookingAt());
         Optional<PermissionResult> allowed = precheckedFileEditPermission(arguments, context);
         if (allowed.isPresent()) {
-            return response(id, new ToolResult(ImmutableList.of(new TextContent("text", objectMapper.writeValueAsString(allowed.orElseThrow()))), false));
+            return toolResponse(id, objectMapper.writeValueAsString(allowed.orElseThrow()), false);
         }
         String detail = bounded(context.redactor().redact(objectMapper.writeValueAsString(arguments.input())));
         if (unsandboxed) {
@@ -526,7 +508,7 @@ public final class PermissionBroker
                 ? new PermissionResult("allow", Optional.of(answered(arguments, decision.answers())), Optional.empty())
                 : new PermissionResult("deny", Optional.empty(), decision.reason().or(() -> Optional.of(decision.timedOut() ? "Approval timed out" : "Denied by user")));
         String text = objectMapper.writeValueAsString(result);
-        return response(id, new ToolResult(ImmutableList.of(new TextContent("text", text)), false));
+        return toolResponse(id, text, false);
     }
 
     private static Optional<ProviderApprovalScope> approvalScope(PermissionArguments arguments)
@@ -586,7 +568,6 @@ public final class PermissionBroker
         return ((ObjectNode) input.deepCopy()).set("answers", accepted);
     }
 
-
     // A task tool may store or publish what the agent sends, so the provider's own credentials never reach it.
     private static JsonNode redacted(JsonNode node, SecretRedactor redactor)
     {
@@ -602,20 +583,6 @@ public final class PermissionBroker
             }
         }
         return node;
-    }
-
-    private McpHttpResponse runTool(JsonNode id, PermissionContext context, ToolAction action, Function<Exception, String> failureText)
-    {
-        try {
-            String text = context.redactor().redact(action.run());
-            return response(id, new ToolResult(ImmutableList.of(new TextContent("text", text)), false));
-        }
-        catch (Exception failure) {
-            if (failure instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
-            return response(id, new ToolResult(ImmutableList.of(new TextContent("text", failureText.apply(failure))), true));
-        }
     }
 
     // ponytail: parses the schema on every listing; cache it per tool if tool listings show up in profiles.
@@ -634,11 +601,9 @@ public final class PermissionBroker
         return Optional.ofNullable(failure.getMessage()).orElse(failure.getClass().getSimpleName());
     }
 
-    @FunctionalInterface
-    private interface ToolAction
+    private McpHttpResponse toolResponse(JsonNode id, String text, boolean failed)
     {
-        String run()
-                throws Exception;
+        return response(id, new ToolResult(ImmutableList.of(new TextContent("text", text)), failed));
     }
 
     private McpHttpResponse response(JsonNode id, Object result)
