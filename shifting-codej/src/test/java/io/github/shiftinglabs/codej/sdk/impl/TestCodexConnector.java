@@ -28,6 +28,7 @@ import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.sdk.testing.AbstractTestCliConnector;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -50,6 +51,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestCodexConnector
+        extends AbstractTestCliConnector<CodexConnectorConfig>
 {
     private static final String CLASSIFIER = "osx-aarch_64";
     private static final String EMAIL = "me@example.com";
@@ -99,6 +101,21 @@ class TestCodexConnector
             }
         }
         assertThat(directory.resolve("cache")).doesNotExist();
+        assertThat(supervisor.closed).isFalse();
+    }
+
+    @Test
+    void publicFactoryAcceptsAnExplicitExecutableWithoutInstallingOrStartingIt()
+    {
+        Path executable = directory.resolve("missing-cli");
+        CodexConnector factory = new CodexConnector();
+        try (CodexConnectorDriver driver = factory.create(configuration(executable), context(directory.resolve("public-factory-profile")))) {
+            assertThat(driver.identity().connectorId()).isEqualTo(factory.id());
+            assertThat(driver.unavailable()).isEmpty();
+            assertThat(driver.testedVersion()).contains(Codex.VERSION);
+            driver.validate(sessionContext());
+            assertThat(executable).doesNotExist();
+        }
         assertThat(supervisor.closed).isFalse();
     }
 
@@ -183,6 +200,18 @@ class TestCodexConnector
                 .hasCauseInstanceOf(IOException.class);
         assertThat(home).hasContent("existing file");
         assertThat(supervisor.closed).isFalse();
+    }
+
+    @Override
+    protected CodexConnector connector()
+    {
+        return factory();
+    }
+
+    @Override
+    protected CodexConnectorConfig configuration(Path executable)
+    {
+        return new CodexConnectorConfig(Optional.of(executable), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     private CodexConnector factory()

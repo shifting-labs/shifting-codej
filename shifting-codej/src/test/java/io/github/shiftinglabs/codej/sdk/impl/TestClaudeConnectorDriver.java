@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.AgentException;
+import io.github.shiftinglabs.codej.cli.driver.AgentDriver;
 import io.github.shiftinglabs.codej.cli.driver.AgentEventSink;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.driver.AgentPermissionPolicy;
@@ -25,6 +26,7 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderApprovalDecision;
 import io.github.shiftinglabs.codej.cli.driver.ProviderModel;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.sdk.testing.AbstractTestConnectorDriver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -39,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestClaudeConnectorDriver
+        extends AbstractTestConnectorDriver
 {
     private static final ConnectorIdentity IDENTITY = new ConnectorIdentity("claude-code", "profile");
 
@@ -138,6 +141,12 @@ class TestClaudeConnectorDriver
         driver.close();
         assertThat(closed).containsExactly("driver", "broker", "sweep", "driver", "broker", "sweep");
         assertThat(attempts).hasValue(2);
+    }
+
+    @Override
+    protected ClaudeConnectorDriver connector(AgentDriver delegate)
+    {
+        return new ClaudeConnectorDriver(delegate, IDENTITY, List.of());
     }
 
     private AgentSessionContext context(Optional<AgentSessionRef> reference)

@@ -11,7 +11,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.shiftinglabs.codej.cli.spi;
+package io.github.shiftinglabs.codej.cli.spi.consumer;
 
 import io.github.shiftinglabs.codej.cli.driver.AgentCapabilities;
 import io.github.shiftinglabs.codej.cli.driver.AgentDriver;
@@ -23,8 +23,10 @@ import io.github.shiftinglabs.codej.cli.driver.AgentSession;
 import io.github.shiftinglabs.codej.cli.driver.AgentSessionContext;
 import io.github.shiftinglabs.codej.cli.driver.AgentSessionRef;
 import io.github.shiftinglabs.codej.cli.driver.AgentTurnCommand;
+import io.github.shiftinglabs.codej.cli.driver.AgentTurnInput;
 import io.github.shiftinglabs.codej.cli.driver.AgentTurnResult;
 import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
+import io.github.shiftinglabs.codej.cli.driver.ProviderAgentEvent;
 import io.github.shiftinglabs.codej.cli.driver.ProviderTurnRef;
 import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
@@ -33,19 +35,26 @@ import io.github.shiftinglabs.codej.cli.process.OwnedProcessRecovery;
 import io.github.shiftinglabs.codej.cli.process.PreparedProcess;
 import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
+import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
+import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
+import io.github.shiftinglabs.codej.cli.spi.ConnectorDriver;
+import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
+import static io.github.shiftinglabs.codej.cli.driver.ProviderAgentEventSource.root;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/** Executable host/provider example: this package can use only the public SPI, as a downstream application would. */
 class TestConnectorSpi
 {
     @TempDir
@@ -110,6 +119,8 @@ class TestConnectorSpi
         };
         assertThat(factory.configurationType()).isEqualTo(String.class);
         FactoryDriver connection;
+        List<ProviderAgentEvent> events = new ArrayList<>();
+        AgentSessionRef saved;
         try (ConnectorDriver driver = factory.create("work", context)) {
             connection = (FactoryDriver) driver;
             assertThat(driver.identity()).isEqualTo(new ConnectorIdentity(factory.id(), "work"));
@@ -117,13 +128,23 @@ class TestConnectorSpi
             assertThatThrownBy(() -> driver.open(sessionContext(SessionAccess.FULL), event -> {}))
                     .isInstanceOf(AgentUnavailableException.class).hasMessage("Only read-only sessions are supported");
             assertThat(connection.opened).isZero();
-            try (AgentSession first = driver.open(sessionContext(SessionAccess.READ_ONLY), event -> {});
+            driver.validate(sessionContext(SessionAccess.READ_ONLY));
+            assertThat(connection.opened).isZero();
+            try (AgentSession first = driver.open(sessionContext(SessionAccess.READ_ONLY), events::add);
                     AgentSession second = driver.open(sessionContext(SessionAccess.READ_ONLY), event -> {})) {
                 assertThat(first.reference()).isNotEqualTo(second.reference());
+                saved = first.reference();
                 RunningTurn turn = first.start(new AgentTurnCommand("turn", "hello", List.of(), Duration.ZERO));
+                assertThat(turn.reference()).isEqualTo(new ProviderTurnRef("turn"));
                 assertThat(turn.completion().toCompletableFuture().join().finalResponse()).contains("hello");
+                assertThat(events).containsExactly(new ProviderAgentEvent.Message(Optional.of("turn"), ProviderAgentEvent.MessagePhase.FINAL, "hello", root()));
             }
-            assertThat(connection.opened).isEqualTo(2);
+            try (AgentSession resumed = driver.open(sessionContext(SessionAccess.READ_ONLY, Optional.of(saved)), events::add)) {
+                assertThat(resumed.reference()).isEqualTo(saved);
+                assertThat(resumed.start(new AgentTurnCommand("next", "follow-up", List.of(), Duration.ZERO))
+                        .completion().toCompletableFuture().join().finalResponse()).contains("follow-up");
+            }
+            assertThat(connection.opened).isEqualTo(3);
         }
         connection.close();
         assertThat(connection.closed).isTrue();
@@ -131,10 +152,60 @@ class TestConnectorSpi
         assertThat(context.profileDirectory()).doesNotExist();
     }
 
+    @Test
+    void minimalDriversKeepConservativeOptionalDefaults()
+    {
+        LegacyDriver driver = new LegacyDriver();
+        assertThat(driver.label()).isEqualTo(driver.id().value());
+        assertThat(driver.models()).isEmpty();
+        assertThat(driver.quota().plan()).isEmpty();
+        assertThat(driver.quota().windows()).isEmpty();
+        assertThat(driver.quota().message()).isPresent();
+        assertThat(driver.reviewChildAgents()).isFalse();
+        assertThat(driver.reviewChildAgents(Optional.empty(), Optional.of("selected"))).isFalse();
+        assertThat(driver.probe(Optional.of("selected")).available()).isTrue();
+        assertThat(driver.probe(Optional.empty()).available()).isTrue();
+        assertThat(driver.probes).isEqualTo(2);
+
+        AgentDriver reviewProvider = new LegacyDriver()
+        {
+            @Override
+            public boolean reviewChildAgents() { return true; }
+        };
+        assertThat(reviewProvider.reviewChildAgents(Optional.empty(), Optional.of("selected"))).isTrue();
+    }
+
+    @Test
+    void minimalSessionsAndTurnsKeepLegacyReuseAndSteeringDefaults()
+    {
+        AgentSessionContext context = sessionContext(SessionAccess.READ_ONLY);
+        try (AgentSession session = new LegacyDriver().open(context, event -> {})) {
+            AgentSessionRef reference = session.reference();
+            session.allowReuse();
+            session.preventReuse();
+            assertThat(session.resumable()).isTrue();
+            assertThat(session.retained()).isFalse();
+            assertThat(session.prepareTurn(context, event -> {})).isFalse();
+            assertThat(session.reference()).isEqualTo(reference);
+            RunningTurn turn = session.start(new AgentTurnCommand("turn", "hello", List.of(), Duration.ZERO));
+            assertThat(turn.setup()).isEmpty();
+            assertThatThrownBy(() -> turn.steer(new AgentTurnInput("follow-up", List.of())))
+                    .isInstanceOf(AgentUnavailableException.class).hasMessageContaining("does not support steering");
+            turn.cancel();
+            turn.cancel();
+            assertThat(turn.completion().toCompletableFuture().join().state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+        }
+    }
+
     private AgentSessionContext sessionContext(SessionAccess access)
     {
+        return sessionContext(access, Optional.empty());
+    }
+
+    private AgentSessionContext sessionContext(SessionAccess access, Optional<AgentSessionRef> reference)
+    {
         return new AgentSessionContext("task", directory, directory.resolve("runtime"), directory.resolve("runtime/provider"),
-                AgentPermissionPolicy.AUTO, Optional.empty(), (request, timeout) -> { throw new AssertionError("Unexpected approval"); },
+                AgentPermissionPolicy.AUTO, reference, (request, timeout) -> { throw new AssertionError("Unexpected approval"); },
                 Optional.empty(), Optional.empty(), access, "");
     }
 
@@ -143,6 +214,7 @@ class TestConnectorSpi
             implements AgentDriver
     {
         int opened;
+        int probes;
 
         @Override
         public AgentLaneId id() { return new AgentLaneId("fixture"); }
@@ -153,13 +225,15 @@ class TestConnectorSpi
         @Override
         public AgentProviderStatus probe()
         {
+            probes++;
             return new AgentProviderStatus(id(), AgentProviderStatus.Readiness.READY, Optional.empty(), "Ready", capabilities());
         }
 
         @Override
         public AgentSession open(AgentSessionContext context, AgentEventSink events)
         {
-            AgentSessionRef reference = new AgentSessionRef(id(), 1, "session-" + ++opened);
+            opened++;
+            AgentSessionRef reference = context.sessionReference().orElseGet(() -> new AgentSessionRef(id(), 1, "session-" + opened));
             return new AgentSession()
             {
                 @Override
@@ -168,6 +242,7 @@ class TestConnectorSpi
                 @Override
                 public RunningTurn start(AgentTurnCommand command)
                 {
+                    events.emit(new ProviderAgentEvent.Message(Optional.of(command.turnId()), ProviderAgentEvent.MessagePhase.FINAL, command.message(), root()));
                     return new RunningTurn()
                     {
                         @Override
@@ -209,6 +284,11 @@ class TestConnectorSpi
             if (closed || context.access() != SessionAccess.READ_ONLY) {
                 throw new AgentUnavailableException("Only read-only sessions are supported");
             }
+            context.sessionReference().ifPresent(reference -> {
+                if (!reference.laneId().equals(id()) || reference.contractVersion() != 1) {
+                    throw new AgentUnavailableException("Unsupported fixture session reference");
+                }
+            });
         }
 
         @Override
