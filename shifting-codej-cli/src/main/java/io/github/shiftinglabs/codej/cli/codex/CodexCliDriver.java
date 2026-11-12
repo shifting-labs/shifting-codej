@@ -48,7 +48,6 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderApprovalDecision;
 import io.github.shiftinglabs.codej.cli.driver.ProviderApprovalRequest;
 import io.github.shiftinglabs.codej.cli.driver.ProviderModel;
 import io.github.shiftinglabs.codej.cli.driver.ProviderQuotaSnapshot;
-import io.github.shiftinglabs.codej.cli.driver.ProviderServiceTier;
 import io.github.shiftinglabs.codej.cli.driver.ProviderTurnRef;
 import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
@@ -226,7 +225,7 @@ public final class CodexCliDriver
     private final ObjectMapper objectMapper;
     private final Duration quiescenceTimeout;
     private final AtomicReference<String> appServerVersion = new AtomicReference<>();
-    private volatile ModelCatalog modelCatalog;
+    private volatile CodexModelCatalog modelCatalog;
     private volatile String detectedVersion = "unknown";
     private volatile Instant readyUntil = Instant.MIN;
 
@@ -625,47 +624,24 @@ public final class CodexCliDriver
     {
         requireAvailable();
         rememberAppServerVersion();
-        return refreshModelCatalog().entries().stream()
-                    .filter(entry -> !entry.hidden())
-                    .map(entry -> new ProviderModel(
-                            entry.id(),
-                            entry.displayName(),
-                            entry.description(),
-                            entry.supportedReasoningEfforts().stream()
-                                    .map(CodexProtocol.ReasoningEffortOption::reasoningEffort)
-                                    .collect(toImmutableList()),
-                            Optional.of(entry.defaultReasoningEffort()),
-                            entry.isDefault(),
-                            // The schema's default when the field is absent: text and image.
-                            entry.inputModalities().orElse(ImmutableList.of("text", "image")),
-                            entry.serviceTiers().orElse(ImmutableList.of()).stream()
-                                    .map(tier -> new ProviderServiceTier(tier.id(), tier.name(), tier.description()))
-                                    .collect(toImmutableList())))
-                    .collect(toImmutableList());
+        return refreshModelCatalog().models();
     }
 
     /** Reads the catalog under a profile that cannot create a child, then caches that exact view. */
-    private synchronized ModelCatalog refreshModelCatalog()
+    private synchronized CodexModelCatalog refreshModelCatalog()
     {
         try (CodexAppServerClient catalog = appServerClient(
                 "codex-model-catalog",
                 Path.of(System.getProperty("user.dir")).toAbsolutePath(),
                 CodexLaunchProfile.ChildProfile.NONE)) {
             catalog.start();
-            ModelCatalog loaded = new ModelCatalog(catalog.request(
+            CodexModelCatalog loaded = new CodexModelCatalog(catalog.request(
                     "model/list",
                     new CodexProtocol.ModelListParams(),
                     CodexProtocol.ModelListResponse.class,
                     REQUEST_TIMEOUT).data());
             if (deepSeekSecret.isPresent()) {
-                List<String> ids = loaded.entries().stream().map(CodexProtocol.ModelEntry::id).collect(toImmutableList());
-                if (!ids.equals(ImmutableList.of("deepseek-flash", "deepseek-v4-pro"))
-                        || loaded.entries().stream().anyMatch(entry -> entry.hidden()
-                                || entry.multiAgentVersion().orElse(CodexProtocol.MultiAgentVersion.UNKNOWN) != CodexProtocol.MultiAgentVersion.DISABLED
-                                || !entry.inputModalities().orElse(ImmutableList.of()).equals(ImmutableList.of("text"))
-                                || !entry.serviceTiers().orElse(ImmutableList.of()).isEmpty())) {
-                    throw new AgentUnavailableException("DeepSeek model catalog does not match the SDK's attended text profile");
-                }
+                loaded.verifyDeepSeek();
             }
             modelCatalog = loaded;
             return loaded;
@@ -675,9 +651,9 @@ public final class CodexCliDriver
         }
     }
 
-    private synchronized ModelCatalog modelCatalog()
+    private synchronized CodexModelCatalog modelCatalog()
     {
-        ModelCatalog cached = modelCatalog;
+        CodexModelCatalog cached = modelCatalog;
         return cached == null ? refreshModelCatalog() : cached;
     }
 
@@ -686,7 +662,7 @@ public final class CodexCliDriver
     {
         requireNonNull(reference, "reference is null");
         requireNonNull(model, "model is null");
-        ModelCatalog cached = modelCatalog;
+        CodexModelCatalog cached = modelCatalog;
         if (reference.stream().anyMatch(saved -> saved.contractVersion() != REVIEW_DYNAMIC_CONTRACT_VERSION)
                 || compareVersion(detectedVersion, REVIEW_CHILD_GATE_MINIMUM_RELEASE).orElse(-1) < 0
                 || cached == null) {
@@ -721,7 +697,7 @@ public final class CodexCliDriver
         String runningVersion = rememberAppServerVersion();
         // The process runs in the task worktree so its sandbox grants writes there
         // without a separately registered execution environment.
-        ModelProfile modelProfile = modelCatalog().select(context.model());
+        CodexModelCatalog.ModelProfile modelProfile = modelCatalog().select(context.model());
         Optional<String> savedKey = deepSeekSecret.flatMap(Supplier::get);
         if (deepSeekSecret.isPresent() && savedKey.filter(key -> !key.isBlank()).isEmpty()) {
             throw new AgentUnavailableException("DeepSeek key removed or unavailable");
@@ -944,43 +920,6 @@ public final class CodexCliDriver
             Optional<URI> mcpEndpoint,
             Optional<Path> childGate) {}
 
-    private record ModelCatalog(List<CodexProtocol.ModelEntry> entries)
-    {
-        private ModelCatalog
-        {
-            entries = ImmutableList.copyOf(entries);
-        }
-
-        private ModelProfile select(Optional<String> selectedModel)
-        {
-            CodexProtocol.ModelEntry selected = entries.stream()
-                    .filter(entry -> !entry.hidden())
-                    .filter(entry -> selectedModel.map(entry.id()::equals).orElse(entry.isDefault()))
-                    .findFirst()
-                    .orElseThrow(() -> new AgentUnavailableException(selectedModel
-                            .map(model -> "Codex model " + model + " is not in the current model catalog")
-                            .orElse("Codex model catalog has no visible default model")));
-            CodexProtocol.MultiAgentVersion version = selected.multiAgentVersion().orElse(CodexProtocol.MultiAgentVersion.DISABLED);
-            CodexLaunchProfile.ChildProfile childProfile = switch (version) {
-                case DISABLED -> CodexLaunchProfile.ChildProfile.NONE;
-                case V1 -> CodexLaunchProfile.ChildProfile.V1;
-                case V2 -> CodexLaunchProfile.ChildProfile.V2;
-                case UNKNOWN -> throw new AgentUnavailableException("Codex model " + selected.id() + " advertises an unknown multi-agent version");
-            };
-            return new ModelProfile(selected.id(), childProfile, selected.serviceTiers().orElse(ImmutableList.of()));
-        }
-    }
-
-    private record ModelProfile(String id, CodexLaunchProfile.ChildProfile childProfile, List<CodexProtocol.ModelServiceTier> serviceTiers)
-    {
-        private ModelProfile
-        {
-            requireNonNull(id, "id is null");
-            requireNonNull(childProfile, "childProfile is null");
-            serviceTiers = ImmutableList.copyOf(serviceTiers);
-        }
-    }
-
     private final class CodexSession
             implements AgentSession, CodexMessageDispatcher.Listener
     {
@@ -994,7 +933,7 @@ public final class CodexCliDriver
         private Optional<McpRegistration> turnTools;
         private final Optional<PermissionBroker.CodexRootTools> guardedReviewTools;
         private final AgentSessionRef reference;
-        private final ModelProfile modelProfile;
+        private final CodexModelCatalog.ModelProfile modelProfile;
         private final CodexLaunchProfile.Options launchOptions;
         private final CodexLaunchProfile.ChildProfile childProfile;
         private final List<String> fixedWritableRoots;
@@ -1028,7 +967,7 @@ public final class CodexCliDriver
                 SecretRedactor sessionRedactor,
                 AgentSessionContext context,
                 AgentEventSink events,
-                ModelProfile modelProfile,
+                CodexModelCatalog.ModelProfile modelProfile,
                 CodexLaunchProfile.Options launchOptions,
                 Optional<McpRegistration> codeQueries,
                 Optional<PermissionBroker.CodexRootTools> guardedReviewTools,
