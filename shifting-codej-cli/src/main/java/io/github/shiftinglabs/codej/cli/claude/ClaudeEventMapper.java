@@ -50,7 +50,7 @@ final class ClaudeEventMapper
     private final Map<String, ToolCall> tools = new HashMap<>();
     private final Set<String> activeTools = new HashSet<>();
     private final Set<String> activeHooks = new HashSet<>();
-    private final Map<String, AgentCall> agents = new HashMap<>();
+    private final Map<String, ProviderAgentEventSource> agents = new HashMap<>();
     private final Map<String, AgentText> latestAgentText = new HashMap<>();
     private final Set<String> activeAgents = new HashSet<>();
     private final Set<String> backgroundAgents = new HashSet<>();
@@ -580,7 +580,7 @@ final class ClaudeEventMapper
         // Claude supplies invocation edges; the supplied description is a display label, not a resumable session or filesystem path.
         ProviderAgentEventSource child = new ProviderAgentEventSource(
                 Optional.of("claude-agent:" + toolId), parent.providerThreadId(), Optional.of(bounded(label)), Optional.empty(), Optional.empty());
-        agents.put(toolId, new AgentCall(child));
+        agents.put(toolId, child);
         activeAgents.add(toolId);
         events.add(new ProviderAgentEvent.Lifecycle(
                 eventId.map(value -> value + ":agent-start:" + toolId), ProviderAgentEvent.LifecyclePhase.AGENT_STARTED, bounded(label), child));
@@ -648,20 +648,20 @@ final class ClaudeEventMapper
                 ProviderAgentEvent.MessageKind.ANSWER,
                 ProviderAgentEvent.MessagePhase.FINAL,
                 text.text(),
-                agents.get(toolId).source().withItem(Optional.of(text.itemId())))));
+                agents.get(toolId).withItem(Optional.of(text.itemId())))));
         events.add(new ProviderAgentEvent.Lifecycle(
                 eventId.map(value -> value + ":agent-end:" + toolId),
                 state == ProviderAgentEvent.ActivityState.FAILED ? ProviderAgentEvent.LifecyclePhase.AGENT_FAILED : ProviderAgentEvent.LifecyclePhase.AGENT_COMPLETED,
                 bounded(summary),
-                agents.get(toolId).source()));
+                agents.get(toolId)));
     }
 
     private ProviderAgentEventSource source(Optional<String> parentToolUseId, Optional<String> itemId)
     {
         if (parentToolUseId.isPresent()) {
-            AgentCall parent = agents.get(parentToolUseId.orElseThrow());
+            ProviderAgentEventSource parent = agents.get(parentToolUseId.orElseThrow());
             if (parent != null) {
-                return parent.source().withItem(itemId);
+                return parent.withItem(itemId);
             }
             activityUncertain = true;
             return ProviderAgentEventSource.root().withItem(itemId);
@@ -704,7 +704,7 @@ final class ClaudeEventMapper
                 .or(() -> toolId.map(tools::get).filter(ToolCall::isCommand).map(ignored -> "local_bash"));
         tasks.put(id, new TaskActivity(toolId, taskType, finished));
         toolId.ifPresent(unidentifiedBackgroundTools::remove);
-        Optional<AgentCall> agent = toolId.map(agents::get);
+        Optional<ProviderAgentEventSource> agent = toolId.map(agents::get);
         if (message.backgrounded().orElse(false)) {
             toolId.filter(agents::containsKey).ifPresent(backgroundAgents::add);
         }
@@ -716,7 +716,7 @@ final class ClaudeEventMapper
                 .or(() -> message.prompt())
                 .or(() -> message.status())
                 .orElse("Claude task");
-        ProviderAgentEventSource eventSource = agent.map(value -> value.source().withItem(Optional.of(id)))
+        ProviderAgentEventSource eventSource = agent.map(value -> value.withItem(Optional.of(id)))
                 .orElseGet(() -> toolId.map(tools::get)
                         .map(call -> source(call.parentToolUseId(), Optional.of(id)))
                         .orElseGet(() -> ProviderAgentEventSource.item(id)));
@@ -729,7 +729,7 @@ final class ClaudeEventMapper
                     message.uuid().map(value -> value + ":agent-resume"),
                     ProviderAgentEvent.LifecyclePhase.AGENT_STARTED,
                     bounded(summary),
-                    agent.orElseThrow().source()));
+                    agent.orElseThrow()));
         }
         return events.build();
     }
@@ -781,8 +781,6 @@ final class ClaudeEventMapper
             return name.equals("Agent") || name.equals("Task");
         }
     }
-
-    private record AgentCall(ProviderAgentEventSource source) {}
 
     private record AgentText(String itemId, String text) {}
 

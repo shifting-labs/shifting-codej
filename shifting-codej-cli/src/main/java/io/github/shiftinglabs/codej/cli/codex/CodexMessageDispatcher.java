@@ -175,12 +175,8 @@ final class CodexMessageDispatcher
         return degraded;
     }
 
-    /**
-     * Appends work to the consumer.
-     *
-     * @return false when handling is already too far behind and the message was shed
-     */
-    private boolean submit(Runnable work)
+    /** Appends streamed work unless handling is already too far behind. */
+    private void submit(Runnable work)
     {
         if (pending.incrementAndGet() > MAX_PENDING) {
             pending.decrementAndGet();
@@ -188,7 +184,7 @@ final class CodexMessageDispatcher
                 degraded = true;
                 log.warn("Codex message handling fell too far behind; the event stream is degraded");
             }
-            return false;
+            return;
         }
         if (!execute(() -> {
             try {
@@ -201,9 +197,7 @@ final class CodexMessageDispatcher
             // The consumer is shut down, so the runnable that would have released the slot will
             // never run.
             pending.decrementAndGet();
-            return false;
         }
-        return true;
     }
 
     private boolean execute(Runnable work)

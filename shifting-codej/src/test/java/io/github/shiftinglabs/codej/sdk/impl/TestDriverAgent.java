@@ -29,6 +29,7 @@ import io.github.shiftinglabs.codej.Input;
 import io.github.shiftinglabs.codej.Limits;
 import io.github.shiftinglabs.codej.Model;
 import io.github.shiftinglabs.codej.Question;
+import io.github.shiftinglabs.codej.QuestionHandler;
 import io.github.shiftinglabs.codej.Session;
 import io.github.shiftinglabs.codej.SessionOptions;
 import io.github.shiftinglabs.codej.SessionRef;
@@ -607,6 +608,26 @@ class TestDriverAgent
                 ImmutableList.of(ProviderApprovalRequest.Decision.ALLOW_ONCE, ProviderApprovalRequest.Decision.DENY), false, ProviderAgentEventSource.root(), Instant.now()))
                 .decision()).isEqualTo(ProviderApprovalDecision.Decision.DENY);
         assertThat(question.get()).isNull();
+    }
+
+    @Test
+    void failedOrNullHandlerAnswersAreDenied()
+            throws Exception
+    {
+        for (ApprovalHandler handler : ImmutableList.<ApprovalHandler>of(
+                _ -> CompletableFuture.failedStage(new IllegalStateException("broken")),
+                _ -> CompletableFuture.completedStage(null),
+                _ -> null)) {
+            Approvals approvals = new Approvals(handler, Optional.empty(), Duration.ofMinutes(1), checkout, Runnable::run);
+            assertThat(decide(approvals, command("ls"))).isEqualTo(ProviderApprovalDecision.deny());
+        }
+        for (QuestionHandler handler : ImmutableList.<QuestionHandler>of(
+                _ -> CompletableFuture.failedStage(new IllegalStateException("broken")),
+                _ -> CompletableFuture.completedStage(null),
+                _ -> null)) {
+            Approvals approvals = new Approvals(ApprovalHandler.DENY_ALL, Optional.of(handler), Duration.ofMinutes(1), checkout, Runnable::run);
+            assertThat(decide(approvals, question())).isEqualTo(ProviderApprovalDecision.deny());
+        }
     }
 
     @Test
