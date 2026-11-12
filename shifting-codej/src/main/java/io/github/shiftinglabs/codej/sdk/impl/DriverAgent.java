@@ -13,39 +13,31 @@
  */
 package io.github.shiftinglabs.codej.sdk.impl;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.hash.Hashing;
 import io.github.shiftinglabs.codej.Agent;
 import io.github.shiftinglabs.codej.AgentException;
 import io.github.shiftinglabs.codej.AgentStatus;
 import io.github.shiftinglabs.codej.Capabilities;
-import io.github.shiftinglabs.codej.Codex;
 import io.github.shiftinglabs.codej.Limits;
 import io.github.shiftinglabs.codej.Model;
 import io.github.shiftinglabs.codej.Session;
 import io.github.shiftinglabs.codej.SessionOptions;
 import io.github.shiftinglabs.codej.SessionRef;
-import io.github.shiftinglabs.codej.cli.claude.ClaudeCliDriver;
-import io.github.shiftinglabs.codej.cli.claude.ClaudeGateway;
-import io.github.shiftinglabs.codej.cli.claude.ClaudeHome;
-import io.github.shiftinglabs.codej.cli.codex.CodexCliDriver;
 import io.github.shiftinglabs.codej.cli.codex.CodexGateway;
 import io.github.shiftinglabs.codej.cli.codex.CodexHome;
 import io.github.shiftinglabs.codej.cli.driver.AgentCapabilities;
 import io.github.shiftinglabs.codej.cli.driver.AgentDriver;
-import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.driver.AgentPermissionScope;
 import io.github.shiftinglabs.codej.cli.driver.AgentProviderStatus;
 import io.github.shiftinglabs.codej.cli.driver.ProviderModel;
 import io.github.shiftinglabs.codej.cli.driver.ProviderQuotaSnapshot;
 import io.github.shiftinglabs.codej.cli.mcp.PermissionBroker;
 import io.github.shiftinglabs.codej.cli.mcp.ToolServer;
+import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
+import io.github.shiftinglabs.codej.cli.spi.ConnectorDriver;
 
-import java.io.IOException;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
@@ -140,11 +132,10 @@ public final class DriverAgent
         this.sandbox = requireNonNull(sandbox, "sandbox is null");
     }
 
-    /** As {@link #owned(AgentDriver, PermissionBroker)}, with the sweep that keeps {@code home}'s transcripts when the caller set a time. */
-    private static List<AutoCloseable> owned(AgentDriver driver, PermissionBroker broker, Path home, Optional<Duration> keep, SessionSweeps.Pruner pruner)
+    /** Codex's connector owns its broker; the facade still owns its optional transcript sweep. */
+    private static List<AutoCloseable> owned(ConnectorDriver driver, Path home, Optional<Duration> keep, SessionSweeps.Pruner pruner)
     {
-        List<AutoCloseable> owned = owned(driver, broker);
-        return keep.isEmpty() ? owned : ImmutableList.<AutoCloseable>builder().addAll(owned).add(SessionSweeps.keep(home, keep.orElseThrow(), pruner)).build();
+        return keep.isEmpty() ? ImmutableList.of(driver) : ImmutableList.of(driver, SessionSweeps.keep(home, keep.orElseThrow(), pruner));
     }
 
     private static List<AutoCloseable> owned(AgentDriver driver, PermissionBroker broker)
@@ -161,71 +152,19 @@ public final class DriverAgent
     {
         StateFolder state = StateFolder.open(settings.stateDirectory().orElse(DEFAULT_STATE));
         Path home = settings.home().orElse(state.root().resolve("codex")).toAbsolutePath();
-        Optional<String> unavailable = Optional.empty();
-        Optional<Path> chosen = settings.executable();
-        if (chosen.isEmpty()) {
-            try {
-                chosen = Optional.of(binary.install());
-            }
-            catch (AgentException failure) {
-                unavailable = Optional.of(failure.getMessage());
-            }
-        }
-        // ponytail: without the binary the driver still needs a name; status() reports why before it would run.
-        String executable = chosen.map(Path::toString).orElse("codex");
-        ObjectMapper mapper = new ObjectMapper();
-        PermissionBroker broker = new PermissionBroker(mapper, settings.toolServer());
-        CodexCliDriver driver;
-        try {
-            if (settings.deepSeekKey().isPresent()) {
-                Supplier<String> key = settings.deepSeekKey().orElseThrow();
-                driver = CodexCliDriver.deepSeek(executable, Codex.VERSION, mapper, state.supervisor(), home, broker, lane("deepseek-key-", home), "DeepSeek",
-                        () -> Optional.ofNullable(key.get()));
-            }
-            else if (settings.gateway().isPresent()) {
-                Gateway gateway = settings.gateway().orElseThrow();
-                CodexGateway codexGateway = new CodexGateway(gateway.baseUrl().toString(), () -> Optional.ofNullable(gateway.token().get()));
-                driver = CodexCliDriver.gateway(executable, Codex.VERSION, mapper, state.supervisor(), CodexHome.prepare(home), broker,
-                        lane(AgentLaneId.CODEX_ACCOUNT_PREFIX, home), "Codex gateway", codexGateway);
-            }
-            else if (settings.apiKey().isPresent()) {
-                Supplier<String> key = settings.apiKey().orElseThrow();
-                driver = CodexCliDriver.apiKey(executable, Codex.VERSION, mapper, state.supervisor(), CodexHome.prepare(home), broker,
-                        lane(AgentLaneId.CODEX_ACCOUNT_PREFIX, home), "Codex · OpenAI API key", () -> Optional.ofNullable(key.get()));
-            }
-            else if (settings.account().isPresent()) {
-                String email = settings.account().orElseThrow();
-                driver = CodexCliDriver.account(executable, Codex.VERSION, mapper, state.supervisor(), CodexHome.prepare(home), broker,
-                        lane(AgentLaneId.CODEX_ACCOUNT_PREFIX, home), "Codex · " + email, email);
-            }
-            else {
-                driver = new CodexCliDriver(executable, Codex.VERSION, mapper, state.supervisor(), CodexHome.prepare(home), broker);
-            }
-        }
-        catch (IOException failure) {
-            throw new AgentException("Codex's home could not be prepared: " + home, failure);
-        }
-        return new DriverAgent(driver, "codex", state, owned(driver, broker, home, settings.keepSessions(), CodexHome::pruneSessions),
-                settings.callbackExecutor().orElse(VIRTUAL_THREADS), UnaryOperator.identity(), unavailable, settings.executable().map(_ -> Codex.VERSION));
+        CodexConnectorConfig configuration = new CodexConnectorConfig(settings.executable(), settings.account(),
+                settings.gateway().map(value -> new CodexGateway(value.baseUrl().toString(), () -> Optional.ofNullable(value.token().get()))),
+                settings.deepSeekKey(), settings.apiKey());
+        CodexConnectorDriver driver = new CodexConnector(binary).create(configuration, new ConnectorContext(home, state.supervisor(), settings.toolServer()));
+        return new DriverAgent(driver, "codex", state, owned(driver, home, settings.keepSessions(), CodexHome::pruneSessions),
+                settings.callbackExecutor().orElse(VIRTUAL_THREADS), UnaryOperator.identity(), driver.unavailable(), driver.testedVersion());
     }
 
     public static Agent claude(ClaudeSettings settings)
     {
         StateFolder state = StateFolder.open(settings.stateDirectory().orElse(DEFAULT_STATE));
         Path home = settings.configDir().orElse(state.root().resolve("claude")).toAbsolutePath();
-        String executable = settings.executable().map(Path::toString).orElse("claude");
-        ObjectMapper mapper = new ObjectMapper();
-        PermissionBroker broker = new PermissionBroker(mapper, settings.toolServer());
-        Optional<ClaudeGateway> gateway = settings.gateway().map(value -> new ClaudeGateway(value.baseUrl().toString(), value.token().get()));
-        AgentLaneId lane = settings.account().isPresent() || gateway.isPresent() ? lane(AgentLaneId.CLAUDE_ACCOUNT_PREFIX, home) : AgentLaneId.CLAUDE_CLI;
-        String label = settings.account().map(email -> "Claude · " + email).orElse(gateway.isPresent() ? "Claude gateway" : "Claude Code");
-        ClaudeCliDriver driver;
-        try {
-            driver = new ClaudeCliDriver(executable, mapper, broker, state.supervisor(), ClaudeHome.prepare(home), lane, label, settings.account(), gateway);
-        }
-        catch (IOException failure) {
-            throw new AgentException("Claude's config folder could not be prepared: " + home, failure);
-        }
+        ConnectorDriver driver = new ClaudeConnector().create(settings, new ConnectorContext(home, state.supervisor(), settings.toolServer()));
         List<String> outside = settings.outsideSandbox().stream().map(program -> program + " *").collect(toImmutableList());
         List<String> sockets = settings.unixSockets().stream().map(Path::toString).collect(toImmutableList());
         UnaryOperator<AgentPermissionScope> sandbox = scope -> {
@@ -233,14 +172,8 @@ public final class DriverAgent
             // These reach past the sandbox, so only a session that may use the network gets them.
             return reviewed.network() ? reviewed.withUnsandboxedCommands(outside).withUnixSockets(sockets) : reviewed;
         };
-        return new DriverAgent(driver, "claude", state, owned(driver, broker, home, settings.keepSessions(), ClaudeHome::pruneSessions),
+        return new DriverAgent(driver, "claude", state, ImmutableList.of(driver),
                 settings.callbackExecutor().orElse(VIRTUAL_THREADS), sandbox, Optional.empty(), Optional.empty());
-    }
-
-    /** Lanes of one kind differ by home, so a ref saved under one account is told apart from another's. */
-    private static AgentLaneId lane(String prefix, Path home)
-    {
-        return new AgentLaneId(prefix + Hashing.sha256().hashString(home.toString(), StandardCharsets.UTF_8).toString().substring(0, 12));
     }
 
     @Override
