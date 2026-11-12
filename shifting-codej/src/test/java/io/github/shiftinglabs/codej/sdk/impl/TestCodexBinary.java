@@ -135,6 +135,46 @@ class TestCodexBinary
     }
 
     @Test
+    void refusesARecordedArchiveWhoseFileChecksumDoesNotMatch()
+            throws IOException
+    {
+        Map<String, String> files = files("codex");
+        byte[] archive = archive(files, false, false);
+        Map<String, String> checksums = new LinkedHashMap<>(recorded(archive, files));
+        checksums.put(CLASSIFIER + "/bin/codex", Hashing.sha256().hashString("another binary", StandardCharsets.UTF_8).toString());
+        responder.set(exchange -> send(exchange, archive));
+
+        assertThatThrownBy(() -> binary(checksums).install())
+                .isInstanceOf(AgentException.class)
+                .hasMessage("The Codex package's bin/codex does not match the checksum this library records for Codex " + Codex.VERSION);
+        assertThat(requests).hasValue(1);
+        assertThat(cache).isEmptyDirectory();
+    }
+
+    @Test
+    void refusesDuplicateRequiredFilesEvenWhenTheirChecksumsMatch()
+            throws IOException
+    {
+        Map<String, String> files = files("codex");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(bytes)) {
+            for (Map.Entry<String, String> file : files.entrySet()) {
+                entry(gzip, ROOT + file.getKey(), file.getValue().getBytes(StandardCharsets.UTF_8), '0');
+            }
+            entry(gzip, ROOT + "bin/codex", files.get("bin/codex").getBytes(StandardCharsets.UTF_8), '0');
+            gzip.write(new byte[1024]);
+        }
+        byte[] archive = bytes.toByteArray();
+        responder.set(exchange -> send(exchange, archive));
+
+        assertThatThrownBy(() -> binary(recorded(archive, files)).install())
+                .isInstanceOf(AgentException.class)
+                .hasMessage("The Codex package's bin/codex is not one regular file");
+        assertThat(requests).hasValue(1);
+        assertThat(cache).isEmptyDirectory();
+    }
+
+    @Test
     void refusesAPackageMissingAFileOrHoldingALinkInItsPlace()
             throws IOException
     {

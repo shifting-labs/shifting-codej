@@ -13,7 +13,6 @@
  */
 package io.github.shiftinglabs.codej.cli.mcp;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -41,7 +40,6 @@ import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
 import io.github.shiftinglabs.codej.cli.driver.ToolSchemas;
 import io.github.shiftinglabs.codej.cli.process.AgentPermissionManager;
 import io.github.shiftinglabs.codej.cli.process.ApprovalScopes;
-import io.github.shiftinglabs.codej.cli.process.GitWorktreeWriteRoots;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 
 import java.io.IOException;
@@ -49,7 +47,6 @@ import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
@@ -68,7 +65,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static com.fasterxml.jackson.annotation.JsonInclude.Include.NON_ABSENT;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.github.shiftinglabs.codej.cli.driver.ProviderAgentEventSource.root;
@@ -98,7 +94,6 @@ public final class PermissionBroker
     /** Root-only gate for review sessions; see {@code review-child-gate.sh} for what it refuses and why. */
     private static final String CHILD_GATE_SCRIPT = readChildGateScript();
     private static final Pattern SHELL_SAFE_TOOL_NAME = Pattern.compile("[A-Za-z0-9_]+");
-    private static final List<String> CREDENTIAL_FILE_READS = ImmutableList.of("Read(~/.config/gh/**)", "Read(~/.git-credentials)", "Read(~/.netrc)", "Read(~/.ssh/**)");
     private static final int MAX_DETAIL_CHARACTERS = 16 * 1024;
     /** Claude's own cap on one answer; a longer one would make it refuse the whole answered input. */
     private static final int MAX_ANSWER_CHARACTERS = 8 * 1024;
@@ -106,6 +101,7 @@ public final class PermissionBroker
 
     private final ObjectMapper objectMapper;
     private final ToolServer toolServer;
+    private final ClaudeSandboxSettings sandbox;
     private final Map<String, PermissionContext> contexts = new ConcurrentHashMap<>();
     private final Set<String> nativeOnlyTokens = ConcurrentHashMap.newKeySet();
     /** Runs while any token is registered, so no port is open between sessions. */
@@ -123,6 +119,7 @@ public final class PermissionBroker
                 .registerModule(new Jdk8Module())
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
         this.toolServer = requireNonNull(toolServer, "toolServer is null");
+        this.sandbox = new ClaudeSandboxSettings(this.objectMapper, this.toolServer);
     }
 
     public ToolServer server()
@@ -167,7 +164,7 @@ public final class PermissionBroker
                 writeOwnerOnly(childGateFile, childGateScript(context));
                 Files.setPosixFilePermissions(childGateFile, PosixFilePermissions.fromString("rwx------"));
             }
-            writeOwnerOnly(settingsFile, sandboxSettings(context.scope(), runtimeDirectory.toRealPath(), worktree, environment, childGate));
+            writeOwnerOnly(settingsFile, sandbox.settings(context.scope(), runtimeDirectory.toRealPath(), worktree, environment, childGate));
             List<ToolDefinition> exposed = exposedTools(context);
             List<String> toolNames = exposed.stream()
                     .map(ToolDefinition::name)
@@ -479,7 +476,7 @@ public final class PermissionBroker
                 .filter(JsonNode::isBoolean).map(JsonNode::asBoolean).orElse(false)
                 // Claude runs these outside the sandbox with no flag. Any command that starts like one is shown that way, since
                 // a card that says sandboxed may be approved by the Assistant in words.
-                || unsandboxedCommand(context.scope()).matcher(arguments.input().path("command").asText("")).lookingAt());
+                || ClaudeSandboxSettings.unsandboxedCommand(context.scope()).matcher(arguments.input().path("command").asText("")).lookingAt());
         Optional<PermissionResult> allowed = precheckedFileEditPermission(arguments, context);
         if (allowed.isPresent()) {
             return toolResponse(id, objectMapper.writeValueAsString(allowed.orElseThrow()), false);
@@ -727,109 +724,13 @@ public final class PermissionBroker
         }
     }
 
-    private String sandboxSettings(AgentPermissionScope scope, Path runtimeDirectory, Path worktree, Map<String, String> environment, Optional<Path> childGate)
-            throws IOException
-    {
-        SessionAccess access = scope.access();
-        List<String> denyRead = scope.deniedReads(environment);
-        // git, gh and ssh read their own login files, so the sandbox may let them; the agent's Read tool never needs to.
-        ImmutableSet.Builder<String> deny = ImmutableSet.<String>builder().addAll(CREDENTIAL_FILE_READS);
-        denyRead.forEach(path -> deny.add("Read(" + path + ")", "Read(" + path + "/**)"));
-        scope.deniedCommands().forEach(command -> deny.add("Bash(" + command + ")", "Bash(" + command + ":*)"));
-        if (scope.readOnlySubagents()) {
-            // This task's MCP token does not distinguish a root agent from a child caller, so a child is
-            // admitted only behind the gate below, which keeps every write tool with the root.
-            // Skills and workflows start other kinds of children; SendMessage can resume earlier children.
-            deny.add("Skill", "Workflow", "SendMessage");
-            if (childGate.isEmpty()) {
-                deny.add("Agent", "Task");
-            }
-        }
-        if (access == SessionAccess.TOOLS_ONLY || scope.noSubagents()) {
-            // A tools-only session's child would inherit every host tool it holds, root-only ones included.
-            deny.add("Agent", "Task", "Skill", "Workflow", "SendMessage");
-        }
-        boolean allowUnsandboxedRetry = access == SessionAccess.FULL && !scope.approveEveryCommand();
-        ImmutableList.Builder<String> allowWrite = ImmutableList.builder();
-        // The runtime directory holds CI logs, the event log, and these settings; the agent must not rewrite its evidence.
-        ImmutableList.Builder<String> denyWrite = ImmutableList.<String>builder().add(runtimeDirectory.toString());
-        allowWrite.addAll(scope.writableRoots().stream().map(Path::toString).collect(toImmutableList()));
-        if (scope.commits() && Files.exists(worktree.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) {
-            List<String> gitRoots = GitWorktreeWriteRoots.writableRoots(worktree);
-            allowWrite.addAll(gitRoots.subList(1, gitRoots.size()));
-            Path gitDirectory = Path.of(gitRoots.get(1));
-            GitWorktreeWriteRoots.PROTECTED_METADATA.forEach(name -> denyWrite.add(gitDirectory.resolve(name).toString()));
-        }
-        // A read-only session's Bash is auto-approved, so denying the worktree is its containment boundary.
-        // A text-only worktree is already inside the runtime directory, and need not exist on disk.
-        if (access == SessionAccess.READ_ONLY || access == SessionAccess.REVIEW_READ_ONLY || access == SessionAccess.TOOLS_ONLY) {
-            denyWrite.add(worktree.toRealPath().toString());
-        }
-        SandboxFilesystem filesystem = new SandboxFilesystem(allowWrite.build(), denyRead, denyWrite.build());
-        if (!scope.webSearch()) {
-            deny.add("WebFetch", "WebSearch");
-        }
-        SandboxNetwork network = scope.network()
-                ? new SandboxNetwork(ImmutableList.of("*"), Optional.of(true), Optional.of(scope.unixSockets()).filter(sockets -> !sockets.isEmpty()))
-                : new SandboxNetwork(ImmutableList.of(), Optional.empty(), Optional.empty());
-        Sandbox sandbox = new Sandbox(
-                true,
-                true,
-                !scope.reviewSandboxedCommands() && !scope.approveEveryCommand(),
-                // Native Auto mode reviews retries first; unresolved requests use the permission callback.
-                allowUnsandboxedRetry,
-                scope.unsandboxedCommands(),
-                // gh and other Go tools verify TLS through macOS's trust agent; an open network loses nothing by reaching it.
-                scope.network(),
-                filesystem,
-                network);
-        // Native allow rules must not skip review, and native exceptions must not waive the session's rules.
-        Optional<AutoMode> autoMode = scope.reviewerRules().isEmpty() ? Optional.empty() : Optional.of(new AutoMode(true,
-                Optional.of(scope.reviewerContext()).filter(context -> !context.isEmpty())
-                        .map(context -> ImmutableList.<String>builder().add("$defaults").addAll(context).build()),
-                ImmutableList.<String>builder().add("$defaults").addAll(scope.reviewerRules()).build()));
-        // A hook sees agent_id on a child's tool call; the MCP request itself carries nothing that identifies the caller.
-        Optional<Hooks> hooks = childGate.map(gate -> new Hooks(ImmutableList.of(new HookMatcher(childGateMatcher(),
-                ImmutableList.of(new CommandHook("command", "'" + gate.toString().replace("'", "'\\''") + "'"))))));
-        return objectMapper.writeValueAsString(new ClaudeSettings(false, new Permissions(deny.build().asList()), sandbox, autoMode, hooks));
-    }
-
     /**
      * How the agent must run the session's unsandboxed commands for Claude to exempt them; empty when every command stays sandboxed.
      * Claude exempts only the command alone, optionally after {@code cd <dir> &&}; a pipe, redirect, chain, or subshell keeps it in.
      */
     public static String sandboxInstruction(AgentPermissionScope scope)
     {
-        if (scope.unsandboxedCommands().isEmpty()) {
-            return "";
-        }
-        String commands = launchers(scope).map(command -> "`" + command + " ...`").collect(Collectors.joining(", "));
-        return """
-                These commands run outside the sandbox, where they can download dependencies, only when the Bash command is the
-                call alone: %s, optionally after `cd <dir> &&`. A pipe, redirect, `;`, a later `&&`, a subshell or a leading
-                variable assignment keeps it in the sandbox, where every download fails. For long output, run it quietly or in the
-                background and read its output afterwards.
-                """.formatted(commands);
-    }
-
-    /** A Bash command Claude runs outside its sandbox: one of the session's unsandboxed commands, alone. */
-    private static Pattern unsandboxedCommand(AgentPermissionScope scope)
-    {
-        if (scope.unsandboxedCommands().isEmpty()) {
-            return Pattern.compile("(?!)");
-        }
-        return Pattern.compile("\\s*(cd\\s[^&]*&&\\s*)?(" + launchers(scope).map(Pattern::quote).collect(Collectors.joining("|")) + ")(\\s|$)");
-    }
-
-    private static Stream<String> launchers(AgentPermissionScope scope)
-    {
-        return scope.unsandboxedCommands().stream().map(pattern -> pattern.endsWith(" *") ? pattern.substring(0, pattern.length() - 2) : pattern);
-    }
-
-    /** Every call that starts a child, and every call to this server's tools, because a child inherits all of them. */
-    private String childGateMatcher()
-    {
-        return "^(Agent|Task|" + toolServer.prefix() + ".*)$";
+        return ClaudeSandboxSettings.instruction(scope);
     }
 
     /** Fills the gate's allowlist with the tools that only read: a tool stays root-only until it is marked child-callable. */
@@ -937,35 +838,6 @@ public final class PermissionBroker
             sessionTools = ImmutableList.copyOf(sessionTools);
         }
     }
-
-    @JsonInclude(NON_ABSENT)
-    private record ClaudeSettings(boolean autoMemoryEnabled, Permissions permissions, Sandbox sandbox, Optional<AutoMode> autoMode, Optional<Hooks> hooks) {}
-
-    private record Permissions(List<String> deny) {}
-
-    private record Sandbox(
-            boolean enabled,
-            boolean failIfUnavailable,
-            boolean autoAllowBashIfSandboxed,
-            boolean allowUnsandboxedCommands,
-            List<String> excludedCommands,
-            boolean enableWeakerNetworkIsolation,
-            SandboxFilesystem filesystem,
-            SandboxNetwork network) {}
-
-    private record SandboxFilesystem(List<String> allowWrite, List<String> denyRead, List<String> denyWrite) {}
-
-    @JsonInclude(NON_ABSENT)
-    private record SandboxNetwork(List<String> allowedDomains, Optional<Boolean> allowLocalBinding, Optional<List<String>> allowUnixSockets) {}
-
-    @JsonInclude(NON_ABSENT)
-    private record AutoMode(boolean classifyAllShell, Optional<List<String>> environment, @JsonProperty("hard_deny") List<String> hardDeny) {}
-
-    private record Hooks(@JsonProperty("PreToolUse") List<HookMatcher> preToolUse) {}
-
-    private record HookMatcher(String matcher, List<CommandHook> hooks) {}
-
-    private record CommandHook(String type, String command) {}
 
     private record McpConfiguration(@JsonProperty("mcpServers") Map<String, McpServer> servers)
     {
