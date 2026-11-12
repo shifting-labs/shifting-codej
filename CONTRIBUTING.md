@@ -78,8 +78,52 @@ mvn -pl shifting-codej -am -Dcodej.test.forks=1 \
 
 `codej.test.forks` retains the existing default of four for ordinary builds. The command above
 uses one fork and disables JUnit parallel execution. These suites do not launch a native CLI or
-run process stress tests. A future direct-model SPI needs its own contract base when that SPI
-is implemented; no `ModelClient` API is claimed or introduced here.
+run process stress tests.
+
+## Direct model SPI contracts
+
+The [direct API connector design and checkbox plan](docs/design/direct-api-connectors.md) separates
+one inference request from the shared agent engine. The additive SPI is in `cli.spi.model`;
+the engine and Anthropic adapter are follow-up work, not an available direct API lane yet.
+
+`shifting-codej-cli/src/test/java/io/github/shiftinglabs/codej/cli/testing/AbstractTestModelClient.java`
+is a reusable test-source base. Bind `client()`, `request()`, `expectedResponse()` and
+`expectedTextDeltas()` to a deterministic fixture. `pendingCall(client)` arranges a request held
+until cancellation; `failedCall(client)` arranges a connection loss with uncertain acceptance.
+Real adapters should bind these hooks through a fake HTTP transport and add wire-specific tests.
+The base covers metadata, ordered streaming, final replay/usage, idempotent cancellation/close,
+independent calls, normalized failures, null inputs and event-consumer failure. It is not a
+separately published test kit.
+
+[TestModelClientSpi](shifting-codej-cli/src/test/java/io/github/shiftinglabs/codej/cli/spi/model/consumer/TestModelClientSpi.java)
+binds that base without threads, processes or network. Its external consumer example retains a
+Java `Tool` in the host, sends only its schema to the adapter, receives a tool request, invokes the
+handler and continues inference with a copied replay checkpoint and matching tool result. It is
+an SPI usage example; persistence, permissions and the agent loop are not implemented by this fixture.
+
+| New API surface | Baseline coverage |
+| --- | --- |
+| `ModelClient` capabilities, probe, catalog/quota defaults, generate and close | Shared base and scripted binding |
+| `ModelCall` completion/cancel; `ModelEventSink.textDelta` | Ordered output, completion, cancellation, failures and ownership contracts |
+| `ModelRequest` builder, all options/accessors and schema-only definitions | `TestModelSpiValues` plus external tool continuation |
+| `ModelInput` user messages, attachments, tool batches and error results | Value validation/copy tests and consumer example |
+| `ModelResponse` accessors, tool calls, all stop reasons and final usage | Value tests and shared response contract |
+| `ModelCapabilities` constructor, conservative factory and all accessors | Defensive copying, invalid values and default coverage |
+| `ModelReplayState` constructor, all accessors and masked diagnostics | Lossless round-trip, version/identity validation and consumer continuation |
+| `ModelClientException` constructor, kind and delivery uncertainty | All failure kinds, invalid values and shared failure contract |
+
+Run only these suites and the existing legacy SPI consumer with a constrained JVM:
+
+```bash
+JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
+  nice -n 10 mvn -o -T1 -pl shifting-codej-cli -am \
+  -Dcodej.test.forks=1 -Djunit.jupiter.execution.parallel.enabled=false \
+  -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dtest=TestModelSpiValues,TestModelClientSpi,TestConnectorSpi verify
+```
+
+Offline mode requires dependencies already cached. This selects no native CLI or process-stress
+tests and does not run the SDK or downstream test suites.
 
 ## Versions
 
