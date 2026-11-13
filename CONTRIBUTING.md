@@ -84,7 +84,8 @@ run process stress tests.
 
 The [direct API connector design and checkbox plan](docs/design/direct-api-connectors.md) separates
 one inference request from the shared agent engine. The additive SPI is in `cli.spi.model`;
-the engine and Anthropic adapter are follow-up work, not an available direct API lane yet.
+the shared engine is implemented in `cli.api`; the Anthropic adapter and public facade are
+follow-up work. No live direct API lane is available yet.
 
 `shifting-codej-cli/src/test/java/io/github/shiftinglabs/codej/cli/testing/AbstractTestModelClient.java`
 is a reusable test-source base. Bind `client()`, `request()`, `expectedResponse()` and
@@ -124,6 +125,32 @@ JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
 
 Offline mode requires dependencies already cached. This selects no native CLI or process-stress
 tests and does not run the SDK or downstream test suites.
+
+## Shared API engine contracts
+
+`AbstractTestApiConnector<C>` extends the existing factory contract with text turns, normalized
+events, restart/resume and rejection of unsupported filesystem constraints. Override
+`contractSessionContext()` when a connector's validation baseline differs from the CLI default;
+the existing CLI bindings retain their read-only context. `TestApiConnector` binds the API base
+to a fake ModelClient and uses only public connector/session/turn types.
+
+`TestApiAgentDriver` and `TestApiSessionStore` cover the actual engine loop, durable replay and
+receipts, writer exclusion, approval/denial, schema enforcement, input staging, limits, error
+mapping, cancellation races, callback shutdown and borrowed resources. These tests use tiny
+in-memory model fixtures and temporary files, never native processes or live provider requests.
+
+Run the engine and affected pure contract suites with one constrained test JVM:
+
+```bash
+JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
+  nice -n 10 mvn -o -T1 -pl shifting-codej -am \
+  -Dcodej.test.forks=1 -Djunit.jupiter.execution.parallel.enabled=false \
+  -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dtest=TestApiAgentDriver,TestApiSessionStore,TestApiConnector,TestModelSpiValues,TestModelClientSpi,TestConnectorSpi,TestCodexConnector,TestClaudeConnector verify
+```
+
+This explicitly selected run compiles the reactor but runs no broad SDK, Bytequay, native CLI or
+process-stress suites. Keep unrelated working-tree edits out of the tested snapshot and commit.
 
 ## Versions
 
