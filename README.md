@@ -2,11 +2,12 @@
 
 Run [Codex](https://github.com/openai/codex) and [Claude Code](https://github.com/anthropics/claude-code)
 from Java through one small API: sessions, turns, live events, approvals, questions, and tools of
-your own. Direct Anthropic API sessions use the same API through `ClaudeApi`.
+your own. Direct Anthropic and DeepSeek API sessions use the same API through `ClaudeApi` and `DeepSeekApi`.
 
 OpenAI ships Codex SDKs for Python and TypeScript; this is one for Java, and it drives Claude Code
 the same way. CLI agents run on your machine, and the library owns every process they start.
-`ClaudeApi` uses the Anthropic Java SDK over HTTP and keeps conversation replay locally.
+`ClaudeApi` uses the Anthropic Java SDK; `DeepSeekApi` uses Chat Completions over JDK HTTP.
+Both use the shared API engine and keep conversation replay locally.
 
 > Draft. Not released yet.
 
@@ -340,6 +341,33 @@ sent to event listeners. Separate profile folders isolate accounts; rotating the
 The [design and checkbox plan](docs/design/direct-api-connectors.md) explains the SPI boundaries.
 The [fake HTTP facade tests](shifting-codej/src/test/java/io/github/shiftinglabs/codej/TestClaudeApi.java)
 show durable resume and host tools using only the existing public session API.
+
+## Direct DeepSeek API
+
+```java
+try (Agent agent = DeepSeekApi.builder()
+        .model(modelId)
+        .apiKey(vault::deepSeekKey)
+        .stateDirectory(stateDir)
+        .build();
+     Session session = agent.startSession(SessionOptions.in(workDir)
+             .access(Access.TOOLS_ONLY)
+             .build())) {
+    TurnResult result = session.run(Input.text("Hello"));
+}
+```
+
+This uses the same session store, tool loop, approvals, cancellation and limits as `ClaudeApi`.
+It sends Chat Completions requests directly to DeepSeek and starts no Codex process. The existing
+`Codex.builder().deepSeek(...)` lane continues to use Codex App Server.
+
+The initial direct adapter supports text and host-provided tools. Set `SessionOptions.effort(...)`
+to `none`, `low`, `high` or `max` when supported by the chosen model. The adapter retains private
+`reasoning_content` across tool workflows and later turns, and emits only visible answer text.
+Images, hosted tools and balance reporting are not exposed by this first binding. Metadata checks
+use `/models`; inference has no automatic retry. The same explicit `TOOLS_ONLY` scope and trusted
+host-tool rules described above apply. A saved direct DeepSeek reference requires its own profile
+and cannot resume a Codex or Claude conversation.
 
 ## Accounts, gateways and Claude
 

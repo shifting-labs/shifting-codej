@@ -63,12 +63,7 @@ public final class ClaudeApiConfig
 
         public Builder baseUrl(URI value)
         {
-            requireNonNull(value, "baseUrl is null");
-            String host = value.getHost();
-            boolean local = "127.0.0.1".equals(host) || "localhost".equals(host) || "[::1]".equals(host) || "::1".equals(host);
-            checkArgument(value.isAbsolute() && host != null && value.getUserInfo() == null && value.getQuery() == null && value.getFragment() == null
-                    && ("https".equals(value.getScheme()) || local && "http".equals(value.getScheme())), "invalid API base URL");
-            baseUrl = value;
+            baseUrl = ApiHttpTransport.checkBaseUrl(value);
             return this;
         }
 

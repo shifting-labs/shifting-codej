@@ -169,6 +169,15 @@ public final class DriverAgent
                 UnaryOperator.identity(), Optional.empty(), Optional.empty());
     }
 
+    public static Agent deepSeekApi(DeepSeekApiConfig settings, Optional<Path> stateDirectory, Optional<Path> profileDirectory)
+    {
+        StateFolder state = StateFolder.open(stateDirectory.orElse(DEFAULT_STATE.resolve("deepseek-api")));
+        Path profile = profileDirectory.orElse(state.root().resolve("profile")).toAbsolutePath();
+        ConnectorDriver driver = new DeepSeekApiConnector().create(settings, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
+        return new DriverAgent(driver, "deepseek-api", state, ImmutableList.of(driver), settings.callbacks.orElse(VIRTUAL_THREADS),
+                UnaryOperator.identity(), Optional.empty(), Optional.empty());
+    }
+
     public static Agent claude(ClaudeSettings settings)
     {
         StateFolder state = StateFolder.open(settings.stateDirectory().orElse(DEFAULT_STATE));

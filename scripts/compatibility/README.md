@@ -40,6 +40,11 @@ Codex, touch a database, or prove all provider behavior. Signature/source compat
 does not prove behavioral compatibility. The surface snapshot is intentionally strict: edits
 within existing types (even compatible additions/reordering) need review; new types are allowed.
 
+When the candidate contains direct API facades, the checker also runs separate JDK-only HTTP
+fixtures for `ClaudeApi` and `DeepSeekApi`. These verify each protocol's tool continuation and
+private replay, credential rotation and restart/resume through the unchanged public API. They
+exercise only loopback fake servers and use no live credentials or provider executables.
+
 ## Build isolation and final gate
 
 When other workers own the checkout, package a temporary **copy** of the latest stable sources,
