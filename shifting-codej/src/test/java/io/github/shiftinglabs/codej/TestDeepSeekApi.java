@@ -17,6 +17,8 @@ import io.github.shiftinglabs.codej.sdk.testing.DeepSeekHttpFixture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URI;
@@ -168,6 +170,45 @@ class TestDeepSeekApi
             assertThatThrownBy(() -> agent.startSession(SessionOptions.in(directory).build())).isInstanceOf(AgentException.class);
             assertThat(http.requests()).noneMatch(request -> request.method().equals("POST"));
         }
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void publicCodingOptionReachesTheSharedEngine()
+            throws Exception
+    {
+        Files.writeString(directory.resolve("source.txt"), "shared-engine-content");
+        SessionOptions options = SessionOptions.in(directory).access(Access.READ_ONLY)
+                .approvals(approval -> java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE)).build();
+        try (Agent agent = builder().codingTools(CodingTools.defaults()).build()) {
+            assertThat(agent.status().ready()).isTrue();
+            String arguments = DeepSeekHttpFixture.JSON.writeValueAsString(new FilePath("source.txt"));
+            String tool = DeepSeekHttpFixture.JSON.writeValueAsString(new ApiToolUse(0, "read-1", "function", new ApiFunction("read_file", arguments)));
+            http.reply(200, "data: {\"id\":\"coding-1\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-contract\","
+                    + "\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[" + tool
+                    + "]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+            try (Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("Read source"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(http.requests().stream().filter(request -> request.method().equals("POST")).toList()).hasSize(2);
+                assertThat(http.requests().getLast().body().toString()).contains("shared-engine-content", "sha256");
+            }
+        }
+    }
+
+    private record FilePath(String path) {}
+
+    private record ApiFunction(String name, String arguments) {}
+
+    private record ApiToolUse(int index, String id, String type, ApiFunction function) {}
+
+    @Test
+    void codingToolsAreOptInAndBuildStartsNoCommandsOrInference()
+    {
+        try (Agent agent = builder().codingTools(CodingTools.defaults()).build()) {
+            assertThat(agent).isNotNull();
+            assertThat(http.requests()).isEmpty();
+        }
+        assertThatThrownBy(() -> builder().codingTools(null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test

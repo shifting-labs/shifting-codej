@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -132,6 +133,11 @@ def verify(args, report):
                           "ClaudeApiConsumer", str(Path(folder) / "claude-api")])
             (output / "claude-api-consumer.txt").write_text(result)
             report["passed"].append("ClaudeApi fake HTTP: shaded SDK, signed tool replay, durable resume and key rotation; JDK + jar only")
+            if sys.platform == "darwin":
+                result = run([jdk_tool("java"), "-cp", os.pathsep.join((str(classes), str(candidate))),
+                              "ClaudeApiConsumer", str(Path(folder) / "coding-api"), "coding"])
+                (output / "coding-api-consumer.txt").write_text(result)
+                report["passed"].append("Coding tools: shaded record binding, file reads, native sandbox lifecycle and resume; JDK + jar only")
 
         with zipfile.ZipFile(candidate) as artifact:
             has_deepseek_api = PREFIX + "DeepSeekApi.class" in artifact.namelist()

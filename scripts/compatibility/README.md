@@ -113,3 +113,9 @@ The sealed control uses the cached baseline and JDK, with all compilation in tem
 Run the published jar as both baseline and candidate to test the checker/fixture independently of
 the refactor. As a negative control, copy that jar to a temporary file without the checksum resource
 and confirm the checker exits nonzero with `success: false`. Keep all controls outside the checkout.
+
+On macOS, the candidate-only Claude API fixture also runs in `coding` mode. It reads a temporary
+file through record-bound built-in tools, performs the contained command startup check, and
+resumes the same conversation from the shaded artifact. Its classpath contains only the JDK and
+candidate jar; no CLI download or live provider is used. Existing baseline-compiled consumer
+checks continue unchanged.

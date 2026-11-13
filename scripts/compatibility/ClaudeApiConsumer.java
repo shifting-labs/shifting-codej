@@ -17,6 +17,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.github.shiftinglabs.codej.Access;
 import io.github.shiftinglabs.codej.Agent;
 import io.github.shiftinglabs.codej.ClaudeApi;
+import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.Decision;
 import io.github.shiftinglabs.codej.Input;
 import io.github.shiftinglabs.codej.Session;
@@ -29,6 +30,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
@@ -39,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /** Compiled against the candidate, then run with only the JDK and its shaded jar. No live service or credentials. */
 public final class ClaudeApiConsumer
 {
+    private static boolean coding;
     private static final String MODEL = "claude-contract";
     private static final AtomicReference<String> KEY = new AtomicReference<>("sk-packaged-first");
     private static final AtomicReference<Throwable> SERVER_FAILURE = new AtomicReference<>();
@@ -49,6 +52,11 @@ public final class ClaudeApiConsumer
             throws Exception
     {
         Path state = Path.of(args[0]);
+        coding = args.length > 1 && args[1].equals("coding");
+        Path workspace = coding ? Files.createDirectories(state.resolve("workspace")) : state;
+        if (coding) {
+            Files.writeString(workspace.resolve("source.txt"), "tool-value");
+        }
         var http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         try (var callbacks = Executors.newSingleThreadExecutor()) {
             http.setExecutor(callbacks);
@@ -60,8 +68,12 @@ public final class ClaudeApiConsumer
                 TOOLS.incrementAndGet();
                 return "tool-value";
             });
-            SessionOptions options = SessionOptions.in(state).access(Access.TOOLS_ONLY).tool(lookup)
-                    .approvals(approval -> CompletableFuture.completedStage(Decision.ALLOW_ONCE)).build();
+            var sessionOptions = SessionOptions.in(workspace).access(coding ? Access.READ_ONLY : Access.TOOLS_ONLY)
+                    .approvals(approval -> CompletableFuture.completedStage(Decision.ALLOW_ONCE));
+            if (!coding) {
+                sessionOptions.tool(lookup);
+            }
+            SessionOptions options = sessionOptions.build();
             SessionRef saved;
             try (Agent agent = agent(endpoint, state); Session session = agent.startSession(options)) {
                 require(agent.models().size() == 1, "Model metadata failed");
@@ -73,7 +85,10 @@ public final class ClaudeApiConsumer
                 require(session.run(Input.text("Continue")) instanceof TurnResult.Completed, "Resume failed");
             }
             require(SERVER_FAILURE.get() == null, "Wire assertion failed: " + SERVER_FAILURE.get());
-            require(TOOLS.get() == 1 && REQUESTS.get() == 3, "Unexpected inference or tool count");
+            require(TOOLS.get() == (coding ? 0 : 1) && REQUESTS.get() == 3, "Unexpected inference or tool count");
+            if (coding) {
+                System.out.println("PASS: shaded coding tools, record binding, contained commands, native process resources, file reads and resume; JDK + jar only");
+            }
             System.out.println("PASS: shaded ClaudeApi metadata, streaming, signed tool replay, key rotation, host tools and durable resume; JDK + jar only");
         }
         finally {
@@ -83,8 +98,12 @@ public final class ClaudeApiConsumer
 
     private static Agent agent(URI endpoint, Path state)
     {
-        return ClaudeApi.builder().model(MODEL).apiKey(KEY::get).baseUrl(endpoint).stateDirectory(state)
-                .requestTimeout(Duration.ofSeconds(5)).maximumOutputTokens(128).build();
+        var builder = ClaudeApi.builder().model(MODEL).apiKey(KEY::get).baseUrl(endpoint).stateDirectory(state)
+                .requestTimeout(Duration.ofSeconds(5)).maximumOutputTokens(128);
+        if (coding) {
+            builder.codingTools(CodingTools.defaults());
+        }
+        return builder.build();
     }
 
     private static void handle(HttpExchange exchange)
@@ -109,7 +128,8 @@ public final class ClaudeApiConsumer
                         response = start()
                                 + event("content_block_start", "\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"signed-state\"}")
                                 + event("content_block_stop", "\"index\":0")
-                                + event("content_block_start", "\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"lookup\",\"input\":{\"key\":\"value\"}}")
+                                + event("content_block_start", "\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\""
+                                        + (coding ? "read_file\",\"input\":{\"path\":\"source.txt" : "lookup\",\"input\":{\"key\":\"value") + "\"}}")
                                 + event("content_block_stop", "\"index\":1") + end("tool_use");
                     }
                     else {

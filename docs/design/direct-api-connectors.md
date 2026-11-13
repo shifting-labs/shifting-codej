@@ -1,8 +1,8 @@
 # Direct API connectors
 
 Status: option 2 selected: own the Java engine and selectively adopt Codex runtime behavior.
-The model SPI, shared engine, Anthropic Java SDK and direct DeepSeek adapters, and additive
-`ClaudeApi` / `DeepSeekApi` facades are implemented. Validation uses fake clients and loopback HTTP; no live account was exercised.
+The model SPI, shared engine, Anthropic Java SDK and direct DeepSeek adapters, additive
+`ClaudeApi` / `DeepSeekApi` facades, and opt-in contained coding tools are implemented. Validation uses fake clients and loopback HTTP; no live account was exercised.
 
 ## Boundaries
 
@@ -140,7 +140,9 @@ deadline and callback queues; add bounded parallelism only with an explicit inde
 trusted capabilities, not automatically sandboxed by this library. A name/schema does not prove
 read-only behavior. Full filesystem/shell/network/review support needs tools with real enforcement.
 Reject unsupported constraints in `validate()` rather than replacing them with prompt instructions.
-The first engine delivery supports text and host tools; native coding-tool parity is a later step.
+The first engine delivery supports text and host tools. The opt-in [built-in coding tools](coding-tools.md)
+add enforced file/search/patch tools and a deliberately limited, contained single-process command mode;
+general native coding-tool parity remains a later step.
 
 Never replay a completed tool when retrying inference. A saved result is reused; an execution
 intent with no saved outcome is uncertain and requires reconciliation. Do not promise exactly-once
@@ -314,7 +316,7 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 - [x] Run the existing published-artifact compatibility check on the integrated shaded artifact.
 - [x] Run affected Bytequay tests using the unchanged downstream API/dependency conventions.
 - [x] Add another direct API provider through the same contracts to validate engine reuse.
-- [ ] Add shared filesystem/shell tools only with verified containment and permission tests.
+- [x] Add opt-in shared file/search/patch and contained single-process shell tools with permission tests.
 - [ ] Evaluate optional compaction, provider-hosted tools and separate connector artifacts as needed.
 
 ## Second direct provider: DeepSeek
@@ -366,7 +368,7 @@ Every verification process used one CPU, a 512 MiB heap, serial GC, low process 
 test fork, with JUnit parallel execution disabled. Builds and downstream checks ran in temporary
 snapshots; the four unrelated Claude edits were excluded and preserved. No agents, live-provider
 inference, native CLI/process-stress tests, Xcode builds, simulators or full application suites ran.
-Shared coding tools and containment remain the next engine milestone.
+At that checkpoint, shared coding tools and containment were the next engine milestone; the implementation is recorded below.
 
 Protocol references: [Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/),
 [thinking/tool replay](https://api-docs.deepseek.com/guides/thinking_mode/),
@@ -424,3 +426,8 @@ Checked 2026-11-13:
   lossless assistant replay requirements.
 - [Agent SDK comparison](https://code.claude.com/docs/en/agent-sdk/overview): direct API client
   versus Claude Code's agent harness.
+
+### Built-in coding tools
+
+See [coding-tools.md](coding-tools.md) for enablement, typed contracts, permission enforcement,
+filesystem and process containment, limits, lifecycle invariants, and the implementation checklist.
