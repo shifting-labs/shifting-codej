@@ -18,6 +18,12 @@ This builds what a release publishes, in `shifting-codej/target/`: the jar with 
 renamed inside it, its sources and Javadoc, and `dependency-reduced-pom.xml`, which names no
 dependency.
 
+## Commits
+
+A commit message names no AI agent as an author: no `Co-Authored-By:` trailer for Claude, Codex or
+any other agent, and no generated-by line. The person who submits the change is its author. This
+applies to commits an agent writes on someone's behalf.
+
 ## Modules
 
 - `shifting-codej-api`: the public types. It imports neither of the other modules' packages;
