@@ -148,6 +148,11 @@
                                             <pattern>org.jetbrains</pattern>
                                             <shadedPattern>io.github.shiftinglabs.codej.internal.jetbrains</shadedPattern>
                                         </relocation>
+                                        <!-- org.jetbrains:annotations also carries org.intellij.lang.annotations. -->
+                                        <relocation>
+                                            <pattern>org.intellij</pattern>
+                                            <shadedPattern>io.github.shiftinglabs.codej.internal.intellij</shadedPattern>
+                                        </relocation>
                                         <relocation>
                                             <pattern>io.opentelemetry</pattern>
                                             <shadedPattern>io.github.shiftinglabs.codej.internal.opentelemetry</shadedPattern>
