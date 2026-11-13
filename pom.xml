@@ -46,7 +46,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <guava.version>33.4.8-jre</guava.version>
-        <jackson.version>2.19.0</jackson.version>
+        <jackson.version>2.19.4</jackson.version>
+        <anthropic.version>3.8.0</anthropic.version>
         <lombok.version>1.18.46</lombok.version>
         <junit.version>5.12.2</junit.version>
         <assertj.version>3.27.3</assertj.version>

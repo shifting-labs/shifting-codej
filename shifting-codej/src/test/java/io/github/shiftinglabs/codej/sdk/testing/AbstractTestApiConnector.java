@@ -13,6 +13,8 @@
  */
 package io.github.shiftinglabs.codej.sdk.testing;
 
+import io.github.shiftinglabs.codej.Tool;
+import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.driver.AgentPermissionPolicy;
 import io.github.shiftinglabs.codej.cli.driver.AgentSession;
 import io.github.shiftinglabs.codej.cli.driver.AgentSessionContext;
@@ -21,6 +23,7 @@ import io.github.shiftinglabs.codej.cli.driver.AgentTurnCommand;
 import io.github.shiftinglabs.codej.cli.driver.AgentTurnResult;
 import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
 import io.github.shiftinglabs.codej.cli.driver.ProviderAgentEvent;
+import io.github.shiftinglabs.codej.cli.driver.ProviderApprovalDecision;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorDriver;
 import org.junit.jupiter.api.Test;
@@ -29,7 +32,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -85,6 +90,40 @@ public abstract class AbstractTestApiConnector<C>
                     .toCompletableFuture().get(2, TimeUnit.SECONDS).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
         }
     }
+
+    @Test
+    protected void executesHostToolsThroughTheExistingSessionContract()
+            throws Exception
+    {
+        AtomicInteger calls = new AtomicInteger();
+        Tool tool = Tool.of("contract_lookup", "Look up a contract", Lookup.class, input -> {
+            assertThat(input.key()).isEqualTo("CONTRACT-1");
+            calls.incrementAndGet();
+            return "CONTRACT-1";
+        });
+        var base = contractSessionContext();
+        var tools = new AgentSessionContext(base.taskId(), base.worktree(), base.runtimeDirectory(), base.providerDirectory(),
+                AgentPermissionPolicy.AUTO, Optional.empty(), (request, timeout) -> CompletableFuture.completedFuture(ProviderApprovalDecision.allow(Optional.empty())),
+                Optional.empty(), Optional.empty(), SessionAccess.TOOLS_ONLY, "", List.of(tool));
+        try (ConnectorDriver driver = connector().create(configuration(), contractContext());
+                AgentSession session = driver.open(tools, event -> {})) {
+            assertThat(session.start(new AgentTurnCommand("tools", "Call contract_lookup with key CONTRACT-1.", List.of(), Duration.ZERO))
+                    .completion().toCompletableFuture().get(3, TimeUnit.SECONDS).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(calls).hasValue(1);
+        }
+    }
+
+    @Test
+    protected void rejectsForeignReferencesBeforeCreatingProfiles()
+    {
+        try (ConnectorDriver driver = connector().create(configuration(), contractContext())) {
+            var foreign = new AgentSessionRef(new AgentLaneId("foreign-api"), 1, "conversation");
+            assertThatThrownBy(() -> driver.open(context(Optional.of(foreign)), event -> {})).isInstanceOf(AgentUnavailableException.class);
+            assertThat(contractContext().profileDirectory()).doesNotExist();
+        }
+    }
+
+    public record Lookup(String key) {}
 
     @Test
     protected void refusesFilesystemConstraintsBeforeOpeningAConversation()

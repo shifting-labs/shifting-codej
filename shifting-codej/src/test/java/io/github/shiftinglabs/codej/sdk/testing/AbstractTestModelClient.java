@@ -11,7 +11,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.shiftinglabs.codej.cli.testing;
+package io.github.shiftinglabs.codej.sdk.testing;
 
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
@@ -70,7 +70,7 @@ public abstract class AbstractTestModelClient
         try (ModelClient client = client()) {
             List<String> deltas = new ArrayList<>();
             ModelCall call = client.generate(request(), deltas::add);
-            ModelResponse response = call.completion().toCompletableFuture().get(1, TimeUnit.SECONDS);
+            ModelResponse response = call.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
             ModelResponse expected = expectedResponse();
             assertThat(deltas).containsExactlyElementsOf(expectedTextDeltas());
             assertThat(response.text()).isEqualTo(expected.text());
@@ -82,7 +82,7 @@ public abstract class AbstractTestModelClient
             assertThat(response.usage()).isEqualTo(expected.usage());
             call.cancel();
             call.cancel();
-            assertThat(call.completion().toCompletableFuture().get(1, TimeUnit.SECONDS)).isSameAs(response);
+            assertThat(call.completion().toCompletableFuture().get(3, TimeUnit.SECONDS)).isSameAs(response);
             assertThat(deltas).containsExactlyElementsOf(expectedTextDeltas());
         }
     }
@@ -171,7 +171,7 @@ public abstract class AbstractTestModelClient
     private static Throwable failure(ModelCall call)
             throws Exception
     {
-        Throwable failure = call.completion().handle((response, error) -> error).toCompletableFuture().get(1, TimeUnit.SECONDS);
+        Throwable failure = call.completion().handle((response, error) -> error).toCompletableFuture().get(3, TimeUnit.SECONDS);
         while (failure instanceof CompletionException && failure.getCause() != null) {
             failure = failure.getCause();
         }

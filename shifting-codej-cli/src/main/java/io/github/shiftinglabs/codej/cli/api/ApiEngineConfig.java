@@ -21,6 +21,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Supplier;
 
@@ -48,6 +49,8 @@ public final class ApiEngineConfig
     final boolean approveTools;
     final Optional<ExecutorService> executor;
     final SecretRedactor redactor;
+    final Supplier<SecretRedactor> redactors;
+    final Optional<Executor> toolExecutor;
 
     private ApiEngineConfig(Builder b)
     {
@@ -68,7 +71,11 @@ public final class ApiEngineConfig
         approveTools = b.approveTools;
         executor = b.executor;
         redactor = b.redactor;
+        redactors = b.redactors.orElse(() -> redactor);
+        toolExecutor = b.toolExecutor;
     }
+
+    SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
 
     public static Builder builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
     {
@@ -93,6 +100,8 @@ public final class ApiEngineConfig
         private Duration shutdownTimeout = Duration.ofSeconds(2);
         private boolean approveTools = true;
         private Optional<ExecutorService> executor = Optional.empty();
+        private Optional<Supplier<SecretRedactor>> redactors = Optional.empty();
+        private Optional<Executor> toolExecutor = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -185,6 +194,21 @@ public final class ApiEngineConfig
         public Builder redactor(SecretRedactor value)
         {
             redactor = requireNonNull(value, "redactor is null");
+            redactors = Optional.empty();
+            return this;
+        }
+
+        /** Supplies the current redactor, including credentials refreshed by a provider adapter. */
+        public Builder redactorSupplier(Supplier<SecretRedactor> value)
+        {
+            redactors = Optional.of(requireNonNull(value, "redactorSupplier is null"));
+            return this;
+        }
+
+        /** Borrowed executor for trusted host tools; cancellation waits for an executing handler to finish. */
+        public Builder toolExecutor(Executor value)
+        {
+            toolExecutor = Optional.of(requireNonNull(value, "toolExecutor is null"));
             return this;
         }
 

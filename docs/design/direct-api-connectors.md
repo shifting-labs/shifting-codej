@@ -1,8 +1,8 @@
 # Direct API connectors
 
 Status: option 2 selected: own the Java engine and selectively adopt Codex runtime behavior.
-The model SPI and shared engine are implemented for fake-client validation. A direct Anthropic
-adapter and public facade remain follow-up work; no live direct API lane is claimed here.
+The model SPI, shared engine, Anthropic Java SDK adapter and additive `ClaudeApi` facade are
+implemented. Validation uses fake clients and loopback HTTP; no live account was exercised.
 
 ## Boundaries
 
@@ -25,7 +25,7 @@ flowchart TD
 
 | Component | Owns |
 | --- | --- |
-| Proposed `ClaudeApiConnector implements AgentConnector<ClaudeApiConfig>` | Typed configuration and runtime assembly; no inference at construction |
+| `ClaudeApiConnector implements AgentConnector<ClaudeApiConfig>` | Typed configuration and runtime assembly; no inference at construction |
 | `ApiConnector` / `ApiEngineConfig` / `ApiAgentDriver implements ConnectorDriver` | Provider-bound runtime assembly and shared driver/session/turn behavior |
 | `ModelClient` | One inference response, model metadata, protocol translation, replay encoding and normalized failures |
 | Internal `ApiSessionStore` | Durable checkpoints, execution journal, profile ownership and single-writer locking |
@@ -245,7 +245,8 @@ existing POSIX platform scope; no cross-platform native packaging is added.
 
 `ApiEngineConfig` owns a fresh ModelClient from its supplier. Default turn workers are bounded by
 session capacity; a supplied ExecutorService is borrowed and remains open. Host tool handlers run
-on the turn worker. A positive turn runtime installs an owned cancellation timer; a zero runtime
+on the turn worker unless an optional borrowed tool executor is supplied. Cancellation waits for
+that handler to actually return before releasing the writer. A positive turn runtime installs an owned cancellation timer; a zero runtime
 retains the existing no-deadline meaning. Model call completion, rather than future cancellation
 alone, is the transport quiescence fence. Close is bounded and reports failure while retaining
 the session writer if a model call or callback has not stopped. Close from an active callback
@@ -268,16 +269,49 @@ compaction and retention remain separate follow-ups. No hidden replay data is se
 
 ### Step 3: Direct Claude API
 
-- [ ] Implement `AnthropicModelClient` with the official Java SDK behind the new model SPI.
-- [ ] Validate models/options; preserve complete replay blocks; format tool results and normalize usage/errors.
-- [ ] Configure explicit credentials, endpoint, retry policy, bounded transport resources and redaction.
-- [ ] Bind the reusable model contracts through a controlled fake HTTP transport; test Claude wire details.
-- [ ] Add `ClaudeApiConfig`, `ClaudeApiConnector` and the additive `ClaudeApi` facade.
-- [ ] Add a public usage example returning the existing `Agent`/`Session`/`Turn` types.
+- [x] Implement `AnthropicModelClient` with the official Java SDK behind the new model SPI.
+- [x] Validate models/options; preserve complete replay blocks; format tool results and normalize usage/errors.
+- [x] Configure explicit credentials, endpoint, retry policy, bounded transport resources and redaction.
+- [x] Bind the reusable model contracts through a controlled fake HTTP transport; test Claude wire details.
+- [x] Add `ClaudeApiConfig`, `ClaudeApiConnector` and the additive `ClaudeApi` facade.
+- [x] Add a public usage example returning the existing `Agent`/`Session`/`Turn` types.
+
+
+Implementation: `AnthropicModelClient` uses official `anthropic-java-core` 3.8.0 through its HTTP
+extension point backed by JDK HTTP. Redirects and SDK retries are disabled. Owned worker pools,
+queued calls, body sizes and stream deadlines are bounded. The adapter reads only the supplied key,
+adds it per operation and supplies a refreshed redactor to the engine; credentials never enter
+SDK logs, checkpoints or raw exception causes. Endpoint/profile identity excludes credentials.
+
+The SDK and all runtime dependencies stay private in the self-contained shaded artifact. Its
+explicit Jackson creators are used with a mapper that preserves SDK missing/null values without
+Kotlin reflection, whose binary metadata Maven Shade cannot rewrite. A JDK-only packaged consumer
+verifies this boundary through real fake HTTP rather than relying solely on reactor classes.
+
+The adapter assembles complete SDK stream events, preserves thinking/signatures and additional
+content-block fields in replay, and emits only visible text. Unsupported block/delta types and
+incomplete responses fail explicitly. Tool JSON must be complete before the shared engine sees it.
+Ordered tool results use native `tool_result` blocks, including `is_error`; cache creation/read and
+normal input tokens are normalized into the existing usage sample. No monetary cost is inferred.
+
+`ClaudeApi.builder()` requires a model and key supplier. It returns the existing `Agent`; durable
+resume uses the existing `SessionRef` encoding with a new provider ID, `claude-api`. The default
+state folder is separate from CLI state. Profiles bind the normalized folder and endpoint, so key
+rotation preserves identity and another endpoint cannot silently resume those sessions. Existing
+builders, settings records, enum/sealed shapes and session defaults remain unchanged. Callers must
+choose `Access.TOOLS_ONLY`; read-only/full filesystem scopes are rejected before inference.
+
+Validation on 2026-11-13: 139 focused tests passed (6 API tool/schema, 50 shared engine/SPI,
+83 SDK contract/adapter/facade tests), with one fork, parallel execution disabled and one CPU.
+Checkstyle, license checks, shaded packaging and strict public Javadocs passed. The published
+0.164.0-1 API descriptors, record/enum/sealed shapes and checksum resource remained compatible;
+the unchanged baseline-compiled consumer and the new JDK-only fake-HTTP consumer both passed.
+Four pre-existing Claude CLI edits were excluded from the tested snapshot and preserved.
+No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suites were started.
 
 ### Step 4: Integration and follow-ups
 
-- [ ] Run the existing published-artifact compatibility check on the integrated shaded artifact.
+- [x] Run the existing published-artifact compatibility check on the integrated shaded artifact.
 - [ ] Run affected Bytequay tests using the unchanged downstream API/dependency conventions.
 - [ ] Add another direct API provider through the same contracts to validate engine reuse.
 - [ ] Add shared filesystem/shell tools only with verified containment and permission tests.

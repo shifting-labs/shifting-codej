@@ -160,6 +160,15 @@ public final class DriverAgent
                 settings.callbackExecutor().orElse(VIRTUAL_THREADS), UnaryOperator.identity(), driver.unavailable(), driver.testedVersion());
     }
 
+    public static Agent claudeApi(ClaudeApiConfig settings, Optional<Path> stateDirectory, Optional<Path> profileDirectory)
+    {
+        StateFolder state = StateFolder.open(stateDirectory.orElse(DEFAULT_STATE.resolve("claude-api")));
+        Path profile = profileDirectory.orElse(state.root().resolve("profile")).toAbsolutePath();
+        ConnectorDriver driver = new ClaudeApiConnector().create(settings, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
+        return new DriverAgent(driver, "claude-api", state, ImmutableList.of(driver), settings.callbacks.orElse(VIRTUAL_THREADS),
+                UnaryOperator.identity(), Optional.empty(), Optional.empty());
+    }
+
     public static Agent claude(ClaudeSettings settings)
     {
         StateFolder state = StateFolder.open(settings.stateDirectory().orElse(DEFAULT_STATE));

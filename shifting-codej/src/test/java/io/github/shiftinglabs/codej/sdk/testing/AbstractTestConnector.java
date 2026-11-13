@@ -70,6 +70,21 @@ public abstract class AbstractTestConnector<C>
     }
 
     @Test
+    protected void closingOneDriverLeavesAnotherUsable()
+    {
+        ConnectorContext context = contractContext();
+        ConnectorDriver first = connector().create(configuration(), context);
+        try (ConnectorDriver second = connector().create(configuration(), context)) {
+            first.close();
+            second.validate(contractSessionContext());
+            assertThat(second.identity()).isEqualTo(first.identity());
+        }
+        finally {
+            first.close();
+        }
+    }
+
+    @Test
     protected void rejectsMissingFactoryInputsBeforePreparingProfiles()
     {
         AgentConnector<C> factory = connector();
