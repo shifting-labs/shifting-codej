@@ -13,11 +13,13 @@
  */
 package io.github.shiftinglabs.codej.cli.api;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.shiftinglabs.codej.Tool;
 import io.github.shiftinglabs.codej.cli.api.tools.BuiltinTools;
 import io.github.shiftinglabs.codej.cli.api.tools.CodingToolException;
+import io.github.shiftinglabs.codej.cli.api.tools.LegacyToolAdapter;
 import io.github.shiftinglabs.codej.cli.driver.AgentCapabilities;
 import io.github.shiftinglabs.codej.cli.driver.AgentEventSink;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
@@ -52,6 +54,11 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolFailure;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolOutcome;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolRequirements;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolResource;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -71,7 +78,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -301,6 +307,8 @@ public final class ApiAgentDriver
 
     private record CodingLaunch(String kind, String launchId) {}
 
+    private record PreparedResource(String kind, String id, ToolResource resource) {}
+
     private final class ApiSession
             implements AgentSession
     {
@@ -309,6 +317,7 @@ public final class ApiAgentDriver
         private final ApiSessionStore store;
         private final AgentSessionRef reference;
         private final ApiToolRegistry tools;
+        private final ToolDispatcher dispatcher;
         private final Optional<BuiltinTools> builtins;
         private ApiTurn running;
         private boolean closing;
@@ -321,7 +330,6 @@ public final class ApiAgentDriver
             this.events = events;
             this.store = store;
             this.reference = reference;
-            List<Tool> available = new ArrayList<>(context.sessionTools());
             try {
                 builtins = coding(context) ? Optional.of(new BuiltinTools(context.worktree(), config.codingTools.orElseThrow(),
                         context.access() == SessionAccess.FULL, List.of(profile, context.runtimeDirectory()), supervisor, reference.providerValue(),
@@ -334,8 +342,35 @@ public final class ApiAgentDriver
             catch (IOException | RuntimeException failure) {
                 throw new AgentUnavailableException("Coding tools could not establish workspace containment");
             }
-            builtins.ifPresent(value -> available.addAll(value.tools()));
-            tools = new ApiToolRegistry(available);
+            List<ToolRegistration> registrations = new ArrayList<>();
+            context.sessionTools().forEach(tool -> registrations.add(legacy(tool, false)));
+            builtins.ifPresent(value -> value.tools().forEach(tool -> registrations.add(legacy(tool, true))));
+            tools = ApiToolRegistry.registered(registrations);
+            dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
+        }
+
+        private ToolRegistration legacy(Tool tool, boolean builtin)
+        {
+            LegacyToolAdapter.Builder adapter = LegacyToolAdapter.builder(tool).failures(failure -> legacyFailure(failure, builtin));
+            if (builtin) {
+                BuiltinTools owner = builtins.orElseThrow();
+                adapter.stopVerifier(owner::stopAndVerify).committed(owner::committed);
+            }
+            else {
+                config.toolExecutor.ifPresent(adapter::executor);
+            }
+            return ToolRegistration.create(adapter.build(), true, config.approveTools || builtins.isPresent(), Optional.of(tool),
+                    failure -> failure.code().equals("TOOL_FAILED") ? failure.message() : BuiltinTools.failure(failure.code(), failure.message()));
+        }
+
+        private ToolOutcome<String> legacyFailure(Throwable failure, boolean builtin)
+        {
+            if (failure instanceof CodingToolException codingFailure) {
+                ToolFailure value = new ToolFailure(codingFailure.failure().code(), codingFailure.failure().message());
+                return codingFailure.uncertain() ? ToolOutcome.uncertain(value) : ToolOutcome.failed(value);
+            }
+            return ToolOutcome.failed(builtin ? new ToolFailure("INVALID_ARGUMENTS", "Invalid built-in tool arguments or operation")
+                    : new ToolFailure("TOOL_FAILED", "Host tool failed"));
         }
 
         private void initialize()
@@ -374,6 +409,7 @@ public final class ApiAgentDriver
                 throw new AgentUnavailableException("Previous API request or tool outcome is uncertain; reconciliation is required");
             }
             builtins.ifPresent(BuiltinTools::committed);
+            dispatcher.committed();
             String model = command.model().or(context::model).orElse(config.model);
             Optional<String> effort = command.effort().or(context::effort);
             ModelCapabilities supported = options(model, effort, command.serviceTier(), !tools.definitions().isEmpty());
@@ -383,10 +419,7 @@ public final class ApiAgentDriver
             }
             ModelInput.UserMessage input = store.stage(command.message(), command.attachments());
             if (before.path("phase").asText().equals("tools")) {
-                var definitions = JSON.createArrayNode();
-                tools.definitions().forEach(tool -> definitions.addObject().put("name", tool.name()).put("description", tool.description())
-                        .put("schema", tool.inputSchema()));
-                if (!definitions.equals(before.path("setup").path("tools"))) {
+                if (!(before.path("setup") instanceof ObjectNode setup) || !tools.matches(setup)) {
                     throw new AgentUnavailableException("Pending API tool batch requires its original tool definitions");
                 }
             }
@@ -424,6 +457,7 @@ public final class ApiAgentDriver
         {
             if (!released) {
                 try {
+                    dispatcher.verifyStopped();
                     if (builtins.isPresent()) {
                         builtins.orElseThrow().close();
                     }
@@ -509,7 +543,7 @@ public final class ApiAgentDriver
         private volatile CompletableFuture<?> approval;
         private ScheduledFuture<?> timeout;
         private int requests;
-        private int toolCalls;
+        private final ToolDispatcher.Turn toolTurn;
         private long tokens;
         private int textChars;
 
@@ -520,6 +554,7 @@ public final class ApiAgentDriver
             this.input = input;
             this.model = model;
             this.effort = effort;
+            toolTurn = session.dispatcher.turn(config.maximumToolCalls);
         }
 
         @Override
@@ -648,6 +683,7 @@ public final class ApiAgentDriver
             command.serviceTier().ifPresent(value -> setup.put("tier", value));
             var tools = setup.putArray("tools");
             session.tools.definitions().forEach(tool -> tools.addObject().put("name", tool.name()).put("description", tool.description()).put("schema", tool.inputSchema()));
+            setup.set("toolContracts", JSON.valueToTree(session.tools.contracts()));
             return setup;
         }
 
@@ -802,94 +838,111 @@ public final class ApiAgentDriver
 
         private void execute(int index, ObjectNode receipt)
         {
-            if (++toolCalls > config.maximumToolCalls) {
-                throw new Stopped("API turn tool budget exhausted");
-            }
-            Tool tool;
+            ToolDispatcher.Call invocation;
             try {
-                tool = session.tools.tool(receipt.path("name").asText(), receipt.path("arguments").asText());
+                invocation = JSON.treeToValue(receipt, ToolDispatcher.Call.class);
             }
-            catch (IllegalArgumentException failure) {
-                recordResult(index, session.builtins.isPresent()
-                        ? BuiltinTools.failure("INVALID_ARGUMENTS", "Unknown tool or invalid tool arguments") : failure.getMessage(), true);
-                return;
+            catch (JsonProcessingException failure) {
+                throw new ModelClientException(ModelClientException.Kind.PROTOCOL, "Invalid saved tool invocation", true);
             }
-            if ((config.approveTools || session.builtins.isPresent()) && !allowed(tool, receipt)) {
-                recordResult(index, session.builtins.isPresent() ? BuiltinTools.failure("APPROVAL_DENIED", "Tool invocation denied") : "Tool invocation denied", true);
-                return;
-            }
-            checkStop();
-            emit(new ProviderAgentEvent.Tool(Optional.empty(), tool.name(), ProviderAgentEvent.ActivityState.STARTED,
-                    "Host tool started", source(receipt.path("eventId").asText(receipt.path("id").asText()))));
-            checkStop();
-            ObjectNode state = session.store.state();
-            ((ObjectNode) state.withArray("receipts").get(index)).put("started", true);
-            state.withArray("journal").addObject().put("kind", "tool-start").put("id", receipt.path("id").asText());
-            save(state);
-            if (stopping.get() != null) {
-                recordResult(index, "Not executed: turn interrupted before handler invocation", true);
-                checkStop();
-            }
-            String text;
-            boolean error = false;
             try {
-                interruptible = true;
-                text = invokeTool(tool, receipt.path("arguments").asText());
+                toolTurn.dispatch(invocation, new ToolDispatcher.Context()
+                {
+                    @Override
+                    public String invocationId() { return invocation.eventId(); }
+
+                    @Override
+                    public Optional<Instant> deadline()
+                    {
+                        return command.maximumRuntime().isZero() ? Optional.empty() : Optional.of(started.plus(command.maximumRuntime()));
+                    }
+
+                    @Override
+                    public void checkStop() { ApiTurn.this.checkStop(); }
+
+                    @Override
+                    public boolean cancelled() { return stopping.get() != null; }
+
+                    @Override
+                    public ToolRequirements grants()
+                    {
+                        // Opaque legacy callbacks are trusted host capabilities. Built-ins enforce their existing containment internally.
+                        return ToolRequirements.builder().require(ToolCapability.HOST_INVOKE).build();
+                    }
+
+                    @Override
+                    public boolean allowed(ToolDispatcher.Call call) { return ApiTurn.this.allowed(call); }
+
+                    @Override
+                    public String rejection(String code, String legacyMessage)
+                    {
+                        return session.builtins.isPresent() ? BuiltinTools.failure(code, code.equals("INVALID_ARGUMENTS")
+                                ? "Unknown tool or invalid tool arguments" : legacyMessage) : legacyMessage;
+                    }
+
+                    @Override
+                    public void started(ToolDispatcher.Call call)
+                    {
+                        emit(new ProviderAgentEvent.Tool(Optional.empty(), call.name(), ProviderAgentEvent.ActivityState.STARTED,
+                                "Host tool started", source(call.eventId())));
+                    }
+
+                    @Override
+                    public void recordStarted(ToolDispatcher.Call call)
+                    {
+                        ObjectNode state = session.store.state();
+                        ((ObjectNode) state.withArray("receipts").get(index)).put("started", true);
+                        state.withArray("journal").addObject().put("kind", "tool-start").put("id", call.id());
+                        save(state);
+                    }
+
+                    @Override
+                    public void recordResult(ToolRegistration.Result outcome) { ApiTurn.this.recordResult(index, outcome.text(), outcome.error()); }
+
+                    @Override
+                    public void completed(ToolDispatcher.Call call, ToolRegistration.Result outcome)
+                    {
+                        emit(new ProviderAgentEvent.Tool(Optional.empty(), call.name(),
+                                outcome.error() ? ProviderAgentEvent.ActivityState.FAILED : ProviderAgentEvent.ActivityState.COMPLETED,
+                                outcome.error() ? "Host tool failed" : "Host tool completed", source(call.eventId()), Optional.empty(), Optional.empty(),
+                                !outcome.error() && outcome.text().length() <= config.maximumToolOutputChars
+                                        ? Optional.of(new ProviderAgentEvent.ToolOutput(call.name(), config.redactor().redact(outcome.text()))) : Optional.empty()));
+                    }
+
+                    @Override
+                    public void recordPrepared(ToolResource resource)
+                    {
+                        ObjectNode state = session.store.state();
+                        state.withArray("journal").add(JSON.valueToTree(new PreparedResource("tool-resource", invocation.id(), resource)));
+                        save(state);
+                    }
+
+                    @Override
+                    public void progress(String message)
+                    {
+                        emit(new ProviderAgentEvent.Tool(Optional.empty(), invocation.name(), ProviderAgentEvent.ActivityState.STARTED,
+                                config.redactor().redact(message), source(invocation.eventId())));
+                    }
+
+                    @Override
+                    public void interruptible(boolean value) { interruptible = value; }
+                });
             }
-            catch (CodingToolException failure) {
-                if (failure.uncertain()) {
-                    session.damaged = true;
-                    throw new ModelClientException(ModelClientException.Kind.PROTOCOL, failure.getMessage(), true);
-                }
-                text = BuiltinTools.failure(failure.failure().code(), failure.failure().message());
-                error = true;
+            catch (ToolDispatcher.Limit failure) {
+                throw new Stopped(failure.getMessage());
             }
-            catch (Exception failure) {
-                text = session.builtins.isPresent() && BuiltinTools.contains(tool.name())
-                        ? BuiltinTools.failure("INVALID_ARGUMENTS", "Invalid built-in tool arguments or operation") : "Host tool failed";
-                error = true;
+            catch (ToolDispatcher.Uncertain failure) {
+                session.damaged = true;
+                throw new ModelClientException(ModelClientException.Kind.PROTOCOL, failure.getMessage(), true);
             }
-            finally {
-                interruptible = false;
-                Thread.interrupted();
-            }
-            recordResult(index, text, error);
-            session.builtins.ifPresent(BuiltinTools::committed);
-            emit(new ProviderAgentEvent.Tool(Optional.empty(), tool.name(), error ? ProviderAgentEvent.ActivityState.FAILED : ProviderAgentEvent.ActivityState.COMPLETED,
-                    error ? "Host tool failed" : "Host tool completed", source(receipt.path("eventId").asText(receipt.path("id").asText())),
-                    Optional.empty(), Optional.empty(),
-                    !error && text.length() <= config.maximumToolOutputChars
-                            ? Optional.of(new ProviderAgentEvent.ToolOutput(tool.name(), config.redactor().redact(text))) : Optional.empty()));
         }
 
-        private String invokeTool(Tool tool, String arguments)
-                throws Exception
-        {
-            if (config.toolExecutor.isEmpty() || (session.builtins.isPresent() && BuiltinTools.contains(tool.name()))) {
-                return requireNonNull(tool.call(arguments), "tool returned null");
-            }
-            FutureTask<String> task = new FutureTask<>(() -> {
-                checkStop();
-                return requireNonNull(tool.call(arguments), "tool returned null");
-            });
-            config.toolExecutor.orElseThrow().execute(task);
-            // Future cancellation does not prove that trusted host code stopped. Keep the writer until it actually returns.
-            while (true) {
-                try {
-                    return task.get();
-                }
-                catch (InterruptedException ignored) {
-                    // The turn's stop flag is checked before the queued handler begins and after its receipt is saved.
-                }
-            }
-        }
-
-        private boolean allowed(Tool tool, ObjectNode receipt)
+        private boolean allowed(ToolDispatcher.Call tool)
         {
             ProviderApprovalRequest request = new ProviderApprovalRequest(ProviderApprovalRequest.Kind.TOOL, "Run " + tool.name(),
-                    config.redactor().redact(receipt.path("arguments").asText()), List.of(tool.name()),
+                    config.redactor().redact(tool.arguments()), List.of(tool.name()),
                     List.of(ProviderApprovalRequest.Decision.ALLOW_ONCE, ProviderApprovalRequest.Decision.DENY), false,
-                    source(receipt.path("eventId").asText(receipt.path("id").asText())), Instant.now());
+                    source(tool.eventId()), Instant.now());
             Duration wait = Duration.ofMinutes(5);
             if (!command.maximumRuntime().isZero()) {
                 Duration remaining = Duration.between(Instant.now(), started.plus(command.maximumRuntime()));

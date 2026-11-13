@@ -19,6 +19,7 @@ import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.Tool;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolStopResult;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -122,6 +123,9 @@ public final class BuiltinTools
     {
         command.check();
     }
+
+    /** Verifies session-owned command work without acknowledging an uncommitted result. */
+    public ToolStopResult stopAndVerify() { return command.stopAndVerify(); }
 
     /** Called only after the engine has durably committed the completed tool outcome. */
     public void committed() { command.committed(); }

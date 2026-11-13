@@ -50,6 +50,25 @@ def compare(output, name, before, after):
         raise RuntimeError(f"Compatibility mismatch: {output / (name + '.diff')}")
 
 
+# Explicit additive members only. Keep every published descriptor, generic declaration and modifier exact.
+ADDITIVE_API_MEMBERS = {
+    "public-api": (
+        "  public static <A> io.github.shiftinglabs.codej.Tool withParameters(java.lang.String, java.lang.String, "
+        "io.github.shiftinglabs.codej.tool.ToolParameters<A>, io.github.shiftinglabs.codej.Tool$Handler<A>);\n"
+        "    descriptor: (Ljava/lang/String;Ljava/lang/String;Lio/github/shiftinglabs/codej/tool/ToolParameters;"
+        "Lio/github/shiftinglabs/codej/Tool$Handler;)Lio/github/shiftinglabs/codej/Tool;\n\n",
+    ),
+}
+
+
+def published_surface(group, text):
+    for member in ADDITIVE_API_MEMBERS.get(group, ()):
+        if text.count(member) > 1:
+            raise RuntimeError("Duplicate allowed additive member")
+        text = text.replace(member, "")
+    return text
+
+
 def check_shading(names):
     for sentinel in ("internal/jackson/databind/ObjectMapper.class", "internal/google/common/base/Preconditions.class"):
         if PREFIX + sentinel not in names:
@@ -91,9 +110,10 @@ def verify(args, report):
             raise RuntimeError("Baseline is not the published 0.164.0-1 version")
         for group, classes in groups.items():
             options = [jdk_tool("javap"), "-protected", "-s", "-constants"]
-            compare(output, group,
-                    run(options + ["-classpath", str(baseline), *classes]),
-                    run(options + ["-classpath", str(candidate), *classes]))
+            before = run(options + ["-classpath", str(baseline), *classes])
+            after = run(options + ["-classpath", str(candidate), *classes])
+            (output / f"{group}-candidate-full.txt").write_text(after)
+            compare(output, group, before, published_surface(group, after))
             report["passed"].append(f"{group}: {len(classes)} class signatures/constructors/constants")
 
     fixture = Path(__file__).parent / "compatibility" / "LegacyConsumer.java"

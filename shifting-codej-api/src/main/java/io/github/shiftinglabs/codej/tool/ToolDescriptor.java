@@ -43,7 +43,21 @@ public final class ToolDescriptor
      * @param description human-readable tool behavior, at most 8192 characters
      * @return the builder
      */
-    public static Builder builder(String name, String description) { return new Builder(name, description); }
+    public static Builder builder(String name, String description) { return new Builder(name, description, 8192); }
+
+    /**
+     * Creates metadata with an explicit host description bound. Compatibility adapters can
+     * preserve existing limits without changing the default builder's 8192-character bound.
+     *
+     * @param name stable model-facing name
+     * @param description advertised behavior
+     * @param maximumDescriptionChars positive host-selected limit
+     * @return the builder
+     */
+    public static Builder builder(String name, String description, int maximumDescriptionChars)
+    {
+        return new Builder(name, description, maximumDescriptionChars);
+    }
 
     /**
      * Returns the stable model-facing name.
@@ -81,12 +95,12 @@ public final class ToolDescriptor
         private int contractVersion = 1;
         private Optional<String> implementationRevision = Optional.empty();
 
-        private Builder(String name, String description)
+        private Builder(String name, String description, int maximumDescriptionChars)
         {
             this.name = requireNonNull(name, "name is null");
             checkArgument(NAME.matcher(name).matches(), "invalid tool name");
             this.description = requireNonNull(description, "description is null");
-            checkArgument(!description.isBlank() && description.length() <= 8192, "invalid tool description");
+            checkArgument(maximumDescriptionChars > 0 && !description.isBlank() && description.length() <= maximumDescriptionChars, "invalid tool description");
         }
 
         /**

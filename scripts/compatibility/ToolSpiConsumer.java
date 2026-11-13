@@ -12,9 +12,13 @@
  * limitations under the License.
  */
 
+import io.github.shiftinglabs.codej.RecordToolParameters;
+import io.github.shiftinglabs.codej.Tool;
+import io.github.shiftinglabs.codej.cli.api.tools.LegacyToolAdapter;
 import io.github.shiftinglabs.codej.cli.driver.AgentSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecution;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutions;
@@ -57,22 +61,39 @@ public final class ToolSpiConsumer
         }
         require(ToolSchema.of("{\"additionalProperties\":false,\"type\":\"object\"}")
                 .equals(ToolSchema.of("{\"type\":\"object\",\"additionalProperties\":false}")), "Canonical schema differs");
-        System.out.println("PASS: Class-free tool parameters, provider installation, typed invocation/output and verified shutdown; JDK + jar only");
+        var records = RecordToolParameters.of(Count.class);
+        Tool oldFacade = Tool.withParameters("count", "Returns a count", records, input -> Integer.toString(input.count()));
+        require(oldFacade.forSubagents().subagents(), "Legacy subagent flag changed");
+        var adapter = LegacyToolAdapter.builder(oldFacade).build();
+        require(run(adapter, ToolArguments.of("{\"count\":2}"), ToolRequirements.builder().require(ToolCapability.HOST_INVOKE).build()).equals("2"),
+                "Legacy adapter round trip failed");
+        require(Tool.of("count", "Returns a count", Count.class, input -> "ok").inputSchema().equals(oldFacade.inputSchema()), "Record schema changed");
+        System.out.println("PASS: Class-free SPI, reflection codec, legacy adapter, typed output and verified shutdown; JDK + jar only");
     }
 
     private static <P, R> String run(AgentTool<P, R> tool, ToolArguments arguments)
             throws Exception
     {
+        return run(tool, arguments, ToolRequirements.none());
+    }
+
+    private static <P, R> String run(AgentTool<P, R> tool, ToolArguments arguments, ToolRequirements grants)
+            throws Exception
+    {
         P parameters = tool.definition().parameters().decode(arguments);
-        var context = new InvocationContext();
+        var context = new InvocationContext(grants);
         require(context.grants().permits(tool.requirements(parameters, context)), "Unexpected authority requirement");
         var execution = tool.execute(parameters, context);
         ToolOutcome<R> outcome = execution.completion().toCompletableFuture().get(1, TimeUnit.SECONDS);
         execution.cancel();
         require(outcome.state() == ToolOutcome.State.COMPLETED, "Tool failed");
         require(execution.stopAndVerify().toCompletableFuture().get(1, TimeUnit.SECONDS).stopped(), "Shutdown is uncertain");
-        return tool.definition().results().encode(outcome.value().orElseThrow()).text();
+        String text = tool.definition().results().encode(outcome.value().orElseThrow()).text();
+        execution.committed();
+        return text;
     }
+
+    private record Count(int count) {}
 
     private interface Input { boolean requested(); }
 
@@ -161,6 +182,10 @@ public final class ToolSpiConsumer
     private static final class InvocationContext
             implements ToolExecutionContext
     {
+        private final ToolRequirements grants;
+
+        InvocationContext(ToolRequirements grants) { this.grants = requireNonNull(grants, "grants is null"); }
+
         @Override
         public String invocationId() { return "example-1"; }
 
@@ -168,7 +193,7 @@ public final class ToolSpiConsumer
         public Optional<Instant> deadline() { return Optional.empty(); }
 
         @Override
-        public ToolRequirements grants() { return ToolRequirements.none(); }
+        public ToolRequirements grants() { return grants; }
 
         @Override
         public boolean cancellationRequested() { return false; }

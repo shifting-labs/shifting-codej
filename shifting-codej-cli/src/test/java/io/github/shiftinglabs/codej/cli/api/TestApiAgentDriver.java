@@ -60,6 +60,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -255,6 +257,67 @@ class TestApiAgentDriver
     }
 
     @Test
+    void interfaceBasedLegacyBindingRemainsInsideTheApprovedCallback()
+            throws Exception
+    {
+        AtomicInteger bindings = new AtomicInteger();
+        var codec = io.github.shiftinglabs.codej.tool.JsonSchemaParameters.of("{}", input -> {
+            bindings.incrementAndGet();
+            throw new IllegalArgumentException("Private domain diagnostic");
+        });
+        Tool tool = Tool.withParameters("example", "Example", codec, input -> "Never");
+        for (boolean approved : List.of(false, true)) {
+            FakeClient client = new FakeClient();
+            client.script.add((request, sink) -> completed(toolResponse("example", "{}")));
+            client.script.add((request, sink) -> {
+                assertThat(((ModelInput.ToolResults) request.input()).results()).containsExactly(new ModelInput.ToolResult("call-1",
+                        approved ? "Host tool failed" : "Tool invocation denied", true));
+                return answer(request, sink);
+            });
+            AgentApprovalHandler approvals = (request, wait) -> {
+                assertThat(bindings).hasValue(0);
+                return CompletableFuture.completedFuture(approved ? ProviderApprovalDecision.allow(Optional.empty()) : ProviderApprovalDecision.deny());
+            };
+            try (ApiAgentDriver driver = driver(client); AgentSession session = driver.open(context(Optional.empty(), List.of(tool), approvals), event -> {})) {
+                assertThat(done(session.start(command("Example"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(bindings).hasValue(approved ? 1 : 0);
+            }
+        }
+    }
+
+    @Test
+    void migrationKeepsConfiguredLegacyLimitsAndBorrowedHostExecution()
+            throws Exception
+    {
+        String large = "x".repeat(70000);
+        String schema = "{\"description\":\"" + large + "\"}";
+        String arguments = "{\"value\":\"" + large + "\"}";
+        AtomicInteger submitted = new AtomicInteger();
+        FakeClient client = new FakeClient();
+        Tool tool = Tool.withSchema("large", large, schema, input -> {
+            assertThat(input).isEqualTo(arguments);
+            return large;
+        });
+        client.script.add((request, sink) -> {
+            assertThat(request.tools()).containsExactly(new ModelRequest.ToolDefinition("large", large, schema));
+            return completed(toolResponse("large", arguments));
+        });
+        client.script.add((request, sink) -> {
+            assertThat(((ModelInput.ToolResults) request.input()).results()).containsExactly(new ModelInput.ToolResult("call-1", large, false));
+            return answer(request, sink);
+        });
+        ApiEngineConfig settings = config(client).maximumToolOutputChars(80000).toolExecutor(task -> {
+            submitted.incrementAndGet();
+            task.run();
+        }).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
+            assertThat(done(session.start(command("Large"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(submitted).hasValue(1);
+        }
+    }
+
+    @Test
     void schemaAssertionsAreEnforcedOrRejectedBeforeOpening()
     {
         ApiToolRegistry registry = new ApiToolRegistry(List.of(Tool.withSchema("nested", "Nested", """
@@ -414,8 +477,9 @@ class TestApiAgentDriver
         }
     }
 
-    @Test
-    void cancelledToolKeepsItsObservedSuccessAndRecoveryDoesNotExecuteItAgain()
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancelledToolKeepsItsObservedSuccessAndRecoveryDoesNotExecuteItAgain(boolean borrowed)
             throws Exception
     {
         AtomicInteger executions = new AtomicInteger();
@@ -438,7 +502,9 @@ class TestApiAgentDriver
         FakeClient first = new FakeClient();
         first.script.add((request, sink) -> completed(toolResponse("write_report", "{}")));
         AgentSessionRef reference;
-        try (ApiAgentDriver driver = driver(first); AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
+        try (var hostExecutor = Executors.newSingleThreadExecutor();
+                ApiAgentDriver driver = new ApiAgentDriver(borrowed ? config(first).toolExecutor(hostExecutor).build() : config(first).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
             reference = session.reference();
             RunningTurn turn = session.start(command("Write"));
             try {
@@ -450,6 +516,12 @@ class TestApiAgentDriver
                 release.countDown();
             }
             assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+        }
+        try (ApiSessionStore store = ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, config(new FakeClient()).build())) {
+            var legacy = store.state();
+            assertThat(legacy.withObject("setup").has("toolContracts")).isTrue();
+            legacy.withObject("setup").remove("toolContracts");
+            store.save(legacy);
         }
         FakeClient second = new FakeClient();
         second.script.add((request, sink) -> {

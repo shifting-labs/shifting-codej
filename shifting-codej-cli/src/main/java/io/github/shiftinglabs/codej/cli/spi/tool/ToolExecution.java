@@ -34,4 +34,10 @@ public interface ToolExecution<R>
      * retryable after an unverified result. Writer/resource ownership stays held until verified.
      */
     CompletionStage<ToolStopResult> stopAndVerify();
+
+    /**
+     * Acknowledges execution resources only after the owning dispatcher durably recorded the
+     * outcome. Default preserves existing implementations; a failed acknowledgement can be retried.
+     */
+    default void committed() {}
 }

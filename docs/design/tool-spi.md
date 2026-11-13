@@ -1,7 +1,7 @@
 # Extensible tool framework proposal
 
-Status: the SPI and baseline contracts are implemented; runtime migration remains planned.
-Existing tool behavior and dispatcher wiring are unchanged. It builds on [coding-tools.md](coding-tools.md) and the existing connector
+Status: the SPI, legacy adapters, baseline contracts and shared dispatcher migration are implemented.
+Existing public APIs and tool behavior are retained; handler/resource separation and provider assembly remain planned. It builds on [coding-tools.md](coding-tools.md) and the existing connector
 SPI. Frequent tool additions, implementation replacements, typed parameters, and backward
 compatibility are primary requirements.
 
@@ -78,6 +78,7 @@ public interface ToolExecution<R>
     CompletionStage<ToolOutcome<R>> completion();
     void cancel();
     CompletionStage<ToolStopResult> stopAndVerify();
+    default void committed() {}
 }
 
 public interface ToolProvider<C>
@@ -110,6 +111,8 @@ requests a stop. `stopAndVerify()` is bounded and retryable, and cannot report s
 callback, command, descendant, or external operation is still active. Uncertain outcomes are
 explicit; cancellation does not erase an observed successful outcome. Synchronous tools use a
 shared completed-execution helper instead of implementing their own lifecycle machinery.
+The optional `committed()` hook acknowledges execution resources only after a durable result;
+failed acknowledgement remains retryable and is never used for an unpersisted result.
 
 `ToolProvider` installs a coherent family and creates session-scoped resources. Its definitions
 method performs no filesystem/process/model work. `open` may acquire workspace leases and check
@@ -152,8 +155,8 @@ values. The generic SPI permits both value interfaces and concrete records.
 `ToolArguments` and `ToolOutput` are interfaces so codecs and compatibility adapters can retain
 their appropriate transport/output limits. Their default factories return validated immutable
 values: strict JSON objects up to 64 KiB, and text output up to 65,536 characters. Domain codecs
-remain responsible for validation when alternate envelopes are used; a future dispatcher must
-enforce the effective host budgets independently. `ToolSchema` is an immutable supported object
+remain responsible for validation when alternate envelopes are used. The dispatcher validates
+against a compiled schema, and the engine independently redacts and bounds persisted outcomes. `ToolSchema` is an immutable supported object
 schema with a canonical SHA-256 fingerprint; unsupported assertions fail closed.
 `ToolOutput` describes typed model-facing content. Initially it projects into the existing text
 `ModelInput.ToolResult`; image/media results require a separate compatible extension rather than
@@ -234,8 +237,9 @@ the engine. Families are labels and installation boundaries, never authorization
 - Keep the existing final Tool class and all its signatures. LegacyToolAdapter wraps existing
   Tool objects without changing their supplied schema, callback execution, or approval defaults.
   Opaque legacy callbacks retain their original binding behavior inside Tool.call.
-- Add an interface-based Tool.of overload only if needed for upstream custom tools. The existing
-  Class-based overload delegates through the reflection adapter and remains available unchanged.
+- `Tool.withParameters` is the additive interface-based factory. A distinct name avoids making
+  existing `Tool.of(..., null, ...)` calls ambiguous. The Class-based factory delegates through
+  the optional reflection adapter and remains available with its original binding behavior.
 - Keep old ToolMessages records and CodingTools constructors/components intact. New logical
   contracts can adapt their values; do not add mandatory record components or remove old types.
 - Keep current built-in names, descriptions, schemas, defaults, and approval/sandbox behavior in
@@ -268,17 +272,18 @@ Implementation stages:
 
 - [x] Record the interface boundaries and Class-free parameter/result contracts for review.
 - [x] Add the SPI, immutable supporting values, fake implementations, and baseline contract tests.
-- [ ] Add legacy Tool and reflection codec adapters; prove existing public APIs and behavior unchanged.
-- [ ] Extract ToolDispatcher from ApiAgentDriver; route current tools through registered definitions.
+- [x] Add legacy Tool and reflection codec adapters; prove existing public APIs and behavior unchanged.
+- [x] Extract ToolDispatcher from ApiAgentDriver; route current tools through registered definitions.
 - [ ] Split the current five registrations into handlers backed by the resource interfaces.
 - [ ] Bind existing secure filesystem and Seatbelt implementations; retain all current limits.
-- [ ] Run only focused contracts, existing affected tool/facade tests, and artifact compatibility checks.
+- [x] Run focused adapter/dispatcher contracts, affected tool/facade tests, and artifact compatibility checks for this migration.
 - [ ] Add a new tool and an alternate fake backend as extension examples without editing the dispatcher.
 - [ ] Consider richer execution, directory/move tools, plans/questions, and optional integrations separately.
 
-Stage 1 does not install ToolProvider objects into ApiAgentDriver yet. Legacy adapters,
-dispatcher extraction, and migration of existing built-ins remain separate stages. No dependency
-or artifact layout changed. New interfaces do not require Class tokens or Record type bounds.
+Stage 2 routes existing host and built-in tools through the common dispatcher. ToolProvider
+assembly into ApiAgentDriver and the built-in handler/resource split remain follow-up work;
+the dispatcher already accepts typed registrations, exercised with fake implementations.
+No dependency or artifact layout changed. New interfaces do not require Class tokens or Record type bounds.
 
 ## Stage 1 validation
 
@@ -303,3 +308,70 @@ Verification used one CPU, a 512 MiB heap, serial GC, low priority, one test for
 JUnit parallelism in an isolated snapshot excluding the four unrelated Claude CLI edits. No
 agents, live-provider calls, broad/stress or Bytequay suites ran. The compatibility checker also
 retained its existing short fake-HTTP and macOS coding-tool artifact fixtures.
+
+
+## Stage 2: compatibility adapters and dispatcher
+
+Here "legacy" means the existing `io.github.shiftinglabs.codej.Tool` API. It does not mean Codex
+server, Claude CLI, or a provider transport. `LegacyToolAdapter` wraps those existing Java tools
+as `AgentTool<Arguments, String>`. Provider-native CLI execution is unchanged.
+
+- `RecordToolParameters.of` offers opt-in schema validation followed by record binding. The old
+  `Tool.of(Class, ...)` path uses its compatibility mode: the same schema, coercion/errors, and
+  record construction inside `Tool.call`, after approval. `Tool.withParameters` accepts any
+  ToolParameters implementation and imposes no Record/Class bound.
+- `JsonSchemaParameters` compiles the existing engine schema subset once per registration. It
+  retains numeric/mixed enums, schema-valued additionalProperties, strict duplicate/trailing-token
+  rejection and the existing schema-depth rule. JSON-tree interpretation is confined to this
+  generic schema codec. Domain values and new dispatch/checkpoint metadata use typed records.
+- Default SPI factories keep their bounds. ToolSchemaFormat and the explicit descriptor bound
+  let compatibility codecs preserve existing schemas/descriptions larger than those defaults.
+  Legacy argument/output envelopes retain the engine's configured transport/output limits.
+  Legacy schema fingerprints intentionally retain exact wire spelling, matching the old pending
+  definition check; the default ToolSchema factory still canonicalizes semantic ordering.
+- `ToolRegistration` captures metadata, codecs, execution/approval policy and error rendering.
+  The dispatcher handles validation, requirements, approval, budgets, durable admission, awaiting
+  outcomes, verified stop and post-result acknowledgement without branching on built-in names.
+  ApiAgentDriver supplies the existing checkpoint, event, approval and redaction/bounding ports.
+- Every current registration goes through that path. Built-ins keep mandatory approval, inline
+  turn-worker execution, structured errors and existing containment. Host callbacks keep their
+  existing approval setting, borrowed optional executor and generic failure messages. The
+  transitional wrapper declares HOST_INVOKE; actual built-in permissions remain enforced by
+  the existing secure resource implementations until their separate handler migration.
+- Queued cancellation gates the callback before effects. Running host callbacks retain ownership
+  until they actually return; future cancellation alone never proves stop. An executor that
+  accepts work then throws cannot prematurely settle a running callback. Uncertain effects or
+  stop verification leave the receipt unresolved and retain resource/writer ownership.
+- New setups include a typed name/version/schema-fingerprint manifest. Pending definitions still
+  require exact names/descriptions/schema spelling. Pre-migration setups without the manifest
+  remain accepted for legacy version-one registrations. Saved results are reused, unstarted
+  interrupted calls receive the existing not-executed result, and started unknown calls never replay.
+
+Stage 2 validation: **151 focused cases passed** (19 API, 72 runtime/MCP/filesystem/native sandbox,
+60 external/base-contract and Claude API/DeepSeek facade/connector cases). The new adapters also
+run the existing AbstractTestAgentTool and AbstractTestToolParameters suites. Dispatcher coverage
+includes approval/policy denial, binding order, durable-intent failure, resource-journal failure,
+uncertain outcomes, verified shutdown, result-encoding failures, retryable post-result
+acknowledgement, budgets and pending-contract compatibility.
+
+Checkstyle, licenses, strict public Javadocs and publish-profile shaded packaging passed. The
+published `0.164.0-1` descriptors/record shapes/enums/sealed types/constants/checksum resource and
+unchanged baseline-compiled consumer passed against the candidate. The candidate-only JDK
+consumer additionally exercised the reflection codec, interface factory and legacy adapter.
+Only the explicitly additive Tool.withParameters member is allowed by the reviewed signature
+gate; existing members remain exact. Five checker controls cover that exception, reject unrelated
+signature changes and verify sealed-subtype and shading checks. After final review tightened the
+checkpoint comparison, only the 58 affected dispatcher/engine/facade cases were rerun. The
+cancellation regression additionally passed in both inline and borrowed-executor modes; the
+remaining focused results were reused.
+
+Candidate SHA-256: `8d0ec5d6f1ae928abd3659acefc14252e9c5fb212b890f5a1813ddc738a99ddb`.
+
+Validation used one CPU, a 512 MiB heap, serial GC, one test fork and disabled JUnit parallelism
+in an isolated snapshot excluding the four unrelated Claude CLI edits. Package and native fixture
+commands ran at low priority. The initial
+restricted native run could not enumerate macOS descendants; the same focused cases passed with
+process inspection enabled. No agents, broad/stress or Bytequay suites, live inference, provider
+CLI, Xcode build or simulator ran. The compatibility fixtures used only temporary local HTTP and
+contained command probes. Handler/resource interfaces and configured provider installation are
+still the next stage, not part of this compatibility migration.

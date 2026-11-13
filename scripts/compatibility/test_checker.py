@@ -22,6 +22,25 @@ class CheckerControls(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Compatibility mismatch"):
                 CHECK.compare(output, "changed", "descriptor ()V\n", "descriptor (I)V\n")
 
+    def test_only_reviewed_additive_member_preserves_the_published_surface(self):
+        addition = CHECK.ADDITIVE_API_MEMBERS["public-api"][0]
+        before = "public final class Tool {\n  public void call();\n    descriptor: ()V\n\n}\n"
+        after = before.replace("}\n", addition + "}\n")
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            CHECK.compare(output, "allowed", before, CHECK.published_surface("public-api", after))
+            for incompatible in (after.replace("descriptor: ()V", "descriptor: (I)V"),
+                                 after.replace("  public void call();\n    descriptor: ()V\n\n", ""),
+                                 after.replace("}\n", "  public void unreviewed();\n    descriptor: ()V\n}\n")):
+                with self.assertRaisesRegex(RuntimeError, "Compatibility mismatch"):
+                    CHECK.compare(output, "changed", before, CHECK.published_surface("public-api", incompatible))
+        self.assertEqual(after, CHECK.published_surface("legacy-driver-spi", after))
+
+    def test_duplicate_reviewed_additive_member_is_rejected(self):
+        addition = CHECK.ADDITIVE_API_MEMBERS["public-api"][0]
+        with self.assertRaisesRegex(RuntimeError, "Duplicate allowed additive member"):
+            CHECK.published_surface("public-api", addition + addition)
+
     def test_unshaded_or_missing_dependencies_are_rejected(self):
         relocated = [CHECK.PREFIX + "internal/jackson/databind/ObjectMapper.class",
                      CHECK.PREFIX + "internal/google/common/base/Preconditions.class"]

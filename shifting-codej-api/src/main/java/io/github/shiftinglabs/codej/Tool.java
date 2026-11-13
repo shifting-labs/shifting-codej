@@ -13,6 +13,8 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.tool.ToolParameters;
+
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -82,7 +84,27 @@ public final class Tool
     {
         requireNonNull(arguments, "arguments is null");
         requireNonNull(handler, "handler is null");
-        return new Tool(name, description, RecordArguments.schema(arguments), json -> handler.call(RecordArguments.bind(json, arguments)), false);
+        ToolParameters<A> parameters = RecordToolParameters.legacy(arguments);
+        return withParameters(name, description, parameters, handler);
+    }
+
+    /**
+     * Creates a tool with an interface-backed schema and parameter binder. The binder runs when
+     * call is invoked, preserving the existing Tool lifecycle. Use the runtime tool SPI for
+     * parameter preparation before approval. This named factory avoids ambiguous existing null calls.
+     *
+     * @param <A> immutable parameter type, including interfaces implemented by validated values
+     * @param name the model-facing name
+     * @param description the tool's behavior
+     * @param parameters schema and binding strategy
+     * @param handler answers the call
+     * @return the tool
+     */
+    public static <A> Tool withParameters(String name, String description, ToolParameters<A> parameters, Handler<A> handler)
+    {
+        requireNonNull(parameters, "parameters is null");
+        requireNonNull(handler, "handler is null");
+        return new Tool(name, description, parameters.schema().json(), json -> handler.call(parameters.decode(() -> json)), false);
     }
 
     /**

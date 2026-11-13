@@ -20,6 +20,7 @@ import io.github.shiftinglabs.codej.cli.process.ProcessOwner;
 import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
 import io.github.shiftinglabs.codej.cli.process.ProcessStream;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolStopResult;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -176,6 +177,20 @@ final class SandboxCommand
         }
         if (!stopped) {
             throw new CodingToolException("PROCESS_UNCERTAIN", "Command termination could not be verified", true);
+        }
+    }
+
+    ToolStopResult stopAndVerify()
+    {
+        if (active == null || stopped) {
+            return ToolStopResult.verifiedStopped();
+        }
+        try {
+            verifyStop();
+            return ToolStopResult.verifiedStopped();
+        }
+        catch (CodingToolException failure) {
+            return ToolStopResult.unverified("Command termination could not be verified");
         }
     }
 

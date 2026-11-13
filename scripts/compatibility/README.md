@@ -39,6 +39,11 @@ missing executables. It does not probe providers, run model turns, read credenti
 Codex, touch a database, or prove all provider behavior. Signature/source compatibility alone
 does not prove behavioral compatibility. The surface snapshot is intentionally strict: edits
 within existing types (even compatible additions/reordering) need review; new types are allowed.
+The explicit additive-member allowlist currently contains only `Tool.withParameters`. Its exact
+new declaration/descriptor is filtered before comparison; all published members still compare
+exactly. Full candidate snapshots remain in `*-candidate-full.txt`. Controls prove that changed
+or removed existing members and unreviewed additions still fail. The named factory preserves
+source compatibility for existing `Tool.of(..., null, ...)` calls.
 
 When the candidate contains direct API facades, the checker also runs separate JDK-only HTTP
 fixtures for `ClaudeApi` and `DeepSeekApi`. These verify each protocol's tool continuation and
@@ -107,7 +112,8 @@ python3 scripts/compatibility/test_checker.py
 ```
 
 These standard-library tests cover descriptor mismatches, missing relocation sentinels, unrelocated
-dependency entries, and an added sealed subtype that `javap -protected -s -constants` cannot see.
+dependency entries, the exact reviewed additive-member boundary, and an added sealed subtype
+that `javap -protected -s -constants` cannot see.
 The sealed control uses the cached baseline and JDK, with all compilation in temporary directories.
 
 Run the published jar as both baseline and candidate to test the checker/fixture independently of
@@ -123,4 +129,6 @@ checks continue unchanged.
 `ToolSpiConsumer` is a candidate-only usage example of the new tool SPI. It implements parameter
 binding without Class tokens, installs a configured provider, invokes a typed tool through a
 wildcard registry entry, encodes the result, and verifies shutdown. It starts no process, thread,
-network, or model request and depends only on the JDK and shaded candidate jar.
+network, or model request and depends only on the JDK and shaded candidate jar. It also uses
+`RecordToolParameters`, the additive `Tool.withParameters` factory and `LegacyToolAdapter` to
+run an existing facade tool through the SPI, with explicit host-invocation authority.

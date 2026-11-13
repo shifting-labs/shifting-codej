@@ -31,10 +31,10 @@ public final class ToolSchema
     private final String canonical;
     private final String fingerprint;
 
-    private ToolSchema(String json)
+    private ToolSchema(String json, ToolSchemaFormat format)
     {
         this.json = requireNonNull(json, "json is null");
-        canonical = ToolJson.canonicalSchema(json);
+        canonical = requireNonNull(requireNonNull(format, "format is null").canonicalize(json), "canonical schema is null");
         try {
             fingerprint = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical.getBytes(StandardCharsets.UTF_8)));
         }
@@ -50,7 +50,17 @@ public final class ToolSchema
      * @return an immutable schema
      * @throws IllegalArgumentException for malformed or unsupported schemas
      */
-    public static ToolSchema of(String json) { return new ToolSchema(json); }
+    public static ToolSchema of(String json) { return new ToolSchema(json, ToolJson::canonicalSchema); }
+
+    /**
+     * Validates a caller-selected schema dialect. This permits compatibility adapters to retain
+     * existing schema shapes and limits; the format must validate all assertions it advertises.
+     *
+     * @param json original schema
+     * @param format validation and canonicalization strategy
+     * @return an immutable schema
+     */
+    public static ToolSchema of(String json, ToolSchemaFormat format) { return new ToolSchema(json, format); }
 
     /**
      * Returns the original schema spelling for model adapters.
@@ -60,7 +70,8 @@ public final class ToolSchema
     public String json() { return json; }
 
     /**
-     * Returns a canonical SHA-256 fingerprint. Object-key, required-field and enum ordering are normalized.
+     * Returns a canonical SHA-256 fingerprint. The default format normalizes object-key, required-field and enum ordering;
+     * a caller-selected format defines its own canonical representation.
      * This identifies a schema, not implementation behavior or execution safety.
      *
      * @return the lowercase digest
