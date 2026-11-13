@@ -544,6 +544,7 @@ class TestClaudeEventMapper
                 """, ProviderAgentEvent.Message.class);
         result();
         assertThat(mapper.hasFinishedWork()).isFalse();
+        assertThat(mapper.hasRunningBackgroundWork()).isTrue();
         map("""
                 {"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"session-1","uuid":"empty-inventory"}
                 """);
@@ -557,11 +558,28 @@ class TestClaudeEventMapper
                 {"type":"system","subtype":"task_notification","task_id":"child-1","status":"completed","session_id":"session-1","uuid":"finished"}
                 """);
         assertThat(mapper.hasFinishedWork()).isTrue();
+        assertThat(mapper.hasRunningBackgroundWork()).isFalse();
 
+        // Late inventory, progress and status describe the run that ended.
         map("""
-                {"type":"system","subtype":"task_updated","task_id":"child-1","patch":{"status":"running"},"session_id":"session-1","uuid":"resumed"}
+                {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"child-1","task_type":"local_agent"}],
+                "session_id":"session-1","uuid":"stale-inventory"}
                 """);
+        assertThat(map("""
+                {"type":"system","subtype":"task_progress","task_id":"child-1","tool_use_id":"spawn-1","session_id":"session-1","uuid":"stale-progress"}
+                """)).isEmpty();
+        assertThat(map("""
+                {"type":"system","subtype":"task_updated","task_id":"child-1","patch":{"status":"running"},"session_id":"session-1","uuid":"stale-running"}
+                """)).isEmpty();
+        assertThat(mapper.hasFinishedWork()).isTrue();
+        assertThat(mapper.hasRunningBackgroundWork()).isFalse();
+
+        assertThat(map("""
+                {"type":"system","subtype":"task_started","task_id":"child-1","tool_use_id":"spawn-1","session_id":"session-1","uuid":"resumed"}
+                """)).anySatisfy(event -> assertThat(event).isInstanceOfSatisfying(ProviderAgentEvent.Lifecycle.class,
+                        lifecycle -> assertThat(lifecycle.phase()).isEqualTo(ProviderAgentEvent.LifecyclePhase.AGENT_STARTED)));
         assertThat(mapper.hasFinishedWork()).isFalse();
+        assertThat(mapper.hasRunningBackgroundWork()).isTrue();
         map("""
                 {"type":"system","subtype":"task_notification","task_id":"child-1","status":"stopped","session_id":"session-1","uuid":"stopped"}
                 """);
@@ -664,6 +682,7 @@ class TestClaudeEventMapper
                 """, ProviderAgentEvent.Command.class);
         result();
         assertThat(mapper.hasFinishedWork()).isFalse();
+        assertThat(mapper.hasRunningBackgroundWork()).isTrue();
         map("""
                 {"type":"system","subtype":"task_notification","task_id":"background-1","status":"unknown","session_id":"session-1","uuid":"unknown-status"}
                 """);
