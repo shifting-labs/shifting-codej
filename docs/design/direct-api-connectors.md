@@ -1,8 +1,8 @@
 # Direct API connectors
 
 Status: option 2 selected: own the Java engine and selectively adopt Codex runtime behavior.
-The model SPI, shared engine, Anthropic Java SDK adapter and additive `ClaudeApi` facade are
-implemented. Validation uses fake clients and loopback HTTP; no live account was exercised.
+The model SPI, shared engine, Anthropic Java SDK and direct DeepSeek adapters, and additive
+`ClaudeApi` / `DeepSeekApi` facades are implemented. Validation uses fake clients and loopback HTTP; no live account was exercised.
 
 ## Boundaries
 
@@ -20,7 +20,8 @@ flowchart TD
     D --> F[Tool dispatcher and approvals]
     D --> G[ModelClient SPI]
     G --> H[AnthropicModelClient: Java SDK]
-    G --> I[Future API adapters]
+    G --> I[DeepSeekModelClient: Chat Completions]
+    G --> J[Future API adapters]
 ```
 
 | Component | Owns |
@@ -159,8 +160,7 @@ Unknown cost stays absent. Account quota is not inferred from token usage or sub
 
 Keep existing public signatures, generic factory types, constructors, record components, enums,
 sealed hierarchies, constants, lane IDs, reference encodings, default paths and CLI behavior.
-Do not change `ClaudeSettings` or `ClaudeConnector`'s configuration type. Add a separate proposed
-`ClaudeApi` builder returning the existing `Agent` interface. Give API sessions a distinct new
+Do not change `ClaudeSettings` or `ClaudeConnector`'s configuration type. Use separate `ClaudeApi` and `DeepSeekApi` builders returning the existing `Agent` interface. Give API sessions a distinct new
 provider/lane identity so Claude Code references cannot be mistaken for direct API conversations.
 Do not rename/move existing packages or change the shaded artifact and release conventions.
 
@@ -313,9 +313,65 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 
 - [x] Run the existing published-artifact compatibility check on the integrated shaded artifact.
 - [x] Run affected Bytequay tests using the unchanged downstream API/dependency conventions.
-- [ ] Add another direct API provider through the same contracts to validate engine reuse.
+- [x] Add another direct API provider through the same contracts to validate engine reuse.
 - [ ] Add shared filesystem/shell tools only with verified containment and permission tests.
 - [ ] Evaluate optional compaction, provider-hosted tools and separate connector artifacts as needed.
+
+## Second direct provider: DeepSeek
+
+Implement a separate `DeepSeekApi` facade and `DeepSeekApiConnector` using the same `ApiAgentDriver`
+and `ModelClient` SPI. The existing `Codex.builder().deepSeek(...)` App Server lane is unchanged.
+The direct lane uses Chat Completions through JDK HTTP, with no new dependency. It exposes text,
+client tool calls and explicit reasoning effort; image input, hosted tools and balance reporting
+remain outside this first provider binding.
+
+Keep native `reasoning_content` in private replay across all assistant turns, including ordinary
+answers when tools are introduced later. Return complete ordered `tool` messages for the pending
+batch. Error results remain tool content with an explicit error marker. Only visible `content`
+reaches event callbacks. Require complete SSE framing and a terminal outcome before authorizing
+tools; malformed, unknown or truncated content fails instead of executing partial arguments.
+
+- [x] Add provider-neutral HTTP ownership and whole-response deadlines, reused by the Anthropic bridge.
+- [x] Add `DeepSeekModelClient` and strict Chat Completions/SSE translation.
+- [x] Add separate configuration, connector, profile identity and additive facade.
+- [x] Bind reusable model/API connector contracts and pass fake HTTP continuation/lifecycle tests.
+- [x] Verify both direct providers, shared engine contracts, shaded packaging and published API compatibility.
+- [x] Record the tested artifact and commit while preserving unrelated edits.
+
+The session/turn/tool engine and all existing public SPI signatures remain unchanged for this
+provider. Both adapters reuse that engine and the provider-neutral HTTP lifecycle. The new facade
+uses the distinct `deepseek-api` identity and a separate default state directory; the Codex-backed
+DeepSeek route and existing settings records are unchanged.
+
+Validation: 174 explicitly selected SDK/engine/SPI cases passed with zero failures/errors/skips.
+After replacing repeated tool-argument string copies with an incremental buffer, all 35 DeepSeek
+adapter/connector/facade cases passed again on the final source. Checkstyle, license checks,
+shaded packaging and strict Javadocs passed. The published-artifact checker passed existing API
+and resource comparisons, the baseline-compiled consumer, and both direct-provider JDK-only
+HTTP consumers. No additional runtime dependency appears in the shaded POM.
+
+The final jar also passed 205 selected consumer backend cases (7 `agent-spi`, 103 `agent-core`,
+95 `app-base`) and four local Codex packaging tests against consumer commit
+`cc08c7e31fae80b4bc8fae3df3eb2c2b31f9bfc6`. The unchanged checksum reader loaded the final artifact's existing arm64
+inventory and empty x64 inventory. Its dependency coordinate and source/tests were unchanged;
+only the temporary execution harness reduced Surefire forks to one. Later concurrent edits in
+other consumer modules were outside that pinned snapshot and were left untouched. The final
+candidate SHA-256:
+
+```text
+dcc0053e7e216d60e46371ed44c942e79698f4e7744e212b19e16bb571e3ceea
+```
+
+Every verification process used one CPU, a 512 MiB heap, serial GC, low process priority and one
+test fork, with JUnit parallel execution disabled. Builds and downstream checks ran in temporary
+snapshots; the four unrelated Claude edits were excluded and preserved. No agents, live-provider
+inference, native CLI/process-stress tests, Xcode builds, simulators or full application suites ran.
+Shared coding tools and containment remain the next engine milestone.
+
+Protocol references: [Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/),
+[thinking/tool replay](https://api-docs.deepseek.com/guides/thinking_mode/),
+[model catalog](https://api-docs.deepseek.com/api/list-models/) and
+[error codes](https://api-docs.deepseek.com/quick_start/error_codes/).
 
 ## Downstream integration validation
 

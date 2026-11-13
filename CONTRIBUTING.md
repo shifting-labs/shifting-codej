@@ -24,7 +24,7 @@ dependency.
   Checkstyle refuses them.
 - `shifting-codej-cli`: the Codex App Server client, the Claude CLI driver, the MCP server for the
   application's tools, and process supervision. Internal.
-- `shifting-codej`: the `Codex` and `Claude` builders, the Codex download, and the published jar.
+- `shifting-codej`: the CLI and direct API facades, provider adapters, the Codex download, and the published jar.
 
 Every Java file starts with `src/main/license/header.txt`, and `src/main/checkstyle/checks.xml`
 holds the style.
@@ -169,6 +169,21 @@ candidate and runs fake HTTP metadata, streaming, signed tool replay, key rotati
 resume with only the JDK and jar. This catches SDK/Jackson/Kotlin relocation problems that a
 reactor test classpath hides. The SDK mapper uses its explicit Jackson creators and preserves
 missing versus null fields without Kotlin reflection; all provider dependencies remain relocated.
+
+`TestDeepSeekModelClient` binds the same model-client contracts to the Chat Completions protocol.
+`TestDeepSeekApiConnector` inherits the same API connector base, and `TestDeepSeekApi` demonstrates
+unchanged public session/tool APIs. Its tests cover private reasoning replay, interleaved fragmented
+tool calls, exact result IDs/order, effort, metadata, cancellation, deadlines and failures without
+retries. The existing Codex-backed DeepSeek lane is not used by these fixtures.
+
+`ApiHttpTransport` owns the bounded JDK HTTP resources and whole-response deadlines shared by the
+Anthropic SDK bridge and the direct DeepSeek adapter. Provider adapters retain separate framing,
+replay and error translation. `DeepSeekApiConsumer.java` extends the jar-only packaging check with
+metadata, native tool messages, private reasoning replay, key rotation and durable resume.
+
+Run `-Dtest=TestDeepSeekModelClient,TestDeepSeekApiConnector,TestDeepSeekApi,TestAnthropicModelClient,TestClaudeApiConnector,TestClaudeApi`
+with the constrained serial JVM flags above. Include the existing shared-engine/SPI suites before
+committing changes to shared HTTP behavior. No new dependency is needed by the DeepSeek adapter.
 
 ## Versions
 

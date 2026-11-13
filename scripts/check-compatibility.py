@@ -133,6 +133,16 @@ def verify(args, report):
             (output / "claude-api-consumer.txt").write_text(result)
             report["passed"].append("ClaudeApi fake HTTP: shaded SDK, signed tool replay, durable resume and key rotation; JDK + jar only")
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_deepseek_api = PREFIX + "DeepSeekApi.class" in artifact.namelist()
+        if has_deepseek_api:
+            direct_fixture = Path(__file__).parent / "compatibility" / "DeepSeekApiConsumer.java"
+            run([jdk_tool("javac"), "--release", "25", "-cp", str(candidate), "-d", str(classes), str(direct_fixture)])
+            result = run([jdk_tool("java"), "-cp", os.pathsep.join((str(classes), str(candidate))),
+                          "DeepSeekApiConsumer", str(Path(folder) / "deepseek-api")])
+            (output / "deepseek-api-consumer.txt").write_text(result)
+            report["passed"].append("DeepSeekApi fake HTTP: private reasoning, host tools, durable resume and key rotation; JDK + jar only")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
