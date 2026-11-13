@@ -248,3 +248,25 @@ JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
 See [the design and checklist](docs/design/coding-tools.md). Packaging with `-Ppublish` and the
 compatibility checker also exercises coding tools from the shaded jar on macOS, using only a
 fake HTTP server and temporary workspace; it starts no provider CLI or live inference.
+
+## Tool SPI contracts
+
+The new Class-free parameter/output interfaces and runtime contracts are additive. Current
+builders and tool execution still use the existing implementation until dispatcher migration.
+`AbstractTestToolParameters`, `AbstractTestAgentTool`, and `AbstractTestToolProvider` are reusable
+bases under `shifting-codej/src/test/java/io/github/shiftinglabs/codej/tool/testing`. Their
+external bindings exercise different codecs/DTOs and fake backend implementations without
+processes, threads, or network. Value tests cover bounds, schema fingerprints, explicit grants,
+completion versus verified stop, and cancellation races.
+
+```sh
+JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
+  nice -n 10 mvn -o -T1 -pl shifting-codej -am \
+  -Dcodej.test.forks=1 -Djunit.jupiter.execution.parallel.enabled=false \
+  -Dtest=TestToolValues,TestToolRequirements,TestToolExecution,TestToolParameters,TestAgentTool,TestToolProvider,TestToolOf,TestToolsOfCallerRecords \
+  -Dsurefire.failIfNoSpecifiedTests=false verify
+```
+
+Use `-Ppublish` for the shaded artifact and strict public Javadocs. The compatibility checker
+runs the external `ToolSpiConsumer` using the JDK and candidate jar only, alongside existing
+consumer fixtures. See [the interfaces and staged migration plan](docs/design/tool-spi.md).

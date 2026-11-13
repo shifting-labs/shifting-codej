@@ -1,7 +1,7 @@
 # Extensible tool framework proposal
 
-Status: proposed for review. This document does not introduce production interfaces or change
-current tool behavior. It builds on [coding-tools.md](coding-tools.md) and the existing connector
+Status: the SPI and baseline contracts are implemented; runtime migration remains planned.
+Existing tool behavior and dispatcher wiring are unchanged. It builds on [coding-tools.md](coding-tools.md) and the existing connector
 SPI. Frequent tool additions, implementation replacements, typed parameters, and backward
 compatibility are primary requirements.
 
@@ -43,8 +43,9 @@ registered host tools, without replacing the CLI's own execution loop.
 
 ## Core interfaces
 
-These are proposed signatures. Supporting values such as ToolSchema, ToolArguments, ToolOutput,
-ToolDescriptor, ToolRequirements, and contexts are not implemented by this document.
+These interfaces are implemented. Parameter/schema/result contracts live in
+`shifting-codej-api` under `io.github.shiftinglabs.codej.tool`; runtime contracts live in
+`shifting-codej-cli` under `io.github.shiftinglabs.codej.cli.spi.tool`.
 
 ```java
 public interface ToolParameters<P>
@@ -148,9 +149,13 @@ a validated record can implement that interface. An interface for every record f
 CodingTool hierarchy would not add behavior. Paths, bounds, actions, and file contents remain typed
 values. The generic SPI permits both value interfaces and concrete records.
 
-`ToolArguments` encapsulates bounded transport input. Initially this is the existing JSON argument
-format. `ToolSchema` represents the supported validated schema; unsupported assertions fail closed.
-`ToolOutput` is bounded, typed model-facing content. Initially it projects into the existing text
+`ToolArguments` and `ToolOutput` are interfaces so codecs and compatibility adapters can retain
+their appropriate transport/output limits. Their default factories return validated immutable
+values: strict JSON objects up to 64 KiB, and text output up to 65,536 characters. Domain codecs
+remain responsible for validation when alternate envelopes are used; a future dispatcher must
+enforce the effective host budgets independently. `ToolSchema` is an immutable supported object
+schema with a canonical SHA-256 fingerprint; unsupported assertions fail closed.
+`ToolOutput` describes typed model-facing content. Initially it projects into the existing text
 `ModelInput.ToolResult`; image/media results require a separate compatible extension rather than
 changing that record or the sealed ModelInput hierarchy.
 
@@ -259,10 +264,10 @@ Proposed base suites:
 - AbstractTestToolProvider: pure definitions, duplicate names, resource ownership and failed-open cleanup.
 - Dispatcher tests: approval denial, policy capture, durable receipts, no replay and compatibility adapters.
 
-The following work is proposed, not implemented by this document:
+Implementation stages:
 
 - [x] Record the interface boundaries and Class-free parameter/result contracts for review.
-- [ ] Add the SPI, immutable supporting values, fake implementations, and baseline contract tests.
+- [x] Add the SPI, immutable supporting values, fake implementations, and baseline contract tests.
 - [ ] Add legacy Tool and reflection codec adapters; prove existing public APIs and behavior unchanged.
 - [ ] Extract ToolDispatcher from ApiAgentDriver; route current tools through registered definitions.
 - [ ] Split the current five registrations into handlers backed by the resource interfaces.
@@ -271,5 +276,30 @@ The following work is proposed, not implemented by this document:
 - [ ] Add a new tool and an alternate fake backend as extension examples without editing the dispatcher.
 - [ ] Consider richer execution, directory/move tools, plans/questions, and optional integrations separately.
 
-This proposal step introduces no production refactor or dependency changes. Implementation and
-focused verification follow as separate stages; no agents are used.
+Stage 1 does not install ToolProvider objects into ApiAgentDriver yet. Legacy adapters,
+dispatcher extraction, and migration of existing built-ins remain separate stages. No dependency
+or artifact layout changed. New interfaces do not require Class tokens or Record type bounds.
+
+## Stage 1 validation
+
+40 focused cases passed: 13 API/binding cases, 8 runtime value/lifecycle cases, and 19 external
+consumer/base-contract cases. The latter bind both a record codec and a reflection-free streaming
+codec, different record implementations of the same parameter interface, and two fake backends.
+Both codecs also reject invalid alternate envelopes independently of the default envelope factory.
+The reusable bases are AbstractTestToolParameters, AbstractTestAgentTool, and generic
+AbstractTestToolProvider. Coverage includes explicit scope grants, cancellation/deadlines,
+durable-intent failure before effects, observer-future isolation, uncertain outcomes distinct from
+verified stop, failed-open cleanup, retryable close, and preservation of borrowed services.
+
+Checkstyle, license checks, strict public Javadocs, and shaded packaging passed. The unchanged
+published-artifact consumer and descriptor/record/enum/sealed/resource checks passed. A new
+[ToolSpiConsumer](../../scripts/compatibility/ToolSpiConsumer.java) compiled and ran with only the
+JDK and shaded jar: interface-valued inputs, provider installation, typed execution/output and
+verified shutdown, with no model calls or external resources.
+
+Candidate SHA-256: `6d5a5bde9baff8bba8df4f7dc86c143f6e8ca60b5daff9ece0859464cac75750`.
+
+Verification used one CPU, a 512 MiB heap, serial GC, low priority, one test fork, and disabled
+JUnit parallelism in an isolated snapshot excluding the four unrelated Claude CLI edits. No
+agents, live-provider calls, broad/stress or Bytequay suites ran. The compatibility checker also
+retained its existing short fake-HTTP and macOS coding-tool artifact fixtures.

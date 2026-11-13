@@ -149,6 +149,15 @@ def verify(args, report):
             (output / "deepseek-api-consumer.txt").write_text(result)
             report["passed"].append("DeepSeekApi fake HTTP: private reasoning, host tools, durable resume and key rotation; JDK + jar only")
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_tool_spi = PREFIX + "tool/ToolParameters.class" in artifact.namelist()
+        if has_tool_spi:
+            tool_fixture = Path(__file__).parent / "compatibility" / "ToolSpiConsumer.java"
+            run([jdk_tool("javac"), "--release", "25", "-cp", str(candidate), "-d", str(classes), str(tool_fixture)])
+            result = run([jdk_tool("java"), "-cp", os.pathsep.join((str(classes), str(candidate))), "ToolSpiConsumer"])
+            (output / "tool-spi-consumer.txt").write_text(result)
+            report["passed"].append("Tool SPI: interface-valued parameters, provider installation, typed results and verified shutdown; JDK + jar only")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

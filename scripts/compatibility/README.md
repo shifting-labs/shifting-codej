@@ -119,3 +119,8 @@ file through record-bound built-in tools, performs the contained command startup
 resumes the same conversation from the shaded artifact. Its classpath contains only the JDK and
 candidate jar; no CLI download or live provider is used. Existing baseline-compiled consumer
 checks continue unchanged.
+
+`ToolSpiConsumer` is a candidate-only usage example of the new tool SPI. It implements parameter
+binding without Class tokens, installs a configured provider, invokes a typed tool through a
+wildcard registry entry, encodes the result, and verifies shutdown. It starts no process, thread,
+network, or model request and depends only on the JDK and shaded candidate jar.

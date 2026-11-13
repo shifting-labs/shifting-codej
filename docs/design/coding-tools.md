@@ -1,7 +1,7 @@
 # Built-in tools for the shared API engine
 
 This is an additive, opt-in capability of `ApiAgentDriver`, shared by Claude API and DeepSeek API.
-A proposed [tool SPI refactor](tool-spi.md) separates contracts, codecs, implementations, and resource backends; it is not implemented yet.
+The [tool SPI refactor](tool-spi.md) now has its interfaces and baseline tests; migrating these built-ins onto it is the next stage.
 Existing APIs, reference encodings, CLI behavior, and text/host-tool defaults are unchanged.
 `CodingTools` is an immutable record with validated resource limits. Provider adapters still own
 only inference; they receive schemas and tool results, never filesystem/process handles.
