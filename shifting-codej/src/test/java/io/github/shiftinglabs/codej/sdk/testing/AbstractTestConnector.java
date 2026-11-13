@@ -86,9 +86,7 @@ public abstract class AbstractTestConnector<C>
         BorrowedSupervisor supervisor = new BorrowedSupervisor();
         ConnectorContext context = context(supervisor);
         ConnectorDriver driver = connector().create(configuration(), context);
-        AgentSessionContext session = new AgentSessionContext("contract-task", contractDirectory, contractDirectory.resolve("runtime"),
-                contractDirectory.resolve("runtime/provider"), AgentPermissionPolicy.AUTO, Optional.empty(),
-                (request, timeout) -> { throw new AssertionError("Unexpected approval"); }, Optional.empty(), Optional.empty(), SessionAccess.READ_ONLY, "");
+        AgentSessionContext session = contractSessionContext();
         Path history = Files.writeString(Files.createDirectories(context.profileDirectory()).resolve("saved-conversation"), "Keep this conversation");
         try {
             driver.validate(session);
@@ -104,6 +102,14 @@ public abstract class AbstractTestConnector<C>
         assertThatThrownBy(() -> driver.open(session, event -> {})).isInstanceOf(AgentUnavailableException.class);
         assertThat(history).hasContent("Keep this conversation");
         assertThat(supervisor.closed).isFalse();
+    }
+
+    /** A supported session for the factory validation contract; existing CLI bindings retain their read-only default. */
+    protected AgentSessionContext contractSessionContext()
+    {
+        return new AgentSessionContext("contract-task", contractDirectory, contractDirectory.resolve("runtime"),
+                contractDirectory.resolve("runtime/provider"), AgentPermissionPolicy.AUTO, Optional.empty(),
+                (request, timeout) -> { throw new AssertionError("Unexpected approval"); }, Optional.empty(), Optional.empty(), SessionAccess.READ_ONLY, "");
     }
 
     protected final ConnectorContext contractContext()
