@@ -1472,6 +1472,121 @@ class TestClaudeCliDriver
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"completed,false", "stopped,false", "completed,true", "stopped,true"})
+    void keepsClaudeInputOpenUntilTheParentAnswersAfterItsBackgroundAgent(String childStatus, boolean receiptAfterChild)
+            throws Exception
+    {
+        supervisor.versionOutput = "2.1.304";
+        try (ClaudeCliDriver driver = driver(supervisor);
+                AgentSession session = driver.open(context(Optional.empty()), ignored -> {})) {
+            driver.probe();
+            RunningTurn turn = session.start(command("Explore the change"));
+            ScriptedTurn process = supervisor.turns.getFirst();
+            launchBackgroundAgent(process);
+            process.streamingResult("Waiting for explorer");
+            if (!receiptAfterChild) {
+                process.inputLifecycle(0, "completed");
+            }
+            assertThat(process.inputClosed).isFalse();
+
+            stdout(process, """
+                    {"type":"system","subtype":"task_notification","task_id":"child-1","tool_use_id":"spawn-1","status":"%s",
+                    "session_id":"SESSION","uuid":"child-end"}
+                    """.formatted(childStatus));
+            if (receiptAfterChild) {
+                process.inputLifecycle(0, "completed");
+            }
+            assertThat(process.inputClosed).isFalse();
+
+            process.streamingResult("Explorer reported back");
+            assertThat(process.inputClosed).isTrue();
+            process.exit.complete(new ProcessExit(0, ProcessExit.Reason.EXITED, ProcessExit.TreeTermination.VERIFIED_STOPPED, Duration.ofMillis(10), false, false));
+            AgentTurnResult result = await(turn);
+            assertThat(result.state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(result.finalResponse()).contains("Explorer reported back");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void neverReportsAWaitingAnswerAsTheResultOfBackgroundWork(boolean rootError)
+            throws Exception
+    {
+        supervisor.versionOutput = "2.1.304";
+        try (ClaudeCliDriver driver = driver(supervisor);
+                AgentSession session = driver.open(context(Optional.empty()), ignored -> {})) {
+            driver.probe();
+            RunningTurn turn = session.start(command("Explore the change"));
+            ScriptedTurn process = supervisor.turns.getFirst();
+            launchBackgroundAgent(process);
+            process.streamingResult("Waiting for explorer", rootError);
+            process.inputLifecycle(0, rootError ? "cancelled" : "completed");
+            // An error ends the turn as before; a waiting answer leaves Claude its input.
+            assertThat(process.inputClosed).isEqualTo(rootError);
+            process.exit.complete(new ProcessExit(rootError ? 1 : 0, ProcessExit.Reason.EXITED, ProcessExit.TreeTermination.VERIFIED_STOPPED, Duration.ofMillis(10), false, false));
+
+            AgentTurnResult result = await(turn);
+            assertThat(result.state()).isEqualTo(rootError ? AgentTurnResult.State.FAILED : AgentTurnResult.State.INTERRUPTED);
+            assertThat(result.finalResponse()).isEmpty();
+        }
+    }
+
+    @Test
+    void acceptsSteeringWhileABackgroundCommandKeepsTheClaudeTurnRunning()
+            throws Exception
+    {
+        supervisor.versionOutput = "2.1.304";
+        try (ClaudeCliDriver driver = driver(supervisor);
+                AgentSession session = driver.open(context(Optional.empty()), ignored -> {})) {
+            driver.probe();
+            RunningTurn turn = session.start(command("Run sleep 120 once, then reply"));
+            ScriptedTurn process = supervisor.turns.getFirst();
+            stdout(process, """
+                    {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"bash-1","name":"Bash",
+                    "input":{"command":"sleep 120","run_in_background":true}}]},"parent_tool_use_id":null,"session_id":"SESSION","uuid":"bash-start"}
+                    """);
+            stdout(process, """
+                    {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bash-1","content":"Running in background"}]},
+                    "tool_use_result":{"backgroundTaskId":"shell-1"},"parent_tool_use_id":null,"session_id":"SESSION","uuid":"bash-launched"}
+                    """);
+            process.streamingResult("Running in the background; I will reply once it finishes");
+            process.inputLifecycle(0, "completed");
+            assertThat(process.inputClosed).isFalse();
+
+            turn.steer(new AgentTurnInput("Also print the date", ImmutableList.of()));
+            stdout(process, """
+                    {"type":"system","subtype":"task_notification","task_id":"shell-1","tool_use_id":"bash-1","status":"completed",
+                    "session_id":"SESSION","uuid":"bash-end"}
+                    """);
+            process.inputLifecycle(1, "started");
+            process.streamingResult("Slept and printed the date");
+            assertThat(process.inputClosed).isFalse();
+            process.inputLifecycle(1, "completed");
+            assertThat(process.inputClosed).isTrue();
+            process.exit.complete(new ProcessExit(0, ProcessExit.Reason.EXITED, ProcessExit.TreeTermination.VERIFIED_STOPPED, Duration.ofMillis(10), false, false));
+            assertThat(await(turn).finalResponse()).contains("Slept and printed the date");
+        }
+    }
+
+    private static void launchBackgroundAgent(ScriptedTurn process)
+    {
+        // Claude backgrounds an Agent call that leaves run_in_background unset.
+        stdout(process, """
+                {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"spawn-1","name":"Agent",
+                "input":{"description":"Explore","prompt":"Find bugs"}}]},"parent_tool_use_id":null,"session_id":"SESSION","uuid":"spawn"}
+                """);
+        stdout(process, """
+                {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn-1","content":"launched"}]},
+                "tool_use_result":{"status":"async_launched","isAsync":true,"agentId":"child-1"},"parent_tool_use_id":null,"session_id":"SESSION","uuid":"launched"}
+                """);
+    }
+
+    private static void stdout(ScriptedTurn process, String json)
+    {
+        process.emit(ProcessStream.STDOUT, json.replace("\n", "").replace("SESSION", process.sessionId()) + "\n");
+    }
+
     @Test
     void reportsClaudeErrorWhenItCancelsInputAfterAnErrorResult()
             throws Exception

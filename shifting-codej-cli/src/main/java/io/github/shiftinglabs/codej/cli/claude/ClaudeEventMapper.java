@@ -110,6 +110,16 @@ final class ClaudeEventMapper
                 });
     }
 
+    /**
+     * Whether a background subagent or shell command Claude reported has not reported its end yet. Unlike {@link #hasFinishedWork()},
+     * activity the mapper cannot identify does not count, so it never waits for an end Claude will not report.
+     */
+    boolean hasRunningBackgroundWork()
+    {
+        return activeAgents.stream().anyMatch(backgroundAgents::contains)
+                || tasks.values().stream().anyMatch(task -> !task.terminal() && task.taskType().filter("local_bash"::equals).isPresent());
+    }
+
     private List<ProviderAgentEvent> mapSystem(ClaudeProtocol.SystemMessage message)
     {
         return switch (message.subtype()) {
@@ -160,8 +170,9 @@ final class ClaudeEventMapper
                 if (message.tasks().isEmpty()) {
                     activityUncertain = true;
                 }
+                // An inventory can lag the task's end; only a fresh task_started reopens an ended task.
                 message.tasks().stream().flatMap(List::stream).forEach(task -> tasks.compute(task.taskId(), (id, previous) ->
-                        new TaskActivity(Optional.ofNullable(previous).flatMap(TaskActivity::toolUseId), task.taskType(), false)));
+                        new TaskActivity(Optional.ofNullable(previous).flatMap(TaskActivity::toolUseId), task.taskType(), previous != null && previous.terminal())));
                 yield ImmutableList.of();
             }
             case "compact_boundary" -> ImmutableList.of(new ProviderAgentEvent.Tool(
@@ -698,6 +709,10 @@ final class ClaudeEventMapper
         }
         Optional<String> toolId = conflictingTool ? previous.toolUseId() : reportedToolId;
         boolean finished = terminal(state);
+        // Claude resumes an ended task with a fresh task_started; a late progress or status update describes the run that ended.
+        if (previous != null && previous.terminal() && !finished && !message.subtype().equals("task_started")) {
+            return ImmutableList.of();
+        }
         Optional<String> taskType = message.taskType()
                 .or(() -> Optional.ofNullable(previous).flatMap(TaskActivity::taskType))
                 .or(() -> toolId.filter(agents::containsKey).map(ignored -> "local_agent"))

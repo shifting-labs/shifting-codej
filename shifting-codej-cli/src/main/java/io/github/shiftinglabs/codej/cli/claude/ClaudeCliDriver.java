@@ -896,6 +896,7 @@ public final class ClaudeCliDriver
         private final Map<String, CompletableFuture<Void>> pendingInputs = new HashMap<>();
         private String runningInput;
         private boolean inputClosed;
+        private boolean awaitingBackground;
         private volatile ManagedProcess process;
         private volatile ClaudeProtocol.ResultMessage result;
         private volatile String interruptionReason;
@@ -1058,8 +1059,17 @@ public final class ClaudeCliDriver
                         }
                     }
                 }
+                // A successful answer given while background agents or shell commands run is not the last one: Claude wakes the
+                // parent when they end, and closing input lets print mode stop them. Their end alone does not release the wait;
+                // only the parent's next result, which has read their outcome, does.
+                if (message instanceof ClaudeProtocol.ResultMessage) {
+                    awaitingBackground = false;
+                }
+                if (result != null && result.successful() && mapper.hasRunningBackgroundWork()) {
+                    awaitingBackground = true;
+                }
                 // A result can precede a queued steer, even with queued_turn_count=0. Wait for every input's own completion.
-                if (result != null && pendingInputs.isEmpty() && !inputClosed) {
+                if (result != null && pendingInputs.isEmpty() && !inputClosed && !awaitingBackground) {
                     inputClosed = true;
                     closeInput = true;
                 }
@@ -1206,9 +1216,15 @@ public final class ClaudeCliDriver
             synchronized (inputLock) {
                 inputClosed = true;
                 pendingInputs.values().forEach(receipt -> receipt.completeExceptionally(new AgentUnavailableException("Claude process exited before acknowledging input")));
-                if (streamingInput && !pendingInputs.isEmpty() && !cancelled.get() && interruptionReason == null
+                if (streamingInput && !cancelled.get() && interruptionReason == null
                         && exit != null && exit.reason() == ProcessExit.Reason.EXITED) {
-                    interruptionReason = "Claude exited before completing all submitted input";
+                    if (!pendingInputs.isEmpty()) {
+                        interruptionReason = "Claude exited before completing all submitted input";
+                    }
+                    // The last answer only said it was waiting for background work.
+                    else if (awaitingBackground) {
+                        interruptionReason = "Claude exited before reporting the outcome of its background work";
+                    }
                 }
             }
             if (failure != null) {
