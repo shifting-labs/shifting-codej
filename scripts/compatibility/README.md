@@ -64,6 +64,37 @@ Record candidate/source hashes and the tested snapshot. Intermediate results mus
 coordinator's final integrated shaded jar, together with affected unmodified Bytequay tests.
 `summary.json`, signature/shape snapshots, diffs and fixture outputs identify what actually passed.
 
+## Focused downstream validation
+
+Keep the consumer's dependency declaration and test sources unchanged. In its temporary source
+copy, select only tests that cross the SDK boundary: session references/events, host-tool schemas,
+lane factories, accounts, catalog/quota metadata and text helpers. Stage the self-contained
+candidate jar alongside the existing published POM at the consumer's unchanged coordinate in an
+isolated repository. Verify the staged jar hash and the Surefire reports' actual classpaths.
+
+A large shared cache need not be copied. A temporary Maven settings file can name the isolated
+local repository and mirror `*` to a `file:` URL for the existing cache. Maven then copies only
+required artifacts into the isolated repository; the original cache remains read-only. Do not use
+offline mode while populating through this file mirror. No external mirror is needed when all
+selected dependencies are already cached.
+
+Limit Maven to `-T1`, disable JUnit parallel execution and set one Surefire fork. Check effective
+configuration: a consumer's literal `<forkCount>4</forkCount>` overrides a command-line property.
+Change that literal only in the temporary copy and record the execution-only difference. Use
+`JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC'` and low process priority.
+Prepare only required upstream modules with tests skipped, then verify the selected consumers.
+
+For a Node packaging reader that resolves `os.homedir()`, an isolated process can override that
+resolver and call `syncBuiltinESMExports()` before importing the unchanged reader. This lets it
+read the staged candidate without changing the user's home or default Maven cache. Compare the
+reader's supported-architecture inventory with the candidate's real checksum resource, including
+empty inventories for unsupported architectures. Run local bundle fixture tests serially; do not
+start a native build or download a provider executable for this check.
+
+The [direct API connector plan](../../docs/design/direct-api-connectors.md#downstream-integration-validation)
+records the completed scoped run, tested revisions, counts and candidate hash. Full application
+and live-provider behavior remain outside these checks.
+
 ## Checker controls
 
 ```sh
