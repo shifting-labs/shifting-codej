@@ -327,9 +327,14 @@ try (Agent agent = ClaudeApi.builder()
 This lane needs an API key and network access; it starts no Claude Code process. The shared API
 engine owns sessions, checkpoints, approvals and the host-tool loop. Add tools with the existing
 `SessionOptions.tool(...)` and approval handler. Tools are trusted Java callbacks and run on the
-agent's callback executor; the engine does not provide a filesystem or shell sandbox.
-Choose `TOOLS_ONLY` explicitly: the existing read-only session default is unchanged and is
-rejected by this connector. Text-only sessions are `TOOLS_ONLY` sessions without tools.
+agent's callback executor. Choose `TOOLS_ONLY` for this mode; text-only sessions are `TOOLS_ONLY`
+sessions without tools. The existing read-only default requires opting into built-in coding tools.
+
+Both direct API builders accept `.codingTools(CodingTools.defaults())`, enabling bounded file
+reads/listing, literal search, single-file patches and contained commands through the same engine.
+Use `READ_ONLY` or `WORKSPACE_WRITE` access and an approval handler. Commands currently require
+macOS, cannot fork or use the network, and have read-only workspace access; edits use the patch
+tool. Host callbacks retain their trusted authority. See the [coding-tool contracts and limits](docs/design/coding-tools.md).
 
 `status()` and `models()` use metadata endpoints without inference. Quota is unavailable.
 The initial adapter supports text, image attachments and client tool calls; effort, service tiers,
@@ -365,8 +370,8 @@ The initial direct adapter supports text and host-provided tools. Set `SessionOp
 to `none`, `low`, `high` or `max` when supported by the chosen model. The adapter retains private
 `reasoning_content` across tool workflows and later turns, and emits only visible answer text.
 Images, hosted tools and balance reporting are not exposed by this first binding. Metadata checks
-use `/models`; inference has no automatic retry. The same explicit `TOOLS_ONLY` scope and trusted
-host-tool rules described above apply. A saved direct DeepSeek reference requires its own profile
+use `/models`; inference has no automatic retry. The same `TOOLS_ONLY` host-tool mode and
+opt-in built-in coding tools described above apply. A saved direct DeepSeek reference requires its own profile
 and cannot resume a Codex or Claude conversation.
 
 ## Accounts, gateways and Claude

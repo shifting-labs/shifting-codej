@@ -13,6 +13,7 @@
  */
 package io.github.shiftinglabs.codej.cli.api;
 
+import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
@@ -51,6 +52,7 @@ public final class ApiEngineConfig
     final SecretRedactor redactor;
     final Supplier<SecretRedactor> redactors;
     final Optional<Executor> toolExecutor;
+    final Optional<CodingTools> codingTools;
 
     private ApiEngineConfig(Builder b)
     {
@@ -73,6 +75,7 @@ public final class ApiEngineConfig
         redactor = b.redactor;
         redactors = b.redactors.orElse(() -> redactor);
         toolExecutor = b.toolExecutor;
+        codingTools = b.codingTools;
     }
 
     SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
@@ -102,6 +105,7 @@ public final class ApiEngineConfig
         private Optional<ExecutorService> executor = Optional.empty();
         private Optional<Supplier<SecretRedactor>> redactors = Optional.empty();
         private Optional<Executor> toolExecutor = Optional.empty();
+        private Optional<CodingTools> codingTools = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -209,6 +213,13 @@ public final class ApiEngineConfig
         public Builder toolExecutor(Executor value)
         {
             toolExecutor = Optional.of(requireNonNull(value, "toolExecutor is null"));
+            return this;
+        }
+
+        /** Enables contained built-in tools for READ_ONLY/FULL sessions; defaults remain unchanged. */
+        public Builder codingTools(CodingTools value)
+        {
+            codingTools = Optional.of(requireNonNull(value, "codingTools is null"));
             return this;
         }
 

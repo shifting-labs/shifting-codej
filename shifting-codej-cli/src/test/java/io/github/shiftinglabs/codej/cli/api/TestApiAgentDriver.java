@@ -13,7 +13,9 @@
  */
 package io.github.shiftinglabs.codej.cli.api;
 
+import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.Tool;
+import io.github.shiftinglabs.codej.cli.api.tools.FakeCodingSupervisor;
 import io.github.shiftinglabs.codej.cli.driver.AgentApprovalHandler;
 import io.github.shiftinglabs.codej.cli.driver.AgentAttachment;
 import io.github.shiftinglabs.codej.cli.driver.AgentCapabilities;
@@ -55,6 +57,8 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
@@ -625,6 +629,158 @@ class TestApiAgentDriver
                         .isEqualTo("observed-terminal");
             }
         }
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void builtinsRoundTripThroughTypedToolsWithoutTheHostExecutor()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        FakeCodingSupervisor supervisor = new FakeCodingSupervisor();
+        Files.writeString(directory.resolve("source.txt"), "original");
+        client.script.add((request, sink) -> completed(toolResponse("read_file", "{\"path\":\"source.txt\"}")));
+        ApiEngineConfig settings = config(client).codingTools(CodingTools.defaults()).toolExecutor(task -> {
+            throw new AssertionError("Built-in execution belongs on the turn worker");
+        }).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, new ConnectorContext(directory.resolve("profile"), supervisor, ToolServer.DEFAULT));
+                AgentSession session = driver.open(codingContext(SessionAccess.FULL, allow()), event -> {})) {
+            supervisor.beforeStart = () -> {
+                try {
+                    assertThat(Files.readString(checkpoint(session.reference()))).contains("coding-launch", "launch-2");
+                }
+                catch (java.io.IOException failure) {
+                    throw new AssertionError(failure);
+                }
+            };
+            assertThat(done(session.start(command("read"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(client.requests.getFirst().tools()).extracting(ModelRequest.ToolDefinition::name)
+                    .contains("read_file", "list_files", "search_files", "apply_patch", "shell_command");
+            var results = (ModelInput.ToolResults) client.requests.getLast().input();
+            assertThat(results.results().getFirst().error()).isFalse();
+            assertThat(results.results().getFirst().text()).contains("original", "sha256");
+            client.script.add((request, sink) -> completed(toolResponse("shell_command",
+                    "{\"argv\":[\"/usr/bin/true\"],\"directory\":\".\",\"timeoutSeconds\":1}")));
+            assertThat(done(session.start(command("command"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(supervisor.acknowledged).containsExactly("launch-1", "launch-2");
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void builtinsAlwaysRequireApprovalAndApprovalCannotWidenReadonlyAccess()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        FakeCodingSupervisor supervisor = new FakeCodingSupervisor();
+        AtomicInteger approvals = new AtomicInteger();
+        AgentApprovalHandler deny = (request, wait) -> {
+            approvals.incrementAndGet();
+            return CompletableFuture.completedFuture(ProviderApprovalDecision.deny());
+        };
+        client.script.add((request, sink) -> completed(toolResponse("apply_patch",
+                "{\"path\":\"created\",\"action\":\"CREATE\",\"edits\":[{\"before\":\"\",\"after\":\"content\"}]}")));
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).codingTools(CodingTools.defaults()).approveTools(false).build(),
+                new ConnectorContext(directory.resolve("profile"), supervisor, ToolServer.DEFAULT))) {
+            try (AgentSession session = driver.open(codingContext(SessionAccess.FULL, deny), event -> {})) {
+                assertThat(done(session.start(command("create"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(approvals).hasValue(1);
+                assertThat(directory.resolve("created")).doesNotExist();
+                assertThat(((ModelInput.ToolResults) client.requests.getLast().input()).results().getFirst().error()).isTrue();
+            }
+            client.script.add((request, sink) -> completed(toolResponse("apply_patch",
+                    "{\"path\":\"created\",\"action\":\"CREATE\",\"edits\":[{\"before\":\"\",\"after\":\"content\"}]}")));
+            try (AgentSession session = driver.open(codingContext(SessionAccess.READ_ONLY, allow()), event -> {})) {
+                assertThat(done(session.start(command("create"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(client.requests.getLast().tools()).extracting(ModelRequest.ToolDefinition::name).doesNotContain("apply_patch");
+                assertThat(directory.resolve("created")).doesNotExist();
+            }
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void uncertainBuiltInProcessKeepsTheReceiptAndBothWriterLocks()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        FakeCodingSupervisor supervisor = new FakeCodingSupervisor();
+        ApiAgentDriver driver = new ApiAgentDriver(config(client).codingTools(CodingTools.defaults()).build(),
+                new ConnectorContext(directory.resolve("profile"), supervisor, ToolServer.DEFAULT));
+        AgentSession session = driver.open(codingContext(SessionAccess.FULL, allow()), event -> {});
+        AgentSessionRef reference = session.reference();
+        try {
+            supervisor.verified = false;
+            client.script.add((request, sink) -> completed(toolResponse("shell_command",
+                    "{\"argv\":[\"/usr/bin/true\"],\"directory\":\".\",\"timeoutSeconds\":1}")));
+            assertThat(done(session.start(command("command"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(session.resumable()).isFalse();
+            assertThatThrownBy(() -> session.start(command("again"))).isInstanceOf(AgentUnavailableException.class);
+            assertThatThrownBy(session::close).isInstanceOf(AgentUnavailableException.class);
+            assertThat(supervisor.acknowledged).containsExactly("launch-1");
+            assertThatThrownBy(() -> driver.open(codingContext(SessionAccess.FULL, allow()), event -> {})).isInstanceOf(AgentUnavailableException.class);
+        }
+        finally {
+            supervisor.verified = true;
+            session.close();
+            driver.close();
+        }
+        AgentSessionContext resume = codingContext(SessionAccess.FULL, allow());
+        resume = new AgentSessionContext(resume.taskId(), resume.worktree(), resume.runtimeDirectory(), resume.providerDirectory(), resume.scope(),
+                Optional.of(reference), resume.approvals(), resume.model(), resume.effort(), resume.managedInstructions(), List.of(), false);
+        try (ApiAgentDriver restarted = new ApiAgentDriver(config(new FakeClient()).codingTools(CodingTools.defaults()).build(),
+                new ConnectorContext(directory.resolve("profile"), supervisor, ToolServer.DEFAULT));
+                AgentSession recovered = restarted.open(resume, event -> {})) {
+            assertThat(recovered.resumable()).isFalse();
+            assertThatThrownBy(() -> recovered.start(command("do not replay"))).isInstanceOf(AgentUnavailableException.class);
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void cancellingBuiltInCommandVerifiesStopBeforeSavingItsOutcome()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        FakeCodingSupervisor supervisor = new FakeCodingSupervisor();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).codingTools(CodingTools.defaults()).build(),
+                new ConnectorContext(directory.resolve("profile"), supervisor, ToolServer.DEFAULT));
+                AgentSession session = driver.open(codingContext(SessionAccess.FULL, allow()), event -> {})) {
+            supervisor.pendingExit = new CompletableFuture<>();
+            client.script.add((request, sink) -> completed(toolResponse("shell_command",
+                    "{\"argv\":[\"/bin/sleep\",\"5\"],\"directory\":\".\",\"timeoutSeconds\":10}")));
+            RunningTurn turn = session.start(command("command"));
+            assertThat(supervisor.waiting.await(2, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            assertThat(supervisor.acknowledged).containsExactly("launch-1", "launch-2");
+            assertThat(session.resumable()).isTrue();
+            assertThat(done(session.start(command("continue"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(supervisor.specs).hasSize(2);
+        }
+    }
+
+    @Test
+    void codingValidationIsSideEffectFreeAndRejectsUnenforceableConstraints()
+    {
+        FakeCodingSupervisor supervisor = new FakeCodingSupervisor();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(new FakeClient()).codingTools(CodingTools.defaults()).build(),
+                new ConnectorContext(directory.resolve("profile"), supervisor, ToolServer.DEFAULT))) {
+            AgentSessionContext full = codingContext(SessionAccess.FULL, allow());
+            driver.validate(full);
+            driver.validate(full.withTaskScope(full.scope().withApproveEveryEdit(true).withApproveEveryCommand(true), false));
+            assertThatThrownBy(() -> driver.validate(full.withTaskScope(full.scope().withNetwork(true), false))).isInstanceOf(AgentUnavailableException.class);
+            assertThatThrownBy(() -> driver.validate(full.withTaskScope(full.scope().withWritableRoots(List.of(directory)), false)))
+                    .isInstanceOf(AgentUnavailableException.class);
+            assertThat(supervisor.specs).isEmpty();
+            assertThat(directory.resolve("profile")).doesNotExist();
+        }
+    }
+
+    private AgentSessionContext codingContext(SessionAccess access, AgentApprovalHandler approvals)
+    {
+        return new AgentSessionContext("task", directory, directory.resolve("runtime"), directory.resolve("runtime/provider"), AgentPermissionPolicy.AUTO,
+                Optional.empty(), approvals, Optional.empty(), Optional.empty(), access, "Host instructions", List.of());
     }
 
     private ApiEngineConfig.Builder config(FakeClient client)

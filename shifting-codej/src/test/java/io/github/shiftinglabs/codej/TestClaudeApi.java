@@ -17,6 +17,8 @@ import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URI;
@@ -168,6 +170,42 @@ class TestClaudeApi
             assertThatThrownBy(() -> agent.startSession(SessionOptions.in(directory).build())).isInstanceOf(AgentException.class);
             assertThat(http.requests()).noneMatch(request -> request.method().equals("POST"));
         }
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void publicCodingOptionReachesTheSharedEngine()
+            throws Exception
+    {
+        Files.writeString(directory.resolve("source.txt"), "shared-engine-content");
+        SessionOptions options = SessionOptions.in(directory).access(Access.READ_ONLY)
+                .approvals(approval -> java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE)).build();
+        try (Agent agent = builder().codingTools(CodingTools.defaults()).build()) {
+            assertThat(agent.status().ready()).isTrue();
+            String tool = AnthropicHttpFixture.JSON.writeValueAsString(new ApiToolUse("tool_use", "read-1", "read_file", new FilePath("source.txt")));
+            http.reply(200, AnthropicHttpFixture.start()
+                    + AnthropicHttpFixture.event("content_block_start", "\"index\":0,\"content_block\":" + tool)
+                    + AnthropicHttpFixture.event("content_block_stop", "\"index\":0") + AnthropicHttpFixture.end("tool_use"));
+            try (Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("Read source"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(http.requests().stream().filter(request -> request.method().equals("POST")).toList()).hasSize(2);
+                assertThat(http.requests().getLast().body().toString()).contains("shared-engine-content", "sha256");
+            }
+        }
+    }
+
+    private record FilePath(String path) {}
+
+    private record ApiToolUse(String type, String id, String name, FilePath input) {}
+
+    @Test
+    void codingToolsAreOptInAndBuildStartsNoCommandsOrInference()
+    {
+        try (Agent agent = builder().codingTools(CodingTools.defaults()).build()) {
+            assertThat(agent).isNotNull();
+            assertThat(http.requests()).isEmpty();
+        }
+        assertThatThrownBy(() -> builder().codingTools(null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test

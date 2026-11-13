@@ -27,7 +27,7 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Builds agents using Anthropic's Java SDK and the shared API session engine.
- * Choose {@link Access#TOOLS_ONLY} explicitly for these sessions; tools are trusted host callbacks.
+ * Choose {@link Access#TOOLS_ONLY} for trusted host callbacks, or opt into {@link CodingTools} for contained coding sessions.
  * Conversation replay is private local state, so keep the profile folder to resume a {@link SessionRef}.
  *
  * <pre>{@code
@@ -56,6 +56,7 @@ public final class ClaudeApi
         private Duration timeout = Duration.ofMinutes(2);
         private int maximumOutputTokens = 4096;
         private Optional<Executor> callbacks = Optional.empty();
+        private Optional<CodingTools> codingTools = Optional.empty();
 
         private Builder() {}
 
@@ -157,6 +158,19 @@ public final class ClaudeApi
         }
 
         /**
+         * Enables built-in coding tools for sessions using READ_ONLY or WORKSPACE_WRITE access.
+         * All built-in calls require approval. Commands require macOS Seatbelt and cannot fork or use the network.
+         *
+         * @param value bounded coding tool settings
+         * @return this builder
+         */
+        public Builder codingTools(CodingTools value)
+        {
+            codingTools = Optional.of(requireNonNull(value, "codingTools is null"));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -168,6 +182,7 @@ public final class ClaudeApi
             var settings = ClaudeApiConfig.builder(requireNonNull(model, "model is required"), requireNonNull(key, "apiKey is required"))
                     .baseUrl(baseUrl).requestTimeout(timeout).maximumOutputTokens(maximumOutputTokens);
             callbacks.ifPresent(settings::callbackExecutor);
+            codingTools.ifPresent(settings::codingTools);
             return DriverAgent.claudeApi(settings.build(), state, profile);
         }
     }

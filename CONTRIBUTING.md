@@ -221,3 +221,23 @@ Portal user token, and `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, a signing key who
 
 CI also downloads Codex through the published jar on every push, and checks the recorded checksums
 and the App Server protocol against OpenAI's package.
+
+## Built-in API coding tools
+
+The focused command below includes record validation, no-follow file boundaries, patch preimages,
+read-only access, approvals, cancellation/uncertain shutdown, and fake HTTP facade round trips.
+`TestSandboxCommand` uses short, temporary macOS processes to verify actual Seatbelt denial of
+outside reads/writes, links, subprocesses and network, plus command/output limits. It is not a
+process-stress suite. Other platforms fail closed when coding tools are requested.
+
+```sh
+JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
+  nice -n 10 mvn -o -T1 -pl shifting-codej -am \
+  -Dcodej.test.forks=1 -Djunit.jupiter.execution.parallel.enabled=false \
+  -Dtest=TestCodingTools,TestWorkspaceFiles,TestSandboxCommand,TestApiAgentDriver,TestClaudeApi,TestDeepSeekApi \
+  -Dsurefire.failIfNoSpecifiedTests=false verify
+```
+
+See [the design and checklist](docs/design/coding-tools.md). Packaging with `-Ppublish` and the
+compatibility checker also exercises coding tools from the shaded jar on macOS, using only a
+fake HTTP server and temporary workspace; it starts no provider CLI or live inference.

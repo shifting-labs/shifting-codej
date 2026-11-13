@@ -13,6 +13,8 @@
  */
 package io.github.shiftinglabs.codej.sdk.impl;
 
+import io.github.shiftinglabs.codej.CodingTools;
+
 import java.net.URI;
 import java.time.Duration;
 import java.util.Optional;
@@ -32,6 +34,7 @@ public final class ClaudeApiConfig
     final Duration timeout;
     final int maximumOutputTokens;
     final Optional<Executor> callbacks;
+    final Optional<CodingTools> codingTools;
 
     private ClaudeApiConfig(Builder builder)
     {
@@ -41,6 +44,7 @@ public final class ClaudeApiConfig
         timeout = builder.timeout;
         maximumOutputTokens = builder.maximumOutputTokens;
         callbacks = builder.callbacks;
+        codingTools = builder.codingTools;
     }
 
     public static Builder builder(String model, Supplier<String> key) { return new Builder(model, key); }
@@ -53,6 +57,7 @@ public final class ClaudeApiConfig
         private Duration timeout = Duration.ofMinutes(2);
         private int maximumOutputTokens = 4096;
         private Optional<Executor> callbacks = Optional.empty();
+        private Optional<CodingTools> codingTools = Optional.empty();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -85,6 +90,12 @@ public final class ClaudeApiConfig
         public Builder callbackExecutor(Executor value)
         {
             callbacks = Optional.of(requireNonNull(value, "executor is null"));
+            return this;
+        }
+
+        public Builder codingTools(CodingTools value)
+        {
+            codingTools = Optional.of(requireNonNull(value, "codingTools is null"));
             return this;
         }
 

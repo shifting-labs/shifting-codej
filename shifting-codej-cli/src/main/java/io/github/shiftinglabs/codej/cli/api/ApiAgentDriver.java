@@ -16,6 +16,8 @@ package io.github.shiftinglabs.codej.cli.api;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.shiftinglabs.codej.Tool;
+import io.github.shiftinglabs.codej.cli.api.tools.BuiltinTools;
+import io.github.shiftinglabs.codej.cli.api.tools.CodingToolException;
 import io.github.shiftinglabs.codej.cli.driver.AgentCapabilities;
 import io.github.shiftinglabs.codej.cli.driver.AgentEventSink;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
@@ -38,6 +40,7 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderTurnRef;
 import io.github.shiftinglabs.codej.cli.driver.ProviderUsageSample;
 import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
+import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorDriver;
@@ -50,6 +53,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -80,8 +84,8 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Shared direct-API runtime. Owns its model client and default bounded workers; borrows all
- * ConnectorContext services. Supports TEXT_ONLY/TOOLS_ONLY with trusted host callbacks, not
- * filesystem/shell sandboxing. No provider process, native tool or subagent is started.
+ * ConnectorContext services. Coding tools are opt-in and contained separately from trusted host callbacks.
+ * No provider CLI or subagent is started.
  */
 public final class ApiAgentDriver
         implements ConnectorDriver
@@ -89,6 +93,7 @@ public final class ApiAgentDriver
     private static final ThreadLocal<ApiSession> CALLBACK = new ThreadLocal<>();
     private final ApiEngineConfig config;
     private final Path profile;
+    private final ProcessSupervisor supervisor;
     private final ModelClient client;
     private final ExecutorService workers;
     private final ScheduledExecutorService timer;
@@ -99,6 +104,7 @@ public final class ApiAgentDriver
     {
         this.config = requireNonNull(config, "config is null");
         profile = requireNonNull(context, "context is null").profileDirectory();
+        supervisor = context.processSupervisor();
         client = requireNonNull(config.clients.get(), "client factory returned null");
         workers = config.executor.orElseGet(() -> new ThreadPoolExecutor(config.maximumSessions, config.maximumSessions, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(config.maximumSessions), Thread.ofPlatform().daemon().name("codej-api-worker-", 0).factory()));
@@ -152,21 +158,35 @@ public final class ApiAgentDriver
         requireOpen();
         requireNonNull(context, "context is null");
         var scope = context.scope();
-        if ((context.access() != SessionAccess.TEXT_ONLY && context.access() != SessionAccess.TOOLS_ONLY) || scope.policy() != AgentPermissionPolicy.AUTO
-                || context.review() || context.publicationProtected() || context.asksUser() || scope.readOnlySubagents() || scope.fixedSandbox()
-                || scope.webSearch() || scope.commits() || scope.approveEveryCommand() || scope.approveEveryEdit() || !scope.writableRoots().isEmpty()
+        boolean coding = coding(context);
+        if ((!coding && context.access() != SessionAccess.TEXT_ONLY && context.access() != SessionAccess.TOOLS_ONLY) || scope.policy() != AgentPermissionPolicy.AUTO
+                || context.review() || context.publicationProtected() || context.asksUser() || scope.readOnlySubagents() || (!coding && scope.fixedSandbox())
+                || (coding && scope.network()) || scope.webSearch() || scope.commits() || (!coding && (scope.approveEveryCommand() || scope.approveEveryEdit()))
+                || !scope.writableRoots().isEmpty()
                 || !scope.unsandboxedCommands().isEmpty() || !scope.unixSockets().isEmpty() || !scope.reviewerContext().isEmpty()
                 || !scope.reviewerRules().isEmpty() || scope.reviewSandboxedCommands()
                 || !scope.sessionDeniedCommands().isEmpty() || !scope.sessionDeniedReads().isEmpty()) {
-            throw new AgentUnavailableException("API engine supports text and trusted host tools; requested constraints are unsupported");
+            throw new AgentUnavailableException("Requested API engine access or constraints are unsupported; coding tools require explicit configuration");
         }
-        new ApiToolRegistry(context.sessionTools());
-        options(context.model().orElse(config.model), context.effort(), Optional.empty(), !context.sessionTools().isEmpty());
+        List<Tool> definitions = new ArrayList<>(context.sessionTools());
+        if (coding) {
+            if (context.sessionTools().stream().anyMatch(tool -> BuiltinTools.contains(tool.name())) || config.maximumToolOutputChars < 512) {
+                throw new AgentUnavailableException("Built-in tool names are reserved and require at least 512 output characters");
+            }
+            definitions.addAll(BuiltinTools.definitions(context.access() == SessionAccess.FULL));
+        }
+        new ApiToolRegistry(definitions);
+        options(context.model().orElse(config.model), context.effort(), Optional.empty(), !definitions.isEmpty());
         context.sessionReference().ifPresent(reference -> {
             if (!reference.laneId().equals(id()) || reference.contractVersion() != 1 || !canonicalId(reference.providerValue())) {
                 throw new AgentUnavailableException("API session reference belongs to another lane or version");
             }
         });
+    }
+
+    private boolean coding(AgentSessionContext context)
+    {
+        return config.codingTools.isPresent() && (context.access() == SessionAccess.READ_ONLY || context.access() == SessionAccess.FULL);
     }
 
     private ModelCapabilities options(String model, Optional<String> effort, Optional<String> tier, boolean tools)
@@ -195,9 +215,29 @@ public final class ApiAgentDriver
         }
         String id = context.sessionReference().map(AgentSessionRef::providerValue).orElseGet(() -> UUID.randomUUID().toString());
         ApiSessionStore store = ApiSessionStore.open(profile, id, context.sessionReference().isPresent(), config);
-        ApiSession session = new ApiSession(context, events, store, new AgentSessionRef(id(), 1, id));
+        ApiSession session;
+        try {
+            session = new ApiSession(context, events, store, new AgentSessionRef(id(), 1, id));
+        }
+        catch (RuntimeException failure) {
+            store.close();
+            throw failure;
+        }
         sessions.add(session);
-        return session;
+        try {
+            session.initialize();
+            return session;
+        }
+        catch (RuntimeException failure) {
+            session.damaged = true;
+            try {
+                session.close();
+            }
+            catch (RuntimeException stopFailure) {
+                failure.addSuppressed(stopFailure);
+            }
+            throw failure;
+        }
     }
 
     private void requireOpen()
@@ -259,6 +299,8 @@ public final class ApiAgentDriver
         }
     }
 
+    private record CodingLaunch(String kind, String launchId) {}
+
     private final class ApiSession
             implements AgentSession
     {
@@ -267,6 +309,7 @@ public final class ApiAgentDriver
         private final ApiSessionStore store;
         private final AgentSessionRef reference;
         private final ApiToolRegistry tools;
+        private final Optional<BuiltinTools> builtins;
         private ApiTurn running;
         private boolean closing;
         private boolean released;
@@ -278,7 +321,38 @@ public final class ApiAgentDriver
             this.events = events;
             this.store = store;
             this.reference = reference;
-            tools = new ApiToolRegistry(context.sessionTools());
+            List<Tool> available = new ArrayList<>(context.sessionTools());
+            try {
+                builtins = coding(context) ? Optional.of(new BuiltinTools(context.worktree(), config.codingTools.orElseThrow(),
+                        context.access() == SessionAccess.FULL, List.of(profile, context.runtimeDirectory()), supervisor, reference.providerValue(),
+                        config.maximumToolOutputChars, launch -> {
+                            ObjectNode state = store.state();
+                            state.withArray("journal").add(JSON.valueToTree(new CodingLaunch("coding-launch", launch)));
+                            store.save(state);
+                        })) : Optional.empty();
+            }
+            catch (IOException | RuntimeException failure) {
+                throw new AgentUnavailableException("Coding tools could not establish workspace containment");
+            }
+            builtins.ifPresent(value -> available.addAll(value.tools()));
+            tools = new ApiToolRegistry(available);
+        }
+
+        private void initialize()
+        {
+            if (builtins.isEmpty() || !recoverable(store.state())) {
+                return;
+            }
+            ObjectNode before = store.state();
+            store.save(before.deepCopy().put("phase", "blocked"));
+            try {
+                builtins.orElseThrow().initialize();
+                store.save(before);
+                builtins.orElseThrow().committed();
+            }
+            catch (IOException | RuntimeException failure) {
+                throw new AgentUnavailableException("Coding command sandbox is unavailable; no unsandboxed fallback is permitted");
+            }
         }
 
         @Override
@@ -299,9 +373,10 @@ public final class ApiAgentDriver
             if (damaged || !recoverable(before)) {
                 throw new AgentUnavailableException("Previous API request or tool outcome is uncertain; reconciliation is required");
             }
+            builtins.ifPresent(BuiltinTools::committed);
             String model = command.model().or(context::model).orElse(config.model);
             Optional<String> effort = command.effort().or(context::effort);
-            ModelCapabilities supported = options(model, effort, command.serviceTier(), !context.sessionTools().isEmpty());
+            ModelCapabilities supported = options(model, effort, command.serviceTier(), !tools.definitions().isEmpty());
             if (command.message().length() > config.maximumTextChars
                     || command.attachments().stream().anyMatch(item -> !supported.attachmentMediaTypes().contains(item.mediaType()))) {
                 throw new AgentUnavailableException("API turn input exceeds its limits or uses unsupported attachments");
@@ -348,6 +423,14 @@ public final class ApiAgentDriver
         private synchronized void release()
         {
             if (!released) {
+                try {
+                    if (builtins.isPresent()) {
+                        builtins.orElseThrow().close();
+                    }
+                }
+                catch (IOException | RuntimeException failure) {
+                    throw new AgentUnavailableException("Coding tool resources could not be released; workspace ownership is retained");
+                }
                 store.close();
                 released = true;
                 sessions.remove(this);
@@ -727,11 +810,12 @@ public final class ApiAgentDriver
                 tool = session.tools.tool(receipt.path("name").asText(), receipt.path("arguments").asText());
             }
             catch (IllegalArgumentException failure) {
-                recordResult(index, failure.getMessage(), true);
+                recordResult(index, session.builtins.isPresent()
+                        ? BuiltinTools.failure("INVALID_ARGUMENTS", "Unknown tool or invalid tool arguments") : failure.getMessage(), true);
                 return;
             }
-            if (config.approveTools && !allowed(tool, receipt)) {
-                recordResult(index, "Tool invocation denied", true);
+            if ((config.approveTools || session.builtins.isPresent()) && !allowed(tool, receipt)) {
+                recordResult(index, session.builtins.isPresent() ? BuiltinTools.failure("APPROVAL_DENIED", "Tool invocation denied") : "Tool invocation denied", true);
                 return;
             }
             checkStop();
@@ -752,8 +836,17 @@ public final class ApiAgentDriver
                 interruptible = true;
                 text = invokeTool(tool, receipt.path("arguments").asText());
             }
+            catch (CodingToolException failure) {
+                if (failure.uncertain()) {
+                    session.damaged = true;
+                    throw new ModelClientException(ModelClientException.Kind.PROTOCOL, failure.getMessage(), true);
+                }
+                text = BuiltinTools.failure(failure.failure().code(), failure.failure().message());
+                error = true;
+            }
             catch (Exception failure) {
-                text = "Host tool failed";
+                text = session.builtins.isPresent() && BuiltinTools.contains(tool.name())
+                        ? BuiltinTools.failure("INVALID_ARGUMENTS", "Invalid built-in tool arguments or operation") : "Host tool failed";
                 error = true;
             }
             finally {
@@ -761,6 +854,7 @@ public final class ApiAgentDriver
                 Thread.interrupted();
             }
             recordResult(index, text, error);
+            session.builtins.ifPresent(BuiltinTools::committed);
             emit(new ProviderAgentEvent.Tool(Optional.empty(), tool.name(), error ? ProviderAgentEvent.ActivityState.FAILED : ProviderAgentEvent.ActivityState.COMPLETED,
                     error ? "Host tool failed" : "Host tool completed", source(receipt.path("eventId").asText(receipt.path("id").asText())),
                     Optional.empty(), Optional.empty(),
@@ -771,7 +865,7 @@ public final class ApiAgentDriver
         private String invokeTool(Tool tool, String arguments)
                 throws Exception
         {
-            if (config.toolExecutor.isEmpty()) {
+            if (config.toolExecutor.isEmpty() || (session.builtins.isPresent() && BuiltinTools.contains(tool.name()))) {
                 return requireNonNull(tool.call(arguments), "tool returned null");
             }
             FutureTask<String> task = new FutureTask<>(() -> {

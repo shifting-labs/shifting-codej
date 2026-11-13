@@ -45,11 +45,12 @@ public final class ClaudeApiConnector
                 StandardCharsets.UTF_8).toString().substring(0, 16);
         AnthropicModelClient client = new AnthropicModelClient(config);
         try {
-            ApiEngineConfig engine = ApiEngineConfig.builder(new ConnectorIdentity(id(), "profile-" + profile),
+            ApiEngineConfig.Builder engine = ApiEngineConfig.builder(new ConnectorIdentity(id(), "profile-" + profile),
                             new AgentLaneId(id() + "-" + profile), config.model, () -> client)
                     .maximumOutputTokens(config.maximumOutputTokens).redactorSupplier(client::redactor)
-                    .toolExecutor(config.callbacks.orElse(command -> Thread.ofVirtual().start(command))).build();
-            return new ApiConnector(id()).create(engine, context);
+                    .toolExecutor(config.callbacks.orElse(command -> Thread.ofVirtual().start(command)));
+            config.codingTools.ifPresent(engine::codingTools);
+            return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {
             client.close();
