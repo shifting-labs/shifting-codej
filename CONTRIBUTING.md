@@ -124,7 +124,7 @@ JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
 ```
 
 Offline mode requires dependencies already cached. This selects no native CLI or process-stress
-tests and does not run the SDK or downstream test suites.
+tests and does not run broad SDK or downstream test suites.
 
 ## Shared API engine contracts
 

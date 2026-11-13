@@ -312,10 +312,47 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 ### Step 4: Integration and follow-ups
 
 - [x] Run the existing published-artifact compatibility check on the integrated shaded artifact.
-- [ ] Run affected Bytequay tests using the unchanged downstream API/dependency conventions.
+- [x] Run affected Bytequay tests using the unchanged downstream API/dependency conventions.
 - [ ] Add another direct API provider through the same contracts to validate engine reuse.
 - [ ] Add shared filesystem/shell tools only with verified containment and permission tests.
 - [ ] Evaluate optional compaction, provider-hosted tools and separate connector artifacts as needed.
+
+## Downstream integration validation
+
+The shaded artifact from `aa86864` passed 205 selected backend tests and four Codex bundle
+unit tests against the unchanged downstream dependency coordinate, `0.164.0-1`. The consumer
+snapshot was commit `463046c6566223d251ba0b7e3bd8622e42bd71bd`; its source and test files were unchanged.
+
+| Consumer module | Selected test classes | Tests passed |
+| --- | ---: | ---: |
+| `agent-spi` | 3 | 7 |
+| `agent-core` | 11 | 103 |
+| `app-base` | 10 | 95 |
+
+Coverage includes session-reference parsing, normalized events and subagents, session policy,
+runtime ownership, host-tool schemas, lane factories, DeepSeek readiness, Codex/Claude accounts,
+model catalogs, usage metadata and text-helper consumers. The unchanged packaging checksum reader
+also loaded the actual candidate's four arm64 file hashes; its x64 inventory remained empty,
+matching the published resource. The four packaging unit tests exercised local fixture bundles.
+
+The candidate jar SHA-256 was:
+
+```text
+ba6d52b3aee8ccf6d464c81e9de465fb910fe6bee1abbf66f6f649fbfb6ffbf5
+```
+
+Validation used a temporary tracked-source snapshot, a separate Maven repository and JVM home,
+and the existing published POM. A read-only file mirror populated only needed cached dependencies;
+the candidate was never installed in the default Maven repository. The only temporary POM edit
+set Surefire's hard-coded fork count from four to one. Maven used one CPU, a 512 MiB heap,
+serial GC and low process priority; JUnit parallel execution was disabled. Surefire report
+classpaths and artifact hashes confirmed that every selected class used the candidate jar.
+
+The consumer checkout, its dependency declaration and its unrelated frontend edits were preserved.
+The four unrelated Claude CLI edits in this repository were also preserved. No full backend or
+frontend suite, live inference, native CLI/process-stress test, Xcode build or iOS simulator ran.
+This validates compatibility of existing consumers; wiring the new direct API lane into the
+consumer's product settings remains a separate change.
 
 ## Sources
 
