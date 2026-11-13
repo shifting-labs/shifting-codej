@@ -67,6 +67,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -128,7 +129,7 @@ public final class ApiAgentDriver
     {
         requireOpen();
         AgentProviderStatus status = client.probe(requireNonNull(model, "model is null"));
-        return new AgentProviderStatus(id(), status.readiness(), status.version(), config.redactor.redact(status.diagnostic()), capabilities());
+        return new AgentProviderStatus(id(), status.readiness(), status.version(), config.redactor().redact(status.diagnostic()), capabilities());
     }
 
     @Override
@@ -528,7 +529,7 @@ public final class ApiAgentDriver
                         ? Optional.of(AgentTurnFailureKind.AUTHENTICATION_REQUIRED) : Optional.empty();
                 boolean transientFailure = failure.kind() == ModelClientException.Kind.RATE_LIMITED
                         || failure.kind() == ModelClientException.Kind.TEMPORARILY_UNAVAILABLE;
-                terminal = terminal(AgentTurnResult.State.FAILED, Optional.empty(), Optional.of(config.redactor.redact(failure.getMessage())), kind, transientFailure);
+                terminal = terminal(AgentTurnResult.State.FAILED, Optional.empty(), Optional.of(config.redactor().redact(failure.getMessage())), kind, transientFailure);
             }
             catch (Throwable failure) {
                 terminal = terminal(AgentTurnResult.State.FAILED, Optional.empty(), Optional.of("API turn failed; inspect its checkpoint before recovery"),
@@ -643,10 +644,10 @@ public final class ApiAgentDriver
                 });
                 emit(new ProviderAgentEvent.Message(Optional.empty(), response.stopReason() == ModelResponse.StopReason.TOOL_CALLS
                         ? ProviderAgentEvent.MessageKind.COMMENTARY : ProviderAgentEvent.MessageKind.ANSWER,
-                        ProviderAgentEvent.MessagePhase.FINAL, config.redactor.redact(response.text()), source(requestId)));
+                        ProviderAgentEvent.MessagePhase.FINAL, config.redactor().redact(response.text()), source(requestId)));
                 checkStop();
                 if (response.stopReason() == ModelResponse.StopReason.COMPLETED) {
-                    return config.redactor.redact(response.text());
+                    return config.redactor().redact(response.text());
                 }
                 if (response.stopReason() == ModelResponse.StopReason.REFUSED) {
                     throw new ModelClientException(ModelClientException.Kind.INVALID_REQUEST, "Model refused the request", false);
@@ -749,7 +750,7 @@ public final class ApiAgentDriver
             boolean error = false;
             try {
                 interruptible = true;
-                text = requireNonNull(tool.call(receipt.path("arguments").asText()), "tool returned null");
+                text = invokeTool(tool, receipt.path("arguments").asText());
             }
             catch (Exception failure) {
                 text = "Host tool failed";
@@ -764,13 +765,35 @@ public final class ApiAgentDriver
                     error ? "Host tool failed" : "Host tool completed", source(receipt.path("eventId").asText(receipt.path("id").asText())),
                     Optional.empty(), Optional.empty(),
                     !error && text.length() <= config.maximumToolOutputChars
-                            ? Optional.of(new ProviderAgentEvent.ToolOutput(tool.name(), config.redactor.redact(text))) : Optional.empty()));
+                            ? Optional.of(new ProviderAgentEvent.ToolOutput(tool.name(), config.redactor().redact(text))) : Optional.empty()));
+        }
+
+        private String invokeTool(Tool tool, String arguments)
+                throws Exception
+        {
+            if (config.toolExecutor.isEmpty()) {
+                return requireNonNull(tool.call(arguments), "tool returned null");
+            }
+            FutureTask<String> task = new FutureTask<>(() -> {
+                checkStop();
+                return requireNonNull(tool.call(arguments), "tool returned null");
+            });
+            config.toolExecutor.orElseThrow().execute(task);
+            // Future cancellation does not prove that trusted host code stopped. Keep the writer until it actually returns.
+            while (true) {
+                try {
+                    return task.get();
+                }
+                catch (InterruptedException ignored) {
+                    // The turn's stop flag is checked before the queued handler begins and after its receipt is saved.
+                }
+            }
         }
 
         private boolean allowed(Tool tool, ObjectNode receipt)
         {
             ProviderApprovalRequest request = new ProviderApprovalRequest(ProviderApprovalRequest.Kind.TOOL, "Run " + tool.name(),
-                    config.redactor.redact(receipt.path("arguments").asText()), List.of(tool.name()),
+                    config.redactor().redact(receipt.path("arguments").asText()), List.of(tool.name()),
                     List.of(ProviderApprovalRequest.Decision.ALLOW_ONCE, ProviderApprovalRequest.Decision.DENY), false,
                     source(receipt.path("eventId").asText(receipt.path("id").asText())), Instant.now());
             Duration wait = Duration.ofMinutes(5);
@@ -811,7 +834,7 @@ public final class ApiAgentDriver
 
         private void recordResult(int index, String text, boolean error)
         {
-            String bounded = config.redactor.redact(text);
+            String bounded = config.redactor().redact(text);
             if (bounded.length() > config.maximumToolOutputChars) {
                 String marker = "[tool output truncated]";
                 bounded = bounded.substring(0, Math.max(0, config.maximumToolOutputChars - marker.length()))
@@ -849,7 +872,7 @@ public final class ApiAgentDriver
                     throw new ModelClientException(ModelClientException.Kind.PROTOCOL, "API stream exceeded its text budget", true);
                 }
                 textChars += delta.length();
-                SecretRedactor.Chunk chunk = config.redactor.redactChunk(held, delta);
+                SecretRedactor.Chunk chunk = config.redactor().redactChunk(held, delta);
                 held = chunk.held();
                 if (!chunk.text().isEmpty()) {
                     emit(new ProviderAgentEvent.Message(Optional.empty(), ProviderAgentEvent.MessagePhase.PARTIAL, chunk.text(), source(id)));
@@ -859,7 +882,7 @@ public final class ApiAgentDriver
             synchronized void finish()
             {
                 if (!held.isEmpty()) {
-                    emit(new ProviderAgentEvent.Message(Optional.empty(), ProviderAgentEvent.MessagePhase.PARTIAL, config.redactor.redact(held), source(id)));
+                    emit(new ProviderAgentEvent.Message(Optional.empty(), ProviderAgentEvent.MessagePhase.PARTIAL, config.redactor().redact(held), source(id)));
                     held = "";
                 }
             }

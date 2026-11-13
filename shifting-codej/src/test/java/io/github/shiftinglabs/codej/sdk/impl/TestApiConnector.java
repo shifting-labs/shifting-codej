@@ -24,6 +24,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
@@ -50,7 +51,7 @@ class TestApiConnector
             implements ModelClient
     {
         @Override
-        public ModelCapabilities capabilities(String model) { return ModelCapabilities.textOnly(); }
+        public ModelCapabilities capabilities(String model) { return new ModelCapabilities(true, java.util.Set.of(), java.util.Set.of(), java.util.Set.of()); }
 
         @Override
         public AgentProviderStatus probe(Optional<String> model)
@@ -62,7 +63,9 @@ class TestApiConnector
         public ModelCall generate(ModelRequest request, ModelEventSink sink)
         {
             sink.textDelta("Hello");
-            ModelResponse response = new ModelResponse("Hello", List.of(), ModelResponse.StopReason.COMPLETED,
+            boolean tools = request.input() instanceof ModelInput.UserMessage && !request.tools().isEmpty();
+            ModelResponse response = new ModelResponse("Hello", tools ? List.of(new ModelResponse.ToolCall("call-1", "contract_lookup", "{\"key\":\"CONTRACT-1\"}")) : List.of(),
+                    tools ? ModelResponse.StopReason.TOOL_CALLS : ModelResponse.StopReason.COMPLETED,
                     new ModelReplayState("contract-api", 1, request.replayState().map(ModelReplayState::payload).orElse("") + "Hello"), Optional.empty());
             return new ModelCall()
             {

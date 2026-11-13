@@ -84,10 +84,10 @@ run process stress tests.
 
 The [direct API connector design and checkbox plan](docs/design/direct-api-connectors.md) separates
 one inference request from the shared agent engine. The additive SPI is in `cli.spi.model`;
-the shared engine is implemented in `cli.api`; the Anthropic adapter and public facade are
-follow-up work. No live direct API lane is available yet.
+the shared engine is implemented in `cli.api`; the Anthropic SDK adapter and additive `ClaudeApi`
+facade live in the SDK module. Tests use fake HTTP, never a live account.
 
-`shifting-codej-cli/src/test/java/io/github/shiftinglabs/codej/cli/testing/AbstractTestModelClient.java`
+`shifting-codej/src/test/java/io/github/shiftinglabs/codej/sdk/testing/AbstractTestModelClient.java`
 is a reusable test-source base. Bind `client()`, `request()`, `expectedResponse()` and
 `expectedTextDeltas()` to a deterministic fixture. `pendingCall(client)` arranges a request held
 until cancellation; `failedCall(client)` arranges a connection loss with uncertain acceptance.
@@ -96,7 +96,7 @@ The base covers metadata, ordered streaming, final replay/usage, idempotent canc
 independent calls, normalized failures, null inputs and event-consumer failure. It is not a
 separately published test kit.
 
-[TestModelClientSpi](shifting-codej-cli/src/test/java/io/github/shiftinglabs/codej/cli/spi/model/consumer/TestModelClientSpi.java)
+[TestModelClientSpi](shifting-codej/src/test/java/io/github/shiftinglabs/codej/cli/spi/model/consumer/TestModelClientSpi.java)
 binds that base without threads, processes or network. Its external consumer example retains a
 Java `Tool` in the host, sends only its schema to the adapter, receives a tool request, invokes the
 handler and continues inference with a copied replay checkpoint and matching tool result. It is
@@ -117,7 +117,7 @@ Run only these suites and the existing legacy SPI consumer with a constrained JV
 
 ```bash
 JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
-  nice -n 10 mvn -o -T1 -pl shifting-codej-cli -am \
+  nice -n 10 mvn -o -T1 -pl shifting-codej -am \
   -Dcodej.test.forks=1 -Djunit.jupiter.execution.parallel.enabled=false \
   -Dsurefire.failIfNoSpecifiedTests=false \
   -Dtest=TestModelSpiValues,TestModelClientSpi,TestConnectorSpi verify
@@ -129,7 +129,8 @@ tests and does not run the SDK or downstream test suites.
 ## Shared API engine contracts
 
 `AbstractTestApiConnector<C>` extends the existing factory contract with text turns, normalized
-events, restart/resume and rejection of unsupported filesystem constraints. Override
+events, restart/resume, a schema-only host-tool round trip and rejection of foreign references
+and unsupported filesystem constraints. Override
 `contractSessionContext()` when a connector's validation baseline differs from the CLI default;
 the existing CLI bindings retain their read-only context. `TestApiConnector` binds the API base
 to a fake ModelClient and uses only public connector/session/turn types.
@@ -151,6 +152,23 @@ JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC' \
 
 This explicitly selected run compiles the reactor but runs no broad SDK, Bytequay, native CLI or
 process-stress suites. Keep unrelated working-tree edits out of the tested snapshot and commit.
+
+
+`TestClaudeApiConnector` binds the same API connector base to `AnthropicHttpFixture`.
+`TestAnthropicModelClient` inherits the model-client contracts and tests actual SDK HTTP/SSE:
+explicit credential rotation, metadata, lossless signed replay, fragmented tool arguments, ordered
+results/errors, images, stop reasons, cache usage, transport timeouts, redirects and normalized
+failures without retries. `TestClaudeApi` exercises the public facade, including a borrowed callback
+executor and cancellation while a host handler remains active. No key or CLI is needed.
+
+Run those suites with `-Dtest=TestAnthropicModelClient,TestClaudeApiConnector,TestClaudeApi`
+and the same serial JVM flags above. `mvn -Ppublish package -DskipTests` checks packaging and
+Javadocs. Then run `scripts/check-compatibility.py --candidate <shaded-jar> --output <evidence-dir>`
+with the constrained `JAVA_TOOL_OPTIONS`: it also compiles `ClaudeApiConsumer.java` against the
+candidate and runs fake HTTP metadata, streaming, signed tool replay, key rotation and durable
+resume with only the JDK and jar. This catches SDK/Jackson/Kotlin relocation problems that a
+reactor test classpath hides. The SDK mapper uses its explicit Jackson creators and preserves
+missing versus null fields without Kotlin reflection; all provider dependencies remain relocated.
 
 ## Versions
 

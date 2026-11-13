@@ -21,14 +21,16 @@ import java.util.Set;
  * One provider account, such as a Codex login, a Claude login or a gateway. Each provider's builder
  * makes one.
  *
- * <p>Building an agent starts nothing: each session starts its own CLI process. An agent is safe to
- * share between threads, and one agent can run many sessions at once.
+ * <p>Building an agent starts no inference or CLI process. CLI agents start a process for each session;
+ * direct API agents such as {@code ClaudeApi} use HTTP and keep replay locally. The same session,
+ * turn and tool contracts apply. An agent is safe to share between threads and can run many sessions at once.
  */
 public interface Agent
         extends AutoCloseable
 {
     /**
-     * Checks that the CLI is installed, its version is supported and the account is signed in.
+     * Checks provider readiness. CLI agents check installation, version and sign-in; direct API
+     * agents check credentials through provider metadata without inference.
      *
      * <p>Blocks while the CLI answers, usually for under a second. Never throws for a missing or
      * unready CLI: the status says what is wrong and how to fix it.
@@ -38,7 +40,7 @@ public interface Agent
     AgentStatus status();
 
     /**
-     * Lists the models this account can use, as the CLI reports them. Blocks while the CLI answers.
+     * Lists the models this account can use, as the provider reports them. Blocks while the provider answers.
      *
      * @return the models, in the provider's order
      * @throws AgentException when the agent is not {@linkplain AgentStatus#ready() ready}

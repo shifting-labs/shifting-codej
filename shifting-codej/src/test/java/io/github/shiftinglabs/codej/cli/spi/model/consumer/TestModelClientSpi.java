@@ -27,7 +27,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
-import io.github.shiftinglabs.codej.cli.testing.AbstractTestModelClient;
+import io.github.shiftinglabs.codej.sdk.testing.AbstractTestModelClient;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;

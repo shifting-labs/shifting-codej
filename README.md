@@ -2,10 +2,11 @@
 
 Run [Codex](https://github.com/openai/codex) and [Claude Code](https://github.com/anthropics/claude-code)
 from Java through one small API: sessions, turns, live events, approvals, questions, and tools of
-your own.
+your own. Direct Anthropic API sessions use the same API through `ClaudeApi`.
 
 OpenAI ships Codex SDKs for Python and TypeScript; this is one for Java, and it drives Claude Code
-the same way. It runs each CLI on your machine and owns every process it starts.
+the same way. CLI agents run on your machine, and the library owns every process they start.
+`ClaudeApi` uses the Anthropic Java SDK over HTTP and keeps conversation replay locally.
 
 > Draft. Not released yet.
 
@@ -304,6 +305,41 @@ static <T> ListenableFuture<T> listenable(CompletionStage<T> stage)
     return future;
 }
 ```
+
+## Direct Claude API
+
+```java
+try (Agent agent = ClaudeApi.builder()
+        .model(modelId) // An explicit model identifier available to your Anthropic account.
+        .apiKey(vault::anthropicKey) // Read afresh for each HTTP operation.
+        .stateDirectory(stateDir)
+        .build();
+     Session session = agent.startSession(SessionOptions.in(workDir)
+             .access(Access.TOOLS_ONLY)
+             .build())) {
+    TurnResult result = session.run(Input.text("Hello"));
+    SessionRef saved = session.ref().orElseThrow();
+    // Keep saved.asString() and the profile folder to resume through agent.resumeSession(...).
+}
+```
+
+This lane needs an API key and network access; it starts no Claude Code process. The shared API
+engine owns sessions, checkpoints, approvals and the host-tool loop. Add tools with the existing
+`SessionOptions.tool(...)` and approval handler. Tools are trusted Java callbacks and run on the
+agent's callback executor; the engine does not provide a filesystem or shell sandbox.
+Choose `TOOLS_ONLY` explicitly: the existing read-only session default is unchanged and is
+rejected by this connector. Text-only sessions are `TOOLS_ONLY` sessions without tools.
+
+`status()` and `models()` use metadata endpoints without inference. Quota is unavailable.
+The initial adapter supports text, image attachments and client tool calls; effort, service tiers,
+provider-hosted tools and context compaction are not advertised. Inference is never automatically
+retried. Unknown delivery requires reconciliation instead of replaying possibly accepted work.
+Replay may include signed private reasoning and is stored with private permissions; it is not
+sent to event listeners. Separate profile folders isolate accounts; rotating the key keeps identity.
+
+The [design and checkbox plan](docs/design/direct-api-connectors.md) explains the SPI boundaries.
+The [fake HTTP facade tests](shifting-codej/src/test/java/io/github/shiftinglabs/codej/TestClaudeApi.java)
+show durable resume and host tools using only the existing public session API.
 
 ## Accounts, gateways and Claude
 
