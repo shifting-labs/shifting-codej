@@ -16,6 +16,7 @@ package io.github.shiftinglabs.codej.cli.spi.model;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.github.shiftinglabs.codej.cli.driver.Checks.checkText;
@@ -31,6 +32,7 @@ public final class ModelHistory
 {
     private final boolean complete;
     private final List<Exchange> exchanges;
+    private final Optional<String> summarizedThroughRequestId;
 
     /**
      * @param complete true when no earlier settled exchanges are missing; false for an unknown
@@ -39,13 +41,20 @@ public final class ModelHistory
      */
     public ModelHistory(boolean complete, List<Exchange> exchanges)
     {
+        this(complete, exchanges, Optional.empty());
+    }
+
+    private ModelHistory(boolean complete, List<Exchange> exchanges, Optional<String> summarizedThroughRequestId)
+    {
+        this.summarizedThroughRequestId = summarizedThroughRequestId;
         this.complete = complete;
         this.exchanges = List.copyOf(exchanges);
         var ids = new HashSet<String>();
         Exchange previous = null;
         for (Exchange exchange : this.exchanges) {
             checkArgument(ids.add(exchange.requestId()), "duplicate history request ID");
-            validateNext(complete, previous, exchange.input());
+            checkArgument(summarizedThroughRequestId.filter(exchange.requestId()::equals).isEmpty(), "summary boundary is also in retained history");
+            validateNext(complete || summarizedThroughRequestId.isPresent(), previous, exchange.input());
             previous = exchange;
         }
     }
@@ -55,10 +64,20 @@ public final class ModelHistory
 
     public List<Exchange> exchanges() { return exchanges; }
 
+    /** Inclusive boundary of intentionally removed audit history, backed by committed provider summary memory. */
+    public Optional<String> summarizedThroughRequestId() { return summarizedThroughRequestId; }
+
+    /** A known summarized prefix is distinct from an unknown legacy gap; its raw history is incomplete. */
+    public static ModelHistory retained(String summarizedThroughRequestId, List<Exchange> exchanges)
+    {
+        checkText(summarizedThroughRequestId, "summarizedThroughRequestId");
+        return new ModelHistory(false, exchanges, Optional.of(summarizedThroughRequestId));
+    }
+
     /** Validate the next input without mutating history or interpreting private replay. */
     public void validateNext(ModelInput input)
     {
-        validateNext(complete, exchanges.isEmpty() ? null : exchanges.getLast(), input);
+        validateNext(complete || summarizedThroughRequestId.isPresent(), exchanges.isEmpty() ? null : exchanges.getLast(), input);
     }
 
     /** Return a new snapshot after a fully observed response; the original remains unchanged. */
@@ -66,7 +85,7 @@ public final class ModelHistory
     {
         List<Exchange> next = new ArrayList<>(exchanges);
         next.add(requireNonNull(exchange, "exchange is null"));
-        return new ModelHistory(complete, next);
+        return new ModelHistory(complete, next, summarizedThroughRequestId);
     }
 
     private static void validateNext(boolean complete, Exchange previous, ModelInput input)
@@ -116,9 +135,14 @@ public final class ModelHistory
     @Override
     public boolean equals(Object other)
     {
-        return other instanceof ModelHistory history && complete == history.complete && exchanges.equals(history.exchanges);
+        return other instanceof ModelHistory history && complete == history.complete && exchanges.equals(history.exchanges)
+                && summarizedThroughRequestId.equals(history.summarizedThroughRequestId);
     }
 
     @Override
-    public int hashCode() { return 31 * Boolean.hashCode(complete) + exchanges.hashCode(); }
+    public int hashCode()
+    {
+        int original = 31 * Boolean.hashCode(complete) + exchanges.hashCode();
+        return summarizedThroughRequestId.isEmpty() ? original : 31 * original + summarizedThroughRequestId.hashCode();
+    }
 }

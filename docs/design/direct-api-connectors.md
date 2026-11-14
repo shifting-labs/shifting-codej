@@ -40,6 +40,8 @@ Its optional `ContextSummarizationPolicy` selects isolated LLM summaries using t
 request/token/text/deadline budgets. The default local compactor still performs no inference.
 Growing histories use bounded complete-group chunks and provider-recovered summary memory;
 `maximumSummaryInputCharacters` bounds each encoded input without removing canonical history.
+The separate [audit retention plan](audit-retention.md) opts into summary-covered audit removal,
+explicit retained history and bounded owned attachment cleanup after checkpoint commit.
 
 ## Boundaries
 
@@ -359,6 +361,7 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 - [x] Add opt-in local [context compaction](context-compaction.md) with full durable history preserved.
 - [x] Add explicitly selected engine-budgeted LLM summaries, isolated from tools and conversation history.
 - [x] Bound incremental summary inputs and recover committed memory across sessions.
+- [x] Add opt-in summary-backed audit retention and post-commit staged-attachment cleanup.
 - [ ] Evaluate provider-hosted tools and separate connector artifacts as needed.
 
 ## Second direct provider: DeepSeek

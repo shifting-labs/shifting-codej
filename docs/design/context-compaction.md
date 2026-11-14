@@ -7,16 +7,19 @@ Status: implemented and verified. Follows [conversation history](conversation-hi
 
 Compact model context, preserving the full durable conversation history, execution journal and
 tool receipts. `ContextCompactor` is an explicitly installed, borrowed, thread-safe host service.
+Separately installed [audit retention](audit-retention.md) can discard covered audit prefixes and
+unreferenced staged attachments; compaction alone continues to preserve them.
 It proposes a bounded `ModelCompaction` containing summary text and a retained exchange count.
 The callback performs no inference or tool effects. An alternative `ContextSummarizationPolicy`
-explicitly opts into an engine-budgeted LLM summary. Token estimation, audit retention and storage
-compaction remain separate follow-ups. Neither mode is installed by default.
+explicitly opts into an engine-budgeted LLM summary. Token estimation remains a separate follow-up;
+audit/storage retention is a separate opt-in policy. No policy is installed by default.
 
 The engine runs proposals once per new public turn, after reconciling pending tools and before
 capturing fresh prompts. Empty sessions skip the callback. Incomplete legacy history cannot be
 compacted. A boundary must summarize at least one settled exchange and cannot split tool calls from
 their ordered results; retained context starts with a user exchange and ends without pending calls.
-The immutable full history remains the `ModelRequest.history()` and prompt-contributor view.
+The immutable full history remains the `ModelRequest.history()` and prompt-contributor view unless
+the host explicitly enables retention, which exposes a retained suffix and validated summary anchor.
 
 `ModelClient.compact(ModelCompactionRequest)` is an additive default returning unsupported. Provider
 adapters own the replay rewrite, preserve retained private blocks/signatures, and encode the summary
@@ -184,7 +187,8 @@ summaries can lose facts; neither this algorithm nor fake-client tests establish
 - [x] Add configurable encoded input bounds and complete-group incremental chunk selection.
 - [x] Commit each bounded chunk and resume after budget exhaustion without repeating raw history.
 - [x] Verify incremental engine, provider, packaged consumer and compatibility tests; record results and commit.
-- [ ] Evaluate independent audit/storage retention later.
+- [x] Add independent opt-in [audit/storage retention](audit-retention.md), summary-backed history anchors
+      and post-commit owned attachment cleanup.
 
 ## Local-compaction validation (preceding stage)
 

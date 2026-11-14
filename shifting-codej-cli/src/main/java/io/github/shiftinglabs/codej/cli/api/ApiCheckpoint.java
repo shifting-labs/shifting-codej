@@ -34,12 +34,13 @@ record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLa
         Optional<ApiRequestSetup> setup, Optional<ModelInput> input, ModelHistory history)
 {
     static final int CURRENT_VERSION = 2;
+    static final int RETENTION_VERSION = 3;
 
     enum Phase { READY, REQUEST, TOOLS, BLOCKED }
 
     ApiCheckpoint
     {
-        checkArgument(version == CURRENT_VERSION, "unsupported checkpoint version");
+        checkArgument(version == CURRENT_VERSION || version == RETENTION_VERSION, "unsupported checkpoint version");
         checkArgument(UUID.fromString(id).toString().equals(id), "noncanonical session id");
         requireNonNull(identity, "identity is null");
         requireNonNull(lane, "lane is null");
@@ -50,6 +51,8 @@ record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLa
         requireNonNull(setup, "setup is null");
         requireNonNull(input, "input is null");
         requireNonNull(history, "history is null");
+        checkArgument((version == RETENTION_VERSION) == history.summarizedThroughRequestId().isPresent(), "retention history/version mismatch");
+        checkArgument(version != RETENTION_VERSION || replay.isPresent(), "retained history requires replay");
         checkArgument(receipts.stream().map(ApiToolReceipt::id).distinct().count() == receipts.size(), "duplicate tool receipt");
         checkArgument(phase != Phase.TOOLS || (replay.isPresent() && setup.isPresent() && !receipts.isEmpty()), "incomplete tool checkpoint");
         checkArgument(phase != Phase.REQUEST || (setup.isPresent() && input.isPresent()), "incomplete request checkpoint");

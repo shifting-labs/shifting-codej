@@ -122,6 +122,7 @@ format-1 read migration. The version-1 layout described above records the initia
 - [x] Add opt-in LLM summary generation through the shared engine's existing inference budgets;
       see [context compaction](context-compaction.md#engine-budgeted-llm-summaries).
 - [x] Add bounded incremental summary chunks, durable progress and provider-owned memory recovery.
+- [x] Add opt-in [audit/storage retention](audit-retention.md) without changing default persistence.
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event
       mapping and focused connector contract tests before any default-route change.
 

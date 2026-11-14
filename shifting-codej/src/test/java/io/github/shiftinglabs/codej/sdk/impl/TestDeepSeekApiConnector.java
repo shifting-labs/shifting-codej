@@ -18,6 +18,7 @@ import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.testing.AbstractTestApiConnector;
@@ -38,6 +39,20 @@ class TestDeepSeekApiConnector
         extends AbstractTestApiConnector<DeepSeekApiConfig>
 {
     private DeepSeekHttpFixture http;
+
+    @Test
+    void auditPoliciesAreOptionalBorrowedAndSnapshotBuilderState()
+    {
+        AuditRetentionPolicy firstPolicy = context -> { throw new AssertionError("No eager callback"); };
+        AuditRetentionPolicy secondPolicy = context -> Optional.empty();
+        var builder = DeepSeekApiConfig.builder("model", () -> "key");
+        assertThat(builder.build().auditRetention).isEmpty();
+        var first = builder.auditRetention(firstPolicy).build();
+        builder.auditRetention(secondPolicy);
+        assertThat(first.auditRetention).containsSame(firstPolicy);
+        assertThat(builder.build().auditRetention).containsSame(secondPolicy);
+        assertThatThrownBy(() -> builder.auditRetention(null)).isInstanceOf(NullPointerException.class);
+    }
 
     @Test
     void summaryInputBoundsAreValidatedAndSnapshotBuilderState()

@@ -180,3 +180,9 @@ public API builders with a 2,000-character input bound, summarizes a growing pre
 then restarts and reuses committed memory for the next new group. Request counts and outgoing bodies
 check that earlier raw prefixes are not repeated. It uses only the JDK, shaded jar and loopback HTTP;
 older candidates continue to skip this additive fixture.
+
+`AuditRetentionConsumer` is guarded by the new `AuditRetentionPolicy`. It enables both public
+facades to prune summary-covered history between bounded summary chunks, reopens their format-3
+checkpoints, and continues with retention disabled. It verifies raw audit removal and retained
+memory through the JDK and shaded jar only. Its synthetic Claude checkpoint is copied to the
+report directory as `retained-checkpoint.json` for checking explicit rejection by older readers.

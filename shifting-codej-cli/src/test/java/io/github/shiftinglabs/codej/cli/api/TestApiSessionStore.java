@@ -37,6 +37,62 @@ class TestApiSessionStore
     Path directory;
 
     @Test
+    void attachmentCleanupUsesCommittedReferencesAndProtectsCurrentInputWithABoundedDeletionCount()
+            throws Exception
+    {
+        String id = UUID.randomUUID().toString();
+        Path source = Files.writeString(directory.resolve("source"), "image");
+        try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, builder().build())) {
+            var saved = store.stage("saved", List.of(new AgentAttachment("saved", "image/png", source)));
+            var pending = store.stage("pending", List.of(new AgentAttachment("pending", "image/png", source)));
+            var orphan = store.stage("orphan", List.of(new AgentAttachment("orphan", "image/png", source)));
+            store.save(store.state().append(new ApiJournal.User("saved", saved)));
+            Path folder = orphan.attachments().getFirst().path().getParent();
+            Path external = Files.writeString(directory.resolve("external"), "keep outside");
+            Path symlink = Files.createSymbolicLink(folder.resolve(UUID.randomUUID().toString()), external);
+            Path unexpected = Files.writeString(folder.resolve("notes.txt"), "keep unexpected");
+            Path nested = Files.createDirectory(folder.resolve(UUID.randomUUID().toString()));
+            assertThat(store.pruneAttachments(1, pending.attachments(), () -> {})).isEqualTo(1);
+            assertThat(orphan.attachments().getFirst().path()).doesNotExist();
+            assertThat(saved.attachments().getFirst().path()).exists();
+            assertThat(pending.attachments().getFirst().path()).exists();
+            assertThat(external).hasContent("keep outside");
+            assertThat(symlink).isSymbolicLink();
+            assertThat(unexpected).hasContent("keep unexpected");
+            assertThat(nested).isDirectory();
+            assertThat(store.pruneAttachments(0, List.of(), () -> {})).isZero();
+            assertThat(store.pruneAttachments(1, List.of(), () -> {})).isEqualTo(1);
+            assertThat(pending.attachments().getFirst().path()).doesNotExist();
+            assertThat(saved.attachments().getFirst().path()).exists();
+            assertThat(source).hasContent("image");
+            assertThatThrownBy(() -> store.pruneAttachments(1025, List.of(), () -> {})).isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test
+    void cleanupDoesNotFollowReplacedAttachmentDirectoryOrRunPastCancellation()
+            throws Exception
+    {
+        String id = UUID.randomUUID().toString();
+        Path source = Files.writeString(directory.resolve("source"), "image");
+        try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, builder().build())) {
+            var staged = store.stage("orphan", List.of(new AgentAttachment("image", "image/png", source)));
+            Path folder = staged.attachments().getFirst().path().getParent();
+            assertThatThrownBy(() -> store.pruneAttachments(1, List.of(), () -> { throw new java.util.concurrent.CancellationException(); }))
+                    .isInstanceOf(java.util.concurrent.CancellationException.class);
+            assertThat(staged.attachments().getFirst().path()).exists();
+            Path moved = folder.resolveSibling("saved-attachments");
+            Files.move(folder, moved);
+            Path external = Files.createDirectory(directory.resolve("outside"));
+            Path outsideFile = Files.writeString(external.resolve(UUID.randomUUID().toString()), "keep outside");
+            Files.createSymbolicLink(folder, external);
+            assertThatThrownBy(() -> store.pruneAttachments(1, List.of(), () -> {})).isInstanceOf(AgentUnavailableException.class);
+            assertThat(outsideFile).hasContent("keep outside");
+            assertThat(moved.resolve(staged.attachments().getFirst().path().getFileName())).exists();
+        }
+    }
+
+    @Test
     void saveRejectsAnotherOwnerWithoutChangingTheCommittedSnapshot()
             throws Exception
     {

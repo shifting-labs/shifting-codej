@@ -19,6 +19,7 @@ import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
@@ -76,6 +77,7 @@ public final class ClaudeApi
         private Optional<ContextCompactor> contextCompactor = Optional.empty();
         private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
         private int maximumSummaryInputCharacters = 65536;
+        private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
 
         private Builder() {}
 
@@ -302,6 +304,19 @@ public final class ClaudeApi
         }
 
         /**
+         * Borrows an opt-in audit retention policy. Covered history is irreversibly removed;
+         * physical staged-attachment cleanup requires a separately positive deletion bound.
+         *
+         * @param policy thread-safe host selector; the engine performs safe commits and owned cleanup
+         * @return this builder
+         */
+        public Builder auditRetention(AuditRetentionPolicy policy)
+        {
+            auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -322,6 +337,7 @@ public final class ClaudeApi
             contextCompactor.ifPresent(settings::contextCompactor);
             contextSummarization.ifPresent(settings::contextSummarization);
             settings.maximumSummaryInputCharacters(maximumSummaryInputCharacters);
+            auditRetention.ifPresent(settings::auditRetention);
             return DriverAgent.claudeApi(settings.build(), state, profile);
         }
     }

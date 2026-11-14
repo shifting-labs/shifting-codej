@@ -120,7 +120,8 @@ final class ApiCheckpointCodec
             List<ApiJournal.Entry> journal = data.journal().stream().map(EventData::entry).toList();
             Optional<ModelReplayState> replay = data.replay().map(ReplayData::replay);
             ModelHistory history = ApiCheckpointMigrations.history(data.version(), data.history().map(HistoryData::history), phase, journal, replay);
-            ApiCheckpoint state = new ApiCheckpoint(ApiCheckpoint.CURRENT_VERSION, data.id(), new ConnectorIdentity(data.connector(), data.profile()), new AgentLaneId(data.lane()),
+            ApiCheckpoint state = new ApiCheckpoint(data.version() == 1 ? ApiCheckpoint.CURRENT_VERSION : data.version(), data.id(),
+                    new ConnectorIdentity(data.connector(), data.profile()), new AgentLaneId(data.lane()),
                     phase, journal, data.receipts().stream().map(ReceiptData::receipt).toList(), replay,
                     data.setup().map(SetupData::setup), data.input().map(InputData::input), history);
             validateHistory(state);
@@ -147,7 +148,8 @@ final class ApiCheckpointCodec
         List<ApiJournal.Response> responses = state.journal().stream().filter(ApiJournal.Response.class::isInstance).map(ApiJournal.Response.class::cast).toList();
         List<ModelHistory.Exchange> exchanges = state.history().exchanges();
         int missing = responses.size() - exchanges.size();
-        checkArgument(missing >= 0 && (!state.history().complete() || missing == 0), "history completeness disagrees with response journal");
+        checkArgument(missing >= 0 && (!(state.history().complete() || state.history().summarizedThroughRequestId().isPresent()) || missing == 0),
+                "history completeness disagrees with response journal");
         for (int index = 0; index < exchanges.size(); index++) {
             ApiJournal.Response response = responses.get(missing + index);
             ModelHistory.Exchange exchange = exchanges.get(index);
@@ -186,11 +188,20 @@ final class ApiCheckpointCodec
             @JsonProperty(required = true) List<ReceiptData> receipts, Optional<ReplayData> replay,
             Optional<SetupData> setup, Optional<InputData> input, Optional<HistoryData> history) {}
 
-    private record HistoryData(@JsonProperty(required = true) boolean complete, @JsonProperty(required = true) List<ExchangeData> exchanges)
+    private record HistoryData(@JsonProperty(required = true) boolean complete, @JsonProperty(required = true) List<ExchangeData> exchanges,
+            Optional<String> summarizedThroughRequestId)
     {
-        ModelHistory history() { return new ModelHistory(complete, exchanges.stream().map(ExchangeData::exchange).toList()); }
+        ModelHistory history()
+        {
+            var values = exchanges.stream().map(ExchangeData::exchange).toList();
+            checkArgument(summarizedThroughRequestId.isEmpty() || !complete, "retained history cannot be complete");
+            return summarizedThroughRequestId.map(boundary -> ModelHistory.retained(boundary, values)).orElseGet(() -> new ModelHistory(complete, values));
+        }
 
-        static HistoryData of(ModelHistory value) { return new HistoryData(value.complete(), value.exchanges().stream().map(ExchangeData::of).toList()); }
+        static HistoryData of(ModelHistory value)
+        {
+            return new HistoryData(value.complete(), value.exchanges().stream().map(ExchangeData::of).toList(), value.summarizedThroughRequestId());
+        }
     }
 
     private record ExchangeData(@JsonProperty(required = true) String requestId, @JsonProperty(required = true) String providerId,

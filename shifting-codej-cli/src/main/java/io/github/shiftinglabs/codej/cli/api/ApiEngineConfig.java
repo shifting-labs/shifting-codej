@@ -24,6 +24,7 @@ import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
@@ -72,6 +73,7 @@ public final class ApiEngineConfig
     final Optional<ContextCompactor> contextCompactor;
     final Optional<ContextSummarizationPolicy> contextSummarization;
     final int maximumSummaryInputCharacters;
+    final Optional<AuditRetentionPolicy> auditRetention;
 
     private ApiEngineConfig(Builder b)
     {
@@ -103,6 +105,7 @@ public final class ApiEngineConfig
         contextCompactor = b.contextCompactor;
         contextSummarization = b.contextSummarization;
         maximumSummaryInputCharacters = b.maximumSummaryInputCharacters;
+        auditRetention = b.auditRetention;
         checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
@@ -143,6 +146,7 @@ public final class ApiEngineConfig
         private Optional<ContextCompactor> contextCompactor = Optional.empty();
         private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
         private int maximumSummaryInputCharacters = 65536;
+        private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -345,6 +349,19 @@ public final class ApiEngineConfig
                 throw new IllegalArgumentException("summary input limit must be positive");
             }
             maximumSummaryInputCharacters = value;
+            return this;
+        }
+
+        /**
+         * Borrows an opt-in audit retention policy. Covered history is irreversibly removed;
+         * physical staged-attachment cleanup requires a separately positive deletion bound.
+         *
+         * @param policy thread-safe host selector; the engine performs safe commits and owned cleanup
+         * @return this builder
+         */
+        public Builder auditRetention(AuditRetentionPolicy policy)
+        {
+            auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
             return this;
         }
 

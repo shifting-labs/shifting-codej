@@ -41,7 +41,7 @@ public record ModelCompactionRequest(String model, ModelHistory history, ModelRe
         requireNonNull(replay, "replay is null");
         checkArgument(retainExchanges >= 0, "retained exchanges must not be negative");
         var exchanges = history.exchanges();
-        checkArgument(history.complete(), "compaction requires complete history");
+        checkArgument(history.complete() || history.summarizedThroughRequestId().isPresent(), "compaction requires a known history prefix");
         checkArgument(exchanges.stream().allMatch(exchange -> exchange.providerId().equals(replay.providerId())), "compaction cannot mix provider history");
         checkArgument(retainExchanges < exchanges.size(), "compaction must summarize a nonempty prefix");
         checkArgument(exchanges.getLast().toolCalls().isEmpty(), "cannot compact a pending tool batch");

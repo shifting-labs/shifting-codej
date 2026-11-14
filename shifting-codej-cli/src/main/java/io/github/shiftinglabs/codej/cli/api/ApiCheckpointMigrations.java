@@ -38,7 +38,16 @@ final class ApiCheckpointMigrations
                                 || entry instanceof ApiJournal.ToolStarted || entry instanceof ApiJournal.ToolResult);
                 yield new ModelHistory(!unknownPrefix, List.of());
             }
-            case ApiCheckpoint.CURRENT_VERSION -> saved.orElseThrow(() -> new IllegalArgumentException("version-2 history is required"));
+            case ApiCheckpoint.CURRENT_VERSION -> {
+                var history = saved.orElseThrow(() -> new IllegalArgumentException("version-2 history is required"));
+                checkArgument(history.summarizedThroughRequestId().isEmpty(), "version-2 history cannot have a retained prefix");
+                yield history;
+            }
+            case ApiCheckpoint.RETENTION_VERSION -> {
+                var history = saved.orElseThrow(() -> new IllegalArgumentException("version-3 history is required"));
+                checkArgument(history.summarizedThroughRequestId().isPresent(), "version-3 retained prefix is required");
+                yield history;
+            }
             default -> throw new IllegalArgumentException("unsupported checkpoint version");
         };
     }

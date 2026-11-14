@@ -75,6 +75,8 @@ import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSection;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetention;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import org.junit.jupiter.api.Test;
@@ -115,7 +117,211 @@ class TestApiAgentDriver
     Path directory;
 
     @Test
-    void incrementalSummariesCommitBoundedChunksAndResumeAfterBudgetExhaustion()
+    void auditPruningCommitsBeforeFreshInferenceAndExposesAnExplicitRetainedPrefix()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        String boundary = readCheckpoint(reference).history().exchanges().getFirst().requestId();
+        FakeClient client = new FakeClient();
+        client.memoryReader = replay -> Optional.of(new ModelCompactionMemory(boundary, "summary"));
+        client.script.add((request, sink) -> {
+            assertThat(readCheckpoint(reference).version()).isEqualTo(3);
+            assertThat(request.history().orElseThrow().complete()).isFalse();
+            assertThat(request.history().orElseThrow().summarizedThroughRequestId()).contains(boundary);
+            assertThat(request.history().orElseThrow().exchanges()).hasSize(2);
+            return answer(request, sink);
+        });
+        AuditRetentionPolicy policy = context -> {
+            assertThat(context.turnId()).isEqualTo("turn");
+            assertThat(context.compactedThroughRequestId()).contains(boundary);
+            assertThat(context.deadline()).isEmpty();
+            assertThat(context.cancelled()).isFalse();
+            assertThat(context.history()).isNotNull();
+            return Optional.of(new AuditRetention(0, 0));
+        };
+        var settings = config(client).auditRetention(policy).build();
+        assertThatThrownBy(() -> config(client).auditRetention(null)).isInstanceOf(NullPointerException.class);
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+            assertThat(client.requests).hasSize(1);
+            assertThat(session.resumable()).isTrue();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "throw", "decline"})
+    void auditPolicyFailureOrDeclineDoesNotPruneTheCommittedHistory(String mode)
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        FakeClient client = new FakeClient();
+        var policy = (AuditRetentionPolicy) context -> {
+            if (mode.equals("null")) {
+                return null;
+            }
+            if (mode.equals("throw")) {
+                throw new IllegalStateException("private callback diagnostic");
+            }
+            return Optional.empty();
+        };
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).auditRetention(policy).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(mode.equals("decline") ? AgentTurnResult.State.COMPLETED : AgentTurnResult.State.FAILED);
+            assertThat(readCheckpoint(reference).version()).isEqualTo(2);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(mode.equals("decline") ? 4 : 3);
+            assertThat(session.resumable()).isTrue();
+        }
+    }
+
+    @Test
+    void cancelledAuditPolicyRetainsTheWriterUntilItsCallbackStopsAndDoesNotPrune()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        FakeClient client = new FakeClient();
+        var settings = config(client).shutdownTimeout(Duration.ofMillis(20)).auditRetention(context -> {
+            entered.countDown();
+            boolean finished = false;
+            while (!finished) {
+                try {
+                    release.await();
+                    finished = true;
+                }
+                catch (InterruptedException ignored) {
+                    assertThat(context.cancelled()).isTrue();
+                }
+            }
+            return Optional.of(new AuditRetention(0, 1));
+        }).build();
+        ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+        AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {});
+        RunningTurn turn = session.start(command("fresh"));
+        try {
+            assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThatThrownBy(driver::close).isInstanceOf(AgentUnavailableException.class);
+            assertThat(turn.completion().toCompletableFuture()).isNotDone();
+            assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, settings))
+                    .isInstanceOf(AgentUnavailableException.class);
+        }
+        finally {
+            release.countDown();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            session.close();
+            driver.close();
+        }
+        assertThat(readCheckpoint(reference).version()).isEqualTo(2);
+        assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+        assertThat(client.requests).isEmpty();
+    }
+
+    @Test
+    void cleanupFailureLeavesThePrunedCheckpointResumableWithoutRestoringDiscardedData()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        String boundary = readCheckpoint(reference).history().exchanges().getFirst().requestId();
+        FakeClient client = new FakeClient();
+        client.memoryReader = replay -> Optional.of(new ModelCompactionMemory(boundary, "summary"));
+        ApiSessionRepository.Factory repositories = (profile, id, resume, config) -> {
+            ApiSessionRepository delegate = ApiSessionStore.open(profile, id, resume, config);
+            return new ApiSessionRepository()
+            {
+                @Override
+                public ApiCheckpoint state() { return delegate.state(); }
+
+                @Override
+                public void save(ApiCheckpoint next) { delegate.save(next); }
+
+                @Override
+                public ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments) { return delegate.stage(text, attachments); }
+
+                @Override
+                public int pruneAttachments(int maximum, List<AgentAttachment> protectedAttachments, Runnable checkStop)
+                {
+                    assertThat(delegate.state().version()).isEqualTo(3);
+                    throw new AgentUnavailableException("Injected cleanup failure");
+                }
+
+                @Override
+                public void close() { delegate.close(); }
+            };
+        };
+        var settings = config(client).auditRetention(AuditRetentionPolicy.keepLatest(0, 1)).build();
+        try (var engine = new ApiEngine(settings, connectorContext(), repositories, ApiPromptAssembler.DEFAULT);
+                AgentSession session = engine.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(readCheckpoint(reference).version()).isEqualTo(3);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(2);
+            assertThat(session.resumable()).isTrue();
+            assertThat(client.requests).isEmpty();
+        }
+        FakeClient resumed = new FakeClient();
+        resumed.memoryReader = replay -> Optional.of(new ModelCompactionMemory(boundary, "summary"));
+        try (ApiAgentDriver driver = driver(resumed); AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("continue without cleanup"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(resumed.requests.getFirst().history().orElseThrow().exchanges()).hasSize(2);
+        }
+    }
+
+    @Test
+    void failedAuditCommitNeverStartsAttachmentCleanupAndBlocksTheLiveSession()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        String boundary = readCheckpoint(reference).history().exchanges().getFirst().requestId();
+        FakeClient client = new FakeClient();
+        client.memoryReader = replay -> Optional.of(new ModelCompactionMemory(boundary, "summary"));
+        ApiSessionRepository.Factory repositories = (profile, id, resume, config) -> {
+            ApiSessionRepository delegate = ApiSessionStore.open(profile, id, resume, config);
+            return new ApiSessionRepository()
+            {
+                @Override
+                public ApiCheckpoint state() { return delegate.state(); }
+
+                @Override
+                public void save(ApiCheckpoint next)
+                {
+                    if (next.version() == 3) {
+                        throw new IllegalStateException("Injected retention commit failure");
+                    }
+                    delegate.save(next);
+                }
+
+                @Override
+                public ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments) { return delegate.stage(text, attachments); }
+
+                @Override
+                public int pruneAttachments(int maximum, List<AgentAttachment> protectedAttachments, Runnable checkStop)
+                {
+                    throw new AssertionError("Cleanup must follow a successful retention commit");
+                }
+
+                @Override
+                public void close() { delegate.close(); }
+            };
+        };
+        var settings = config(client).auditRetention(AuditRetentionPolicy.keepLatest(0, 4)).build();
+        try (var engine = new ApiEngine(settings, connectorContext(), repositories, ApiPromptAssembler.DEFAULT);
+                AgentSession session = engine.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(readCheckpoint(reference).version()).isEqualTo(2);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+            assertThat(client.requests).isEmpty();
+            assertThat(session.resumable()).isFalse();
+        }
+        try (ApiAgentDriver driver = driver(new FakeClient()); AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("recover original"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void incrementalSummariesCommitBoundedChunksAndResumeAfterBudgetExhaustion(boolean retention)
             throws Exception
     {
         AgentSessionRef reference = seedSummaryHistory();
@@ -135,12 +341,13 @@ class TestApiAgentDriver
             return completed(response("memory-one", "discarded", List.of(), ModelResponse.StopReason.COMPLETED));
         });
         try (ApiAgentDriver driver = new ApiAgentDriver(config(first).maximumRequests(2).maximumSummaryInputCharacters(500)
-                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(0, 32))).build(), connectorContext());
+                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(0, 32)))
+                .auditRetention(retention ? AuditRetentionPolicy.keepLatest(0, 0) : context -> Optional.empty()).build(), connectorContext());
                 AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
             assertThat(done(session.start(command("not yet submitted"))).state()).isEqualTo(AgentTurnResult.State.INTERRUPTED);
             assertThat(first.requests).hasSize(1);
             assertThat(first.compactions).hasSize(1);
-            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(retention ? 2 : 3);
             assertThat(readCheckpoint(reference).replay().orElseThrow().payload()).hasSize(11000);
             assertThat(session.resumable()).isTrue();
         }
@@ -160,14 +367,17 @@ class TestApiAgentDriver
                 return completed(response(block == 1 ? "memory-two" : "memory-three", "discarded", List.of(), ModelResponse.StopReason.COMPLETED));
             });
         }
+        next.script.add((request, sink) -> completed(new ModelResponse("answer", List.of(), ModelResponse.StopReason.COMPLETED,
+                request.replayState().orElseThrow(), Optional.empty())));
         try (ApiAgentDriver driver = new ApiAgentDriver(config(next).maximumRequests(3).maximumSummaryInputCharacters(500)
-                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(0, 32))).build(), connectorContext());
+                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(0, 32)))
+                .auditRetention(retention ? AuditRetentionPolicy.keepLatest(0, 0) : context -> Optional.empty()).build(), connectorContext());
                 AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
             assertThat(done(session.start(command("finally submitted"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
             assertThat(next.requests).hasSize(3);
             assertThat(next.compactions).hasSize(2);
             assertThat(next.requests.getLast().replayState().orElseThrow().payload()).hasSize(9000);
-            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(4);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(retention ? 1 : 4);
             assertThat(readCheckpoint(reference).history().exchanges().getLast().input()).isEqualTo(new ModelInput.UserMessage("finally submitted", List.of()));
         }
     }

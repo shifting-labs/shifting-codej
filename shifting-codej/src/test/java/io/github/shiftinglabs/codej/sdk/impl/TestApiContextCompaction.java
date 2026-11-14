@@ -38,12 +38,15 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
 import io.github.shiftinglabs.codej.sdk.testing.DeepSeekHttpFixture;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -78,6 +81,38 @@ class TestApiContextCompaction
     }
 
     private record Thinking(String reasoning_content) {}
+
+    @ParameterizedTest
+    @CsvSource({"true,0", "false,0", "true,1", "false,1"})
+    void optInRetentionPrunesCoveredAuditDataAndContinuesIncrementalSummariesAcrossRestarts(boolean claude, int retain)
+            throws Exception
+    {
+        try (Fixture f = new Fixture(claude)) {
+            var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+            ContextSummarizationPolicy policy = context -> context.history().exchanges().size() > retain
+                    ? Optional.of(new ContextSummarizationPlan(retain, 64)) : Optional.empty();
+            SessionRef saved;
+            try (Agent agent = f.retainedAgent(policy); Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("discard-me " + "x".repeat(4000)))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(session.run(Input.text("covered-next " + "y".repeat(2000)))).isInstanceOf(TurnResult.Completed.class);
+                f.textReply("memory-one");
+                assertThat(session.run(Input.text("fresh input"))).isInstanceOf(TurnResult.Completed.class);
+                saved = session.ref().orElseThrow();
+                assertThat(f.checkpointText()).contains("\"version\":3", "summarizedThroughRequestId").doesNotContain("discard-me");
+            }
+            try (Agent agent = f.retainedAgent(policy); Session session = agent.resumeSession(saved, options)) {
+                f.textReply("memory-two");
+                assertThat(session.run(Input.text("after restart"))).isInstanceOf(TurnResult.Completed.class);
+                String summaryRequest = f.bodies().get(f.bodies().size() - 2);
+                assertThat(summaryRequest).contains("memory-one", retain == 0 ? "fresh input" : "covered-next").doesNotContain("discard-me");
+                assertThat(f.checkpointText()).contains("memory-two").doesNotContain("discard-me", "covered-next");
+            }
+            try (Agent agent = f.agent(Optional.empty()); Session session = agent.resumeSession(saved, options)) {
+                assertThat(session.run(Input.text("retention disabled"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.lastBody()).contains("memory-two", "retention disabled").doesNotContain("discard-me", "covered-next");
+            }
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
@@ -375,11 +410,24 @@ class TestApiContextCompaction
 
         Agent summaryAgent(ContextSummarizationPolicy policy) { return summaryAgent(policy, 65536); }
 
-        Agent summaryAgent(ContextSummarizationPolicy policy, int maximumInput) { return agent(Optional.empty(), Optional.of(policy), maximumInput); }
+        Agent summaryAgent(ContextSummarizationPolicy policy, int maximumInput) { return agent(Optional.empty(), Optional.of(policy), maximumInput, Optional.empty()); }
 
-        Agent agent(Optional<ContextCompactor> policy) { return agent(policy, Optional.empty(), 65536); }
+        Agent retainedAgent(ContextSummarizationPolicy policy)
+        {
+            return agent(Optional.empty(), Optional.of(policy), 65536, Optional.of(AuditRetentionPolicy.keepLatest(0, 0)));
+        }
 
-        private Agent agent(Optional<ContextCompactor> policy, Optional<ContextSummarizationPolicy> summarization, int maximumInput)
+        String checkpointText()
+                throws Exception
+        {
+            try (var files = Files.walk(directory.resolve("profile"))) {
+                return Files.readString(files.filter(path -> path.getFileName().toString().equals("checkpoint.json")).findFirst().orElseThrow());
+            }
+        }
+
+        Agent agent(Optional<ContextCompactor> policy) { return agent(policy, Optional.empty(), 65536, Optional.empty()); }
+
+        private Agent agent(Optional<ContextCompactor> policy, Optional<ContextSummarizationPolicy> summarization, int maximumInput, Optional<AuditRetentionPolicy> retention)
         {
             if (anthropic != null) {
                 var builder = ClaudeApi.builder().model(model).apiKey(() -> "sk-context-test").baseUrl(anthropic.baseUrl())
@@ -387,6 +435,7 @@ class TestApiContextCompaction
                 policy.ifPresent(builder::contextCompactor);
                 summarization.ifPresent(builder::contextSummarization);
                 builder.maximumSummaryInputCharacters(maximumInput);
+                retention.ifPresent(builder::auditRetention);
                 return builder.build();
             }
             var builder = DeepSeekApi.builder().model(model).apiKey(() -> "sk-context-test").baseUrl(deepseek.baseUrl())
@@ -394,6 +443,7 @@ class TestApiContextCompaction
             policy.ifPresent(builder::contextCompactor);
             summarization.ifPresent(builder::contextSummarization);
             builder.maximumSummaryInputCharacters(maximumInput);
+            retention.ifPresent(builder::auditRetention);
             return builder.build();
         }
 

@@ -208,6 +208,18 @@ def verify(args, report):
             (output / "incremental-summary-consumer.txt").write_text(result)
             report["passed"].append("Incremental summaries: bounded Claude/DeepSeek chunks and durable memory; JDK + jar only")
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_retention = PREFIX + "cli/spi/retention/AuditRetentionPolicy.class" in artifact.namelist()
+        if has_retention:
+            fixture = Path(__file__).parent / "compatibility" / "AuditRetentionConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            fixture_root = Path(folder) / "retention-api"
+            result = run([jdk_tool("java"), "-cp", classpath, "AuditRetentionConsumer", str(fixture_root)])
+            (output / "audit-retention-consumer.txt").write_text(result)
+            (output / "retained-checkpoint.json").write_bytes((fixture_root / "claude-retained-checkpoint.json").read_bytes())
+            report["passed"].append("Audit retention: Claude/DeepSeek pruned format-3 history and durable resume; JDK + jar only")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

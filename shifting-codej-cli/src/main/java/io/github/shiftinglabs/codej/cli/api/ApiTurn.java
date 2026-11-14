@@ -40,6 +40,8 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContext;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetention;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolRequirements;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolResource;
 
@@ -172,14 +174,17 @@ final class ApiTurn
             observe(() -> new EngineObservation.TurnStarted(observedTurnId()));
             checkStop();
             emit(new ProviderAgentEvent.Lifecycle(Optional.empty(), ProviderAgentEvent.LifecyclePhase.TURN_STARTED, "API turn started", source("turn")));
+            validateRetainedHistory();
             ApiCheckpoint saved = session.store.state();
             if (saved.phase() == ApiCheckpoint.Phase.TOOLS) {
                 // Reconcile an interrupted batch before adding fresh user input to the provider's transcript.
                 runLoop(results(true), saved.setup().orElseThrow());
             }
             compact();
+            retainAudit(true);
             ApiPromptSnapshot prompt = prompt();
             String answer = runLoop(prompt.input(), requestSetup(prompt.instructions()));
+            retainAudit(false);
             checkStop();
             emit(new ProviderAgentEvent.Lifecycle(Optional.empty(), ProviderAgentEvent.LifecyclePhase.TURN_COMPLETED, "API turn completed", source("turn")));
             terminal = terminal(AgentTurnResult.State.COMPLETED, Optional.of(answer).filter(value -> !value.isBlank()), Optional.empty(), Optional.empty(), false);
@@ -343,27 +348,15 @@ final class ApiTurn
         }
         ModelReplayState replay = before.replay().orElseThrow();
         ModelHistory history = before.history();
-        ModelCompactionRequest.validateBoundary(history, replay, plan.retainExchanges());
-        Optional<ModelCompactionMemory> memory;
-        try {
-            interruptible = true;
-            checkStop();
-            memory = requireNonNull(session.engine.client.compactionMemory(replay), "adapter returned null memory");
-            checkStop();
+        boolean anchored = history.summarizedThroughRequestId().isPresent();
+        int target = Math.max(0, history.exchanges().size() - plan.retainExchanges());
+        if (!anchored || target > 0) {
+            ModelCompactionRequest.validateBoundary(history, replay, plan.retainExchanges());
         }
-        finally {
-            interruptible = false;
-            Thread.interrupted();
-        }
-        int from = memory.map(value -> IntStream.range(0, history.exchanges().size())
-                .filter(index -> history.exchanges().get(index).requestId().equals(value.throughRequestId())).findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Summary boundary is absent from history")) + 1).orElse(0);
-        int target = history.exchanges().size() - plan.retainExchanges();
+        Optional<ModelCompactionMemory> memory = memory(replay);
+        int from = ApiAuditRetention.cursor(history, memory);
         if (from > target) {
             throw new IllegalArgumentException("Summary cannot restore removed context");
-        }
-        if (from > 0) {
-            ModelCompactionRequest.validateBoundary(history, replay, history.exchanges().size() - from);
         }
         String summary = memory.map(ModelCompactionMemory::summary).orElse("");
         int limit = Math.min(config.maximumSummaryInputCharacters, config.maximumTextChars);
@@ -380,7 +373,90 @@ final class ApiTurn
                 throw new IllegalArgumentException("Incremental compaction made no progress");
             }
             from = chunk.throughExchanges();
+            retainAudit(true);
         }
+    }
+
+    private Optional<ModelCompactionMemory> memory(ModelReplayState replay)
+    {
+        try {
+            interruptible = true;
+            checkStop();
+            var value = requireNonNull(session.engine.client.compactionMemory(replay), "adapter returned null memory");
+            checkStop();
+            return value;
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
+    }
+
+    private void validateRetainedHistory()
+    {
+        ApiCheckpoint state = session.store.state();
+        if (state.history().summarizedThroughRequestId().isPresent()) {
+            ApiAuditRetention.cursor(state.history(), memory(state.replay().orElseThrow()));
+        }
+    }
+
+    private void retainAudit(boolean freshPending)
+    {
+        if (config.auditRetention.isEmpty()) {
+            return;
+        }
+        ApiCheckpoint before = session.store.state();
+        if (before.phase() != ApiCheckpoint.Phase.READY || !before.recoverable() || !before.receipts().isEmpty()) {
+            return;
+        }
+        var memory = before.replay().isPresent() ? memory(before.replay().orElseThrow()) : Optional.<ModelCompactionMemory>empty();
+        AuditRetentionContext context = new AuditRetentionContext()
+        {
+            @Override
+            public String turnId() { return command.turnId(); }
+
+            @Override
+            public ModelHistory history() { return before.history(); }
+
+            @Override
+            public Optional<String> compactedThroughRequestId() { return memory.map(ModelCompactionMemory::throughRequestId); }
+
+            @Override
+            public Optional<Instant> deadline() { return command.maximumRuntime().isZero() ? Optional.empty() : Optional.of(started.plus(command.maximumRuntime())); }
+
+            @Override
+            public boolean cancelled() { return stopping.get() != null; }
+        };
+        AuditRetention plan;
+        try {
+            interruptible = true;
+            checkStop();
+            var offered = requireNonNull(config.auditRetention.orElseThrow().retain(context), "retention policy returned null");
+            checkStop();
+            if (offered.isEmpty()) {
+                return;
+            }
+            plan = offered.orElseThrow();
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
+        ApiCheckpoint next = ApiAuditRetention.apply(before, memory, plan, freshPending ? Optional.of(input) : Optional.empty());
+        checkStop();
+        if (next != before) {
+            save(next);
+        }
+        int removedAttachments = 0;
+        if (plan.maximumAttachmentDeletions() > 0 && (next.history().complete() || next.history().summarizedThroughRequestId().isPresent())) {
+            removedAttachments = session.store.pruneAttachments(plan.maximumAttachmentDeletions(), freshPending ? input.attachments() : List.of(), this::checkStop);
+        }
+        int deleted = removedAttachments;
+        if (next != before || deleted > 0) {
+            observe(() -> new EngineObservation.AuditPruned(observedTurnId(), before.history().exchanges().size() - next.history().exchanges().size(),
+                    before.journal().size() - next.journal().size(), deleted));
+        }
+        checkStop();
     }
 
     private String summaryCall(String transcript, int maximumOutputTokens, Optional<Instant> deadline)

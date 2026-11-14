@@ -42,6 +42,9 @@ interface ApiSessionRepository
     /** Stage private, durable, bounded attachment copies and return their provider-neutral references. */
     ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments);
 
+    /** Optional owned-file cleanup after a committed retention decision; protect in-flight fresh attachments. */
+    default int pruneAttachments(int maximumDeletions, List<AgentAttachment> protectedAttachments, Runnable checkStop) { return 0; }
+
     /** Release the writer only after its owner has confirmed that all local work stopped. */
     @Override
     void close();

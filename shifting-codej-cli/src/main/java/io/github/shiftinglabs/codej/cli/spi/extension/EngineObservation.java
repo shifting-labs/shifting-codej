@@ -109,6 +109,17 @@ public interface EngineObservation
         }
     }
 
+    /** A committed audit prefix removal and/or completed owned attachment deletions; no content or paths. */
+    record AuditPruned(String turnId, int removedExchanges, int removedJournalEntries, int deletedAttachments)
+            implements EngineObservation
+    {
+        public AuditPruned
+        {
+            checkText(turnId, "turnId");
+            checkArgument(removedExchanges >= 0 && removedJournalEntries >= 0 && deletedAttachments >= 0, "invalid audit pruning counts");
+        }
+    }
+
     enum Admission
     {
         INVALID_ARGUMENTS,

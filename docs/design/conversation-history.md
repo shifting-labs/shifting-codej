@@ -20,6 +20,9 @@ The later [context compaction stage](context-compaction.md) can replace active n
 a summary and retained complete exchanges. `ModelHistory` still contains the entire durable
 canonical prefix. Provider replay format 2 records the summarized boundary inside the opaque state;
 checkpoint format 2 and public session-reference versions remain unchanged.
+Separately enabled [audit retention](audit-retention.md) uses format 3 for deliberately pruned
+history. Its explicit `summarizedThroughRequestId()` anchor distinguishes a known summary-backed
+prefix from a legacy gap; default format-2 history remains unchanged.
 
 The engine records a new exchange atomically with its observed response, private replay and tool
 receipts. Input queued by a public session is not yet model history. This matters when a fresh user

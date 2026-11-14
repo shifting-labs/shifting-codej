@@ -152,13 +152,18 @@ final class ContextReplay
         int previous = 0;
         if (request.replay().formatVersion() == 2) {
             String through = envelope(request.replay()).through();
-            previous = java.util.stream.IntStream.range(0, exchanges.size()).filter(index -> exchanges.get(index).requestId().equals(through))
-                    .findFirst().orElseThrow(() -> invalid("Compaction boundary is absent from history")) + 1;
+            if (request.history().summarizedThroughRequestId().filter(through::equals).isEmpty()) {
+                previous = java.util.stream.IntStream.range(0, exchanges.size()).filter(index -> exchanges.get(index).requestId().equals(through))
+                        .findFirst().orElseThrow(() -> invalid("Compaction boundary is absent from history")) + 1;
+            }
         }
         if (boundary < previous) {
             throw invalid("Compaction cannot restore removed native context");
         }
-        int expected = previous == 0 ? 0 : 1;
+        if (request.history().summarizedThroughRequestId().isPresent() && request.replay().formatVersion() != 2) {
+            throw invalid("Retained history requires compacted replay");
+        }
+        int expected = request.replay().formatVersion() == 2 ? 1 : 0;
         int retained = 0;
         for (int index = previous; index < exchanges.size(); index++) {
             int count = messageCount.applyAsInt(exchanges.get(index));

@@ -51,6 +51,8 @@ public final class ModelRequest
         deadline = builder.deadline;
         checkArgument(!(input instanceof ModelInput.ToolResults) || replayState.isPresent(), "tool results require replay state");
         history.ifPresent(value -> {
+            checkArgument(value.summarizedThroughRequestId().isEmpty() || replayState.isPresent(), "retained history requires native replay");
+            checkArgument(value.summarizedThroughRequestId().filter(requestId::equals).isEmpty(), "request ID equals the retained summary boundary");
             value.validateNext(input);
             checkArgument(value.exchanges().stream().noneMatch(exchange -> exchange.requestId().equals(requestId)), "history already contains this request ID");
         });

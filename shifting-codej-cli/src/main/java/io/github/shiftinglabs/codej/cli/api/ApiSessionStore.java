@@ -24,14 +24,21 @@ import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SecureDirectoryStream;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
 
 /** One acquired writer. Checkpoints are private, size-bounded, atomically replaced and fsynced before acknowledgement. */
 final class ApiSessionStore
@@ -216,6 +223,81 @@ final class ApiSessionStore
                 }
             }
             throw new AgentUnavailableException("Cannot stage API session attachments");
+        }
+    }
+
+    @Override
+    public synchronized int pruneAttachments(int maximumDeletions, List<AgentAttachment> protectedAttachments, Runnable checkStop)
+    {
+        checkArgument(maximumDeletions >= 0 && maximumDeletions <= 1024, "invalid attachment deletion limit");
+        requireNonNull(checkStop, "checkStop is null");
+        var keep = new HashSet<Path>();
+        protectedAttachments.forEach(attachment -> keep.add(attachment.path().toAbsolutePath().normalize()));
+        if (closed) {
+            throw new AgentUnavailableException("API session writer is closed");
+        }
+        if (maximumDeletions == 0 || state.phase() != ApiCheckpoint.Phase.READY || !state.recoverable() || !state.receipts().isEmpty()) {
+            return 0;
+        }
+        state.history().exchanges().forEach(exchange -> attachments(exchange.input(), keep));
+        state.input().ifPresent(input -> attachments(input, keep));
+        state.journal().forEach(entry -> {
+            if (entry instanceof ApiJournal.User user) {
+                attachments(user.input(), keep);
+            }
+        });
+        int removed = 0;
+        try (var opened = Files.newDirectoryStream(directory)) {
+            requireDirectory(directory);
+            if (!(opened instanceof SecureDirectoryStream<Path> root)) {
+                throw new IOException("secure cleanup is unavailable");
+            }
+            try (var folder = root.newDirectoryStream(Path.of("attachments"), LinkOption.NOFOLLOW_LINKS)) {
+                for (Path path : folder) {
+                    checkStop.run();
+                    Path name = path.getFileName();
+                    if (!canonicalUuid(name.toString()) || keep.contains(directory.resolve("attachments").resolve(name).toAbsolutePath().normalize())) {
+                        continue;
+                    }
+                    var attributes = folder.getFileAttributeView(name, BasicFileAttributeView.class, LinkOption.NOFOLLOW_LINKS).readAttributes();
+                    if (!attributes.isRegularFile()) {
+                        continue;
+                    }
+                    folder.deleteFile(name);
+                    if (++removed == maximumDeletions) {
+                        break;
+                    }
+                }
+            }
+            catch (NoSuchFileException missing) {
+                // No staged attachment directory, or an already absent unreferenced file.
+            }
+            if (removed > 0) {
+                try (var parent = FileChannel.open(directory.resolve("attachments"), StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+                    parent.force(true);
+                }
+            }
+            return removed;
+        }
+        catch (IOException failure) {
+            throw new AgentUnavailableException("Cannot safely clean unreferenced API attachments; committed checkpoint remains authoritative");
+        }
+    }
+
+    private static boolean canonicalUuid(String value)
+    {
+        try {
+            return UUID.fromString(value).toString().equals(value);
+        }
+        catch (IllegalArgumentException failure) {
+            return false;
+        }
+    }
+
+    private static void attachments(ModelInput input, Set<Path> paths)
+    {
+        if (input instanceof ModelInput.UserMessage user) {
+            user.attachments().forEach(attachment -> paths.add(attachment.path().toAbsolutePath().normalize()));
         }
     }
 

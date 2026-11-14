@@ -28,6 +28,34 @@ class TestModelHistory
     private static final ModelResponse.ToolCall CALL = new ModelResponse.ToolCall("call", "lookup", "{}");
 
     @Test
+    void retainedPrefixesStayExplicitAndPreserveTheirBoundaryAcrossAppends()
+    {
+        var values = new ArrayList<ModelHistory.Exchange>();
+        var history = ModelHistory.retained("summary-boundary", values);
+        values.add(exchange("later", USER, List.of(), ModelResponse.StopReason.COMPLETED));
+        assertThat(history.exchanges()).isEmpty();
+        assertThat(history.complete()).isFalse();
+        assertThat(history.summarizedThroughRequestId()).contains("summary-boundary");
+        assertThat(new ModelHistory(true, List.of()).summarizedThroughRequestId()).isEmpty();
+        var next = history.append(values.getFirst());
+        assertThat(next.summarizedThroughRequestId()).isEqualTo(history.summarizedThroughRequestId());
+        assertThat(next).isEqualTo(ModelHistory.retained("summary-boundary", values)).hasSameHashCodeAs(ModelHistory.retained("summary-boundary", values));
+        assertThat(next).isNotEqualTo(new ModelHistory(false, values)).isNotEqualTo(ModelHistory.retained("other", values));
+        assertThat(next.toString()).doesNotContain("summary-boundary");
+        assertThatThrownBy(() -> ModelRequest.builder("fresh", "model", USER, 32).history(next).build()).isInstanceOf(IllegalArgumentException.class);
+        var replay = new ModelReplayState("provider", 2, "private summary");
+        assertThat(ModelRequest.builder("fresh", "model", USER, 32).history(next).replayState(replay).build().history()).containsSame(next);
+        assertThatThrownBy(() -> ModelRequest.builder("summary-boundary", "model", USER, 32).history(next).replayState(replay).build())
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ModelHistory.retained(" ", List.of())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ModelHistory.retained("summary-boundary", null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> ModelHistory.retained("later", values)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> history.validateNext(results("old-call"))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ModelHistory.retained("summary-boundary", List.of(exchange("tool", results("old-call"), List.of(), ModelResponse.StopReason.COMPLETED))))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void copiesValuesAndAppendDoesNotMutateExistingSnapshots()
     {
         var supplied = new ArrayList<ModelHistory.Exchange>();

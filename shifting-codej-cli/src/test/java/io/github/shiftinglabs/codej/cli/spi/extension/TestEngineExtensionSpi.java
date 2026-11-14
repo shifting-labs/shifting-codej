@@ -104,6 +104,20 @@ class TestEngineExtensionSpi
                 .isInstanceOf(NullPointerException.class);
     }
 
+    @Test
+    void auditObservationsContainOnlyValidatedCounts()
+    {
+        var value = new EngineObservation.AuditPruned("turn", 2, 8, 1);
+        assertThat(value.turnId()).isEqualTo("turn");
+        assertThat(value.removedExchanges()).isEqualTo(2);
+        assertThat(value.removedJournalEntries()).isEqualTo(8);
+        assertThat(value.deletedAttachments()).isEqualTo(1);
+        assertThatThrownBy(() -> new EngineObservation.AuditPruned(" ", 0, 0, 0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.AuditPruned("turn", -1, 0, 0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.AuditPruned("turn", 0, -1, 0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.AuditPruned("turn", 0, 0, -1)).isInstanceOf(IllegalArgumentException.class);
+    }
+
     private static EngineExtensionProvider<String> provider(String id, java.util.function.BiFunction<String, EngineExtensionContext, EngineExtension> factory)
     {
         return new EngineExtensionProvider<>()
