@@ -55,6 +55,7 @@ public final class ClaudeApiConnector
             config.extensions.forEach(engine::extension);
             config.toolExecutionBudget.ifPresent(engine::toolExecutionBudget);
             engine.maximumParallelTools(config.maximumParallelTools);
+            config.contextCompactor.ifPresent(engine::contextCompactor);
             return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {

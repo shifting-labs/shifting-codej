@@ -17,12 +17,13 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Lossless provider-owned conversation checkpoint, including any content/signatures required for
+ * Lossless provider-owned continuation checkpoint for the active context, including content/signatures required for
  * replay. Only its adapter interprets the payload. The engine persists it privately and must not
  * redact or reconstruct it from public events. Never includes transport credentials.
  *
  * <p>The surrounding session store binds this checkpoint to its connector and profile; providerId
  * alone is not an authorization or profile boundary. There is no implicit cross-provider migration.
+ * Explicit adapter compaction may summarize a settled prefix; full durable history remains separate.
  */
 public final class ModelReplayState
 {

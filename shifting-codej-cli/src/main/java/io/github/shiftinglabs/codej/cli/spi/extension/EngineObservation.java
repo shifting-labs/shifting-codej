@@ -85,6 +85,17 @@ public interface EngineObservation
         }
     }
 
+    /** A committed context rewrite; audit history is preserved and summary content is private. */
+    record ContextCompacted(String turnId, int summarizedExchanges, int retainedExchanges)
+            implements EngineObservation
+    {
+        public ContextCompacted
+        {
+            checkText(turnId, "turnId");
+            checkArgument(summarizedExchanges > 0 && retainedExchanges >= 0, "invalid compaction counts");
+        }
+    }
+
     enum Admission
     {
         INVALID_ARGUMENTS,

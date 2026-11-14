@@ -161,3 +161,10 @@ arguments, prompt text or result content is supplied to the observer.
 That engine also borrows `ToolExecutionBudget.bounded(2)` and opts into `maximumParallelTools(2)`.
 Its pure greeting handler declares `parallelSafe()`. A two-call batch exercises admission, ordered
 typed results/history, observer delivery and lease release from the shaded jar, without another executor.
+
+`ContextCompactionConsumer` is enabled when the candidate exposes `ContextCompactor`. With only the
+JDK and shaded jar, it installs a borrowed policy through each public API facade, compacts native
+replay twice, and resumes across agents with the policy later disabled. The policy still sees full
+canonical history while outgoing requests contain the compacted active context. Loopback HTTP
+counts prove that compaction adds no hidden inference calls; no live model or provider CLI is used.
+Older candidates skip this additive fixture and keep the existing baseline consumer checks.

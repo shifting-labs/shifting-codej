@@ -16,6 +16,11 @@ and retain their existing replay behavior; the shared engine supplies a snapshot
 `ModelRequest.input()`. Clients must not append that input twice. No mandatory `ModelClient` method,
 existing sealed subtype, enum member or public record component changes.
 
+The later [context compaction stage](context-compaction.md) can replace active native replay with
+a summary and retained complete exchanges. `ModelHistory` still contains the entire durable
+canonical prefix. Provider replay format 2 records the summarized boundary inside the opaque state;
+checkpoint format 2 and public session-reference versions remain unchanged.
+
 The engine records a new exchange atomically with its observed response, private replay and tool
 receipts. Input queued by a public session is not yet model history. This matters when a fresh user
 message arrives while an old pending tool batch must first be reconciled. Failed or uncertain calls
@@ -63,7 +68,8 @@ the old state externally before rolling back an application version that has com
 The codec binds strict typed records; JSON handling stays at the persistence boundary. History
 shares immutable snapshots across request/phase changes. Full checkpoint serialization still costs
 O(checkpoint size), and the unchanged configured size bound includes both native replay and neutral
-history. No background persistence, additional executor, compaction or silent truncation is added.
+history. This history stage adds no background persistence, additional executor or silent truncation.
+The opt-in compaction stage leaves canonical history and its storage bound intact.
 
 ## Plan
 

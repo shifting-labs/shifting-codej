@@ -47,6 +47,7 @@ import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtension;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionContext;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
@@ -57,7 +58,10 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
@@ -107,6 +111,260 @@ class TestApiAgentDriver
 {
     @TempDir
     Path directory;
+
+    @Test
+    void failedCompactionSaveBlocksTheLiveSessionAndLeavesTheOriginalCheckpointRecoverable()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        client.compactor = request -> Optional.of(new ModelReplayState("fake-api", 2, "compact"));
+        client.script.add((request, events) -> completed(response("answer", "x".repeat(8000), List.of(), ModelResponse.StopReason.COMPLETED)));
+        ApiSessionRepository.Factory repositories = (profile, id, resume, config) -> {
+            ApiSessionRepository store = ApiSessionStore.open(profile, id, resume, config);
+            return new ApiSessionRepository()
+            {
+                @Override
+                public ApiCheckpoint state() { return store.state(); }
+
+                @Override
+                public void save(ApiCheckpoint next)
+                {
+                    if (next.replay().filter(replay -> replay.formatVersion() == 2).isPresent()) {
+                        throw new IllegalStateException("Injected commit failure");
+                    }
+                    store.save(next);
+                }
+
+                @Override
+                public ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments) { return store.stage(text, attachments); }
+
+                @Override
+                public void close() { store.close(); }
+            };
+        };
+        AgentSessionRef saved;
+        try (var engine = new ApiEngine(config(client).contextCompactor(request -> Optional.of(new ModelCompaction("summary", 0))).build(),
+                connectorContext(), repositories, ApiPromptAssembler.DEFAULT);
+                AgentSession session = engine.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            saved = session.reference();
+            assertThat(done(session.start(command("first"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(session.start(command("second"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(client.requests).hasSize(1);
+            assertThat(session.resumable()).isFalse();
+            assertThatThrownBy(() -> session.start(command("unsafe retry"))).isInstanceOf(AgentUnavailableException.class);
+        }
+        FakeClient resumed = new FakeClient();
+        try (ApiAgentDriver driver = driver(resumed); AgentSession session = driver.open(context(Optional.of(saved), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("safe retry"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(resumed.requests.getFirst().replayState().orElseThrow().payload()).isEqualTo("x".repeat(8000));
+            assertThat(resumed.requests.getFirst().history().orElseThrow().exchanges()).hasSize(1);
+        }
+    }
+
+    @Test
+    void incompleteLegacyHistoryCanContinueButCannotBeCompacted()
+            throws Exception
+    {
+        FakeClient original = new FakeClient();
+        original.script.add((request, events) -> completed(response("answer", "x".repeat(8000), List.of(), ModelResponse.StopReason.COMPLETED)));
+        AgentSessionRef saved;
+        var settings = config(original).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            saved = session.reference();
+            assertThat(done(session.start(command("legacy"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+        }
+        try (var store = ApiSessionStore.open(directory.resolve("profile"), saved.providerValue(), true, settings)) {
+            ApiCheckpoint state = store.state();
+            store.save(new ApiCheckpoint(state.version(), state.id(), state.identity(), state.lane(), state.phase(), state.journal(), state.receipts(),
+                    state.replay(), state.setup(), state.input(), new ModelHistory(false, List.of())));
+        }
+        FakeClient next = new FakeClient();
+        AtomicInteger offers = new AtomicInteger();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(next).contextCompactor(request -> {
+            assertThat(request.history().complete()).isFalse();
+            return offers.getAndIncrement() == 0 ? Optional.empty() : Optional.of(new ModelCompaction("summary", 0));
+        }).build(), connectorContext()); AgentSession session = driver.open(context(Optional.of(saved), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("continue"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(session.start(command("compact"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(next.requests).hasSize(1);
+            assertThat(next.compactions).isEmpty();
+            assertThat(session.resumable()).isTrue();
+        }
+    }
+
+    @Test
+    void identicalCompactionAfterDefinitiveInferenceFailureIsAnIdempotentNoOp()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        client.compactor = request -> Optional.of(new ModelReplayState("fake-api", 2, "compact"));
+        client.script.add((request, events) -> completed(response("old answer", "x".repeat(8000), List.of(), ModelResponse.StopReason.COMPLETED)));
+        client.script.add((request, events) -> failed(new ModelClientException(ModelClientException.Kind.INVALID_REQUEST, "rejected", false)));
+        List<EngineObservation> seen = new CopyOnWriteArrayList<>();
+        var observer = extensionProvider("metrics", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, seen::add, () -> {}));
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).contextCompactor(request -> Optional.of(new ModelCompaction("summary", 0)))
+                .extension(observer, "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("first"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(session.start(command("rejected"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(readCheckpoint(session.reference()).replay().orElseThrow().payload()).isEqualTo("compact");
+            assertThat(done(session.start(command("retry"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(seen.stream().filter(EngineObservation.ContextCompacted.class::isInstance)).hasSize(1);
+            assertThat(client.compactions).hasSize(2);
+            assertThat(client.requests).hasSize(3);
+            assertThat(readCheckpoint(session.reference()).history().exchanges()).hasSize(2);
+        }
+    }
+
+    @Test
+    void compactionCommitsReplayBeforeInferenceAndPreservesFullHistoryAndInstructions()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        client.script.add((request, events) -> completed(response("old answer", "x".repeat(8000), List.of(), ModelResponse.StopReason.COMPLETED)));
+        List<EngineObservation> seen = new CopyOnWriteArrayList<>();
+        AtomicInteger proposals = new AtomicInteger();
+        client.compactor = request -> {
+            assertThat(request.history().exchanges()).hasSize(1);
+            assertThat(request.replay().payload()).hasSize(8000);
+            assertThat(request.compaction().summary()).isEqualTo("private summary");
+            return Optional.of(new ModelReplayState("fake-api", 2, "compact"));
+        };
+        ContextCompactor policy = request -> {
+            proposals.incrementAndGet();
+            assertThat(request.turnId()).isEqualTo("turn");
+            assertThat(request.model()).isEqualTo("model");
+            assertThat(request.deadline()).isEmpty();
+            assertThat(request.cancelled()).isFalse();
+            assertThat(request.replayCharacters()).isEqualTo(8000);
+            return Optional.of(new ModelCompaction("private summary", 0));
+        };
+        var observer = extensionProvider("metrics", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, seen::add, () -> {}));
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).contextCompactor(policy).extension(observer, "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(proposals).hasValue(0);
+            assertThat(done(session.start(command("original input"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(proposals).hasValue(0);
+            client.script.add((request, events) -> {
+                assertThat(request.history().orElseThrow().exchanges().getFirst().input()).isEqualTo(new ModelInput.UserMessage("original input", List.of()));
+                assertThat(request.replayState().orElseThrow().payload()).isEqualTo("compact");
+                assertThat(request.instructions()).isEqualTo("\nHost instructions");
+                assertThat(readCheckpoint(session.reference()).replay().orElseThrow().formatVersion()).isEqualTo(2);
+                return answer(request, events);
+            });
+            assertThat(done(session.start(command("next input"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(proposals).hasValue(1);
+            assertThat(client.requests).hasSize(2);
+            assertThat(readCheckpoint(session.reference()).history().exchanges()).hasSize(2);
+            assertThat(seen.stream().filter(EngineObservation.ContextCompacted.class::isInstance)).hasSize(1);
+            assertThat(seen.toString()).doesNotContain("private summary", "original input");
+        }
+        assertThatThrownBy(() -> config(new FakeClient()).contextCompactor(null)).isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void invalidOrUnsupportedCompactionKeepsOriginalReplayAndPerformsNoFreshInference()
+            throws Exception
+    {
+        for (String mode : List.of("policy-null", "policy-throw", "unsupported", "adapter-null", "foreign", "larger", "throw")) {
+            FakeClient client = new FakeClient();
+            client.script.add((request, events) -> completed(response("answer", "x".repeat(8000), List.of(), ModelResponse.StopReason.COMPLETED)));
+            AtomicInteger attempts = new AtomicInteger();
+            if (!mode.equals("unsupported")) {
+                client.compactor = request -> switch (mode) {
+                    case "adapter-null" -> null;
+                    case "foreign" -> Optional.of(new ModelReplayState("foreign", 1, "compact"));
+                    case "larger" -> Optional.of(new ModelReplayState("fake-api", 2, "x".repeat(8001)));
+                    case "throw" -> throw new IllegalStateException("private diagnostic");
+                    default -> Optional.of(new ModelReplayState("fake-api", 2, "compact"));
+                };
+            }
+            ContextCompactor policy = request -> {
+                if (attempts.getAndIncrement() > 0) {
+                    return Optional.empty();
+                }
+                if (mode.equals("policy-throw")) {
+                    throw new IllegalStateException("private diagnostic");
+                }
+                return mode.equals("policy-null") ? null : Optional.of(new ModelCompaction("summary", 0));
+            };
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).contextCompactor(policy).build(), connectorContext());
+                    AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+                assertThat(done(session.start(command("first"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                AgentTurnResult result = done(session.start(command("second")));
+                assertThat(result.state()).isEqualTo(AgentTurnResult.State.FAILED);
+                assertThat(result.toString()).doesNotContain("private diagnostic");
+                assertThat(client.requests).hasSize(1);
+                assertThat(readCheckpoint(session.reference()).replay().orElseThrow().payload()).isEqualTo("x".repeat(8000));
+                assertThat(session.resumable()).isTrue();
+                assertThat(done(session.start(command("retry"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(client.requests.getLast().replayState().orElseThrow().formatVersion()).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    void emptyCompactionProposalLeavesNativeReplayAndCallbacksUnchanged()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        AtomicInteger proposals = new AtomicInteger();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).contextCompactor(request -> {
+            proposals.incrementAndGet();
+            return Optional.empty();
+        }).build(), connectorContext()); AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("one"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(session.start(command("two"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(proposals).hasValue(1);
+            assertThat(client.compactions).isEmpty();
+            assertThat(client.requests.getLast().replayState().orElseThrow().formatVersion()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void noncooperativeCompactionRetainsWriterAndCapacityUntilCallbackReturns()
+            throws Exception
+    {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        FakeClient client = new FakeClient();
+        var settings = config(client).shutdownTimeout(Duration.ofMillis(30)).contextCompactor(request -> {
+            entered.countDown();
+            boolean stopped = false;
+            while (!stopped) {
+                try {
+                    release.await();
+                    stopped = true;
+                }
+                catch (InterruptedException ignored) {
+                    assertThat(request.cancelled()).isTrue();
+                }
+            }
+            return Optional.empty();
+        }).build();
+        ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+        AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {});
+        assertThat(done(session.start(command("first"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+        var before = readCheckpoint(session.reference()).replay().orElseThrow().payload();
+        RunningTurn turn = session.start(command("second"));
+        try {
+            assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThatThrownBy(driver::close).isInstanceOf(AgentUnavailableException.class);
+            assertThat(turn.completion().toCompletableFuture()).isNotDone();
+            assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), session.reference().providerValue(), true, settings))
+                    .isInstanceOf(AgentUnavailableException.class);
+            assertThat(client.requests).hasSize(1);
+        }
+        finally {
+            release.countDown();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            session.close();
+            driver.close();
+        }
+        assertThat(readCheckpoint(session.reference()).replay().orElseThrow().payload()).isEqualTo(before);
+    }
 
     @Test
     void oneBorrowedBudgetBoundsToolsAcrossIndependentDriversAndCancelledWaitersDoNotStart()
@@ -855,6 +1113,7 @@ class TestApiAgentDriver
             assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
         }
         FakeClient next = new FakeClient();
+        next.compactor = request -> Optional.of(new ModelReplayState("fake-api", 2, "c"));
         next.script.add((request, events) -> {
             assertThat(request.instructions()).contains("Rules old").doesNotContain("Rules new");
             assertThat(request.input()).isInstanceOf(ModelInput.ToolResults.class);
@@ -870,10 +1129,17 @@ class TestApiAgentDriver
         var observer = extensionProvider("recovery", (setting, scope) -> extension(request -> {
             throw new AssertionError("Interrupted tools must not be readmitted by a new policy");
         }, observations::add, () -> {}));
-        try (ApiAgentDriver driver = new ApiAgentDriver(config(next).promptProvider(provider, "new").extension(observer, "value").build(), connectorContext());
+        ContextCompactor compactor = request -> {
+            assertThat(request.history().exchanges()).hasSize(2);
+            assertThat(request.history().exchanges().getLast().toolCalls()).isEmpty();
+            return Optional.of(new ModelCompaction("summary", 0));
+        };
+        var settings = config(next).promptProvider(provider, "new").extension(observer, "value").contextCompactor(compactor).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
                 AgentSession session = driver.open(context(Optional.of(reference), List.of(tool), allow()), event -> {})) {
             assertThat(done(session.start(command("Continue"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
             assertThat(next.requests).hasSize(2);
+            assertThat(next.compactions).hasSize(1);
             assertThat(observations.stream().filter(EngineObservation.ModelCompleted.class::isInstance)).hasSize(2);
             assertThat(observations).noneMatch(event -> event instanceof EngineObservation.ToolDecision || event instanceof EngineObservation.ToolCompleted);
         }
@@ -2096,6 +2362,8 @@ class TestApiAgentDriver
         final List<ModelCall> calls = new CopyOnWriteArrayList<>();
         Optional<String> probed = Optional.empty();
         boolean closed;
+        final List<ModelCompactionRequest> compactions = new CopyOnWriteArrayList<>();
+        java.util.function.Function<ModelCompactionRequest, Optional<ModelReplayState>> compactor;
 
         @Override
         public ModelCapabilities capabilities(String model) { return new ModelCapabilities(true, Set.of("image/png"), Set.of("low", "high"), Set.of("standard")); }
@@ -2112,6 +2380,13 @@ class TestApiAgentDriver
 
         @Override
         public ProviderQuotaSnapshot quota() { return ProviderQuotaSnapshot.unavailable("Unavailable"); }
+
+        @Override
+        public Optional<ModelReplayState> compact(ModelCompactionRequest request)
+        {
+            compactions.add(request);
+            return compactor == null ? ModelClient.super.compact(request) : compactor.apply(request);
+        }
 
         @Override
         public ModelCall generate(ModelRequest request, ModelEventSink sink)

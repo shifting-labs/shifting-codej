@@ -13,6 +13,7 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
@@ -71,6 +72,7 @@ public final class ClaudeApi
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
         private int maximumParallelTools = 1;
+        private Optional<ContextCompactor> contextCompactor = Optional.empty();
 
         private Builder() {}
 
@@ -256,6 +258,18 @@ public final class ClaudeApi
         }
 
         /**
+         * Borrows a bounded local summary policy. Compaction is opt-in and preserves durable history.
+         *
+         * @param compactor thread-safe host service; it performs no inference or tool effects
+         * @return this builder
+         */
+        public Builder contextCompactor(ContextCompactor compactor)
+        {
+            contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -273,6 +287,7 @@ public final class ClaudeApi
             extensions.forEach(settings::extension);
             toolExecutionBudget.ifPresent(settings::toolExecutionBudget);
             settings.maximumParallelTools(maximumParallelTools);
+            contextCompactor.ifPresent(settings::contextCompactor);
             return DriverAgent.claudeApi(settings.build(), state, profile);
         }
     }

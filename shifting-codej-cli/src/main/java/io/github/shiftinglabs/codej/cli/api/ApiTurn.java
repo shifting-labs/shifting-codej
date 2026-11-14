@@ -25,12 +25,16 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderTurnRef;
 import io.github.shiftinglabs.codej.cli.driver.ProviderUsageSample;
 import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactionContext;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
 import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicyContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContext;
@@ -171,6 +175,7 @@ final class ApiTurn
                 // Reconcile an interrupted batch before adding fresh user input to the provider's transcript.
                 runLoop(results(true), saved.setup().orElseThrow());
             }
+            compact();
             ApiPromptSnapshot prompt = prompt();
             String answer = runLoop(prompt.input(), requestSetup(prompt.instructions()));
             checkStop();
@@ -243,6 +248,75 @@ final class ApiTurn
     private ApiRequestSetup requestSetup(String instructions)
     {
         return new ApiRequestSetup(model, instructions, effort, command.serviceTier(), session.tools.definitions(), Optional.of(session.tools.contracts()));
+    }
+
+    private void compact()
+    {
+        if (config.contextCompactor.isEmpty() || session.store.state().replay().isEmpty()) {
+            return;
+        }
+        ApiCheckpoint before = session.store.state();
+        if (before.phase() != ApiCheckpoint.Phase.READY) {
+            throw new IllegalArgumentException("Context compaction requires complete settled history");
+        }
+        ContextCompactionContext context = new ContextCompactionContext()
+        {
+            @Override
+            public String turnId() { return command.turnId(); }
+
+            @Override
+            public String model() { return model; }
+
+            @Override
+            public ModelHistory history() { return before.history(); }
+
+            @Override
+            public int replayCharacters() { return before.replay().orElseThrow().payload().length(); }
+
+            @Override
+            public Optional<Instant> deadline()
+            {
+                return command.maximumRuntime().isZero() ? Optional.empty() : Optional.of(started.plus(command.maximumRuntime()));
+            }
+
+            @Override
+            public boolean cancelled() { return stopping.get() != null; }
+        };
+        ModelCompaction proposal;
+        ModelReplayState replacement;
+        try {
+            interruptible = true;
+            checkStop();
+            Optional<ModelCompaction> offered = requireNonNull(config.contextCompactor.orElseThrow().propose(context), "compactor returned null");
+            checkStop();
+            if (offered.isEmpty()) {
+                return;
+            }
+            proposal = offered.orElseThrow();
+            if (proposal.summary().length() > config.maximumTextChars) {
+                throw new IllegalArgumentException("Compaction summary exceeds its text budget");
+            }
+            ModelReplayState original = before.replay().orElseThrow();
+            ModelCompactionRequest request = new ModelCompactionRequest(model, before.history(), original, proposal, context.deadline());
+            replacement = requireNonNull(session.engine.client.compact(request), "adapter returned null").orElseThrow(() ->
+                    new IllegalArgumentException("Model adapter does not support context compaction"));
+            checkStop();
+            if (replacement.providerId().equals(original.providerId()) && replacement.formatVersion() == original.formatVersion()
+                    && replacement.payload().equals(original.payload())) {
+                return;
+            }
+            if (!replacement.providerId().equals(original.providerId()) || replacement.payload().length() >= original.payload().length()
+                    || replacement.payload().length() > config.maximumCheckpointBytes) {
+                throw new IllegalArgumentException("Invalid or non-reducing compacted replay");
+            }
+            save(before.withReplay(replacement));
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
+        observe(() -> new EngineObservation.ContextCompacted(observedTurnId(), before.history().exchanges().size() - proposal.retainExchanges(), proposal.retainExchanges()));
+        checkStop();
     }
 
     private ApiPromptSnapshot prompt()

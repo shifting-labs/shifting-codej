@@ -117,6 +117,8 @@ format-1 read migration. The version-1 layout described above records the initia
 - [x] Evaluate bounded parallel tools and implement a shared execution-budget prerequisite; see
       [tool scheduling](tool-scheduling.md).
 - [x] Implement opt-in asynchronous batch overlap with explicit eligibility, atomic checkpoint updates and draining cancellation.
+- [x] Add opt-in provider-owned [context compaction](context-compaction.md), preserving full durable
+      conversation history and tool chains without hidden inference calls.
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event
       mapping and focused connector contract tests before any default-route change.
 

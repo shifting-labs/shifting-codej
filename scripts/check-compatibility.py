@@ -178,6 +178,16 @@ def verify(args, report):
             (output / "tool-spi-consumer.txt").write_text(result)
             report["passed"].append("Tool SPI: interface-valued parameters, provider installation, typed results and verified shutdown; JDK + jar only")
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_compaction = PREFIX + "cli/spi/context/ContextCompactor.class" in artifact.namelist()
+        if has_compaction:
+            context_fixture = Path(__file__).parent / "compatibility" / "ContextCompactionConsumer.java"
+            run([jdk_tool("javac"), "--release", "25", "-cp", str(candidate), "-d", str(classes), str(context_fixture)])
+            result = run([jdk_tool("java"), "-cp", os.pathsep.join((str(classes), str(candidate))),
+                          "ContextCompactionConsumer", str(Path(folder) / "context-api")])
+            (output / "context-compaction-consumer.txt").write_text(result)
+            report["passed"].append("Context compaction: local Claude/DeepSeek replay rewrite, full audit history and durable resume; JDK + jar only")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

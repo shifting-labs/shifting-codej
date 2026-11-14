@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
@@ -34,6 +35,20 @@ class TestDeepSeekApiConnector
         extends AbstractTestApiConnector<DeepSeekApiConfig>
 {
     private DeepSeekHttpFixture http;
+
+    @Test
+    void contextCompactorIsBorrowedOptionalAndCapturedWithoutCallingIt()
+    {
+        ContextCompactor firstPolicy = context -> { throw new AssertionError("No eager compaction"); };
+        ContextCompactor secondPolicy = context -> java.util.Optional.empty();
+        var builder = DeepSeekApiConfig.builder("model", () -> "key");
+        assertThat(builder.build().contextCompactor).isEmpty();
+        var first = builder.contextCompactor(firstPolicy).build();
+        builder.contextCompactor(secondPolicy);
+        assertThat(first.contextCompactor).containsSame(firstPolicy);
+        assertThat(builder.build().contextCompactor).containsSame(secondPolicy);
+        assertThatThrownBy(() -> builder.contextCompactor(null)).isInstanceOf(NullPointerException.class);
+    }
 
     @Test
     void executionBudgetsAreBorrowedOptionalAndSnapshotBuilderState()

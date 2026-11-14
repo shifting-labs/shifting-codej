@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.CodingTools;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
@@ -49,6 +50,7 @@ public final class DeepSeekApiConfig
     final List<EngineExtensionBinding> extensions;
     final Optional<ToolExecutionBudget> toolExecutionBudget;
     final int maximumParallelTools;
+    final Optional<ContextCompactor> contextCompactor;
 
     private DeepSeekApiConfig(Builder builder)
     {
@@ -64,6 +66,7 @@ public final class DeepSeekApiConfig
         extensions = EngineExtensionBinding.snapshot(builder.extensions);
         toolExecutionBudget = builder.toolExecutionBudget;
         maximumParallelTools = builder.maximumParallelTools;
+        contextCompactor = builder.contextCompactor;
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
@@ -83,6 +86,7 @@ public final class DeepSeekApiConfig
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
         private int maximumParallelTools = 1;
+        private Optional<ContextCompactor> contextCompactor = Optional.empty();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -171,6 +175,13 @@ public final class DeepSeekApiConfig
         {
             checkArgument(value >= 1 && value <= 64, "parallel tool window must be between 1 and 64");
             maximumParallelTools = value;
+            return this;
+        }
+
+        /** Borrows an opt-in summary policy; no hidden inference or tool work is permitted. */
+        public Builder contextCompactor(ContextCompactor compactor)
+        {
+            contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
             return this;
         }
 

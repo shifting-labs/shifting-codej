@@ -17,6 +17,7 @@ import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
@@ -67,6 +68,7 @@ public final class ApiEngineConfig
     final List<EngineExtensionBinding> extensions;
     final Optional<ToolExecutionBudget> toolExecutionBudget;
     final int maximumParallelTools;
+    final Optional<ContextCompactor> contextCompactor;
 
     private ApiEngineConfig(Builder b)
     {
@@ -95,6 +97,7 @@ public final class ApiEngineConfig
         extensions = EngineExtensionBinding.snapshot(b.extensions);
         toolExecutionBudget = b.toolExecutionBudget;
         maximumParallelTools = b.maximumParallelTools;
+        contextCompactor = b.contextCompactor;
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
@@ -131,6 +134,7 @@ public final class ApiEngineConfig
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
         private int maximumParallelTools = 1;
+        private Optional<ContextCompactor> contextCompactor = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -297,6 +301,13 @@ public final class ApiEngineConfig
         {
             checkArgument(value >= 1 && value <= 64, "parallel tool window must be between 1 and 64");
             maximumParallelTools = value;
+            return this;
+        }
+
+        /** Borrows an opt-in summary policy; no hidden inference or tool work is permitted. */
+        public Builder contextCompactor(ContextCompactor compactor)
+        {
+            contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
             return this;
         }
 

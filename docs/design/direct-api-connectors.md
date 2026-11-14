@@ -33,6 +33,10 @@ execution/resource cleanup confirms release. Explicit `maximumParallelTools` opt
 batch overlap for declared safe pure/read tools, with exclusive effect barriers and provider-order
 results. Defaults remain serial, and the scheduler introduces no additional worker pool.
 
+The [context compaction plan](context-compaction.md) adds an optional borrowed `ContextCompactor`
+and provider-owned local replay rewrites. Full canonical history, execution receipts and journal
+remain durable; summaries cannot change instructions, tools, approvals or permissions.
+
 ## Boundaries
 
 Keep the existing `Agent`, `Session`, `Turn`, `AgentConnector`, `ConnectorDriver`, `AgentDriver`,
@@ -146,8 +150,9 @@ Visible events are not the authoritative transcript. For Claude, tool workflows 
 the previous assistant content, including thinking blocks and signatures, unchanged. Checkpoint
 formats are independently versioned from the existing public session-reference contract.
 
-Context-window limits must produce an explicit outcome initially. Later compaction must preserve
-complete tool-call/result groups and required provider blocks; never silently truncate history.
+Context-window limits produce an explicit outcome. Opt-in [context compaction](context-compaction.md)
+preserves complete tool-call/result groups and retained provider blocks; full canonical history
+remains available rather than being silently truncated.
 
 ## Tool loop, permissions and recovery
 
@@ -296,7 +301,8 @@ Observed input/output token usage is counted once per model response and emitted
 through existing events. It is an observed budget, not a pre-submission guarantee about provider
 input tokens or billing. Output tokens, request count, tool count, text, attachments, tool output
 and checkpoint size have separate bounds. The checkpoint-size limit stops growth explicitly;
-compaction and retention remain separate follow-ups. No hidden replay data is sent through events.
+opt-in context compaction reduces active provider replay, while full audit retention remains a
+separate follow-up. No hidden replay data is sent through events.
 
 ### Step 3: Direct Claude API
 
@@ -346,7 +352,8 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 - [x] Run affected Bytequay tests using the unchanged downstream API/dependency conventions.
 - [x] Add another direct API provider through the same contracts to validate engine reuse.
 - [x] Add opt-in shared file/search/patch and contained single-process shell tools with permission tests.
-- [ ] Evaluate optional compaction, provider-hosted tools and separate connector artifacts as needed.
+- [x] Add opt-in local [context compaction](context-compaction.md) with full durable history preserved.
+- [ ] Evaluate provider-hosted tools and separate connector artifacts as needed.
 
 ## Second direct provider: DeepSeek
 

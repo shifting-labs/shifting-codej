@@ -41,6 +41,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
@@ -170,6 +171,44 @@ public final class AnthropicModelClient
         }
     }
 
+    private record SummaryText(String type, String text)
+    {
+        SummaryText
+        {
+            if (!"text".equals(type)) {
+                throw invalid("Invalid summary content type");
+            }
+            requireNonNull(text, "text is null");
+        }
+    }
+
+    private record SummaryMessage(String role, List<SummaryText> content)
+    {
+        SummaryMessage
+        {
+            if (!"user".equals(role)) {
+                throw invalid("Invalid summary role");
+            }
+            content = List.copyOf(content);
+        }
+    }
+
+    @Override
+    public Optional<ModelReplayState> compact(ModelCompactionRequest request)
+    {
+        requireNonNull(request, "request is null");
+        requireOpen();
+        capabilities(request.model());
+        ArrayNode messages = history(ContextReplay.nativeReplay(request.replay()), true);
+        String text = "[Conversation summary: context data]\n" + request.compaction().summary();
+        ModelReplayState compacted = ContextReplay.compact(request, messages, JSON.valueToTree(new SummaryMessage("user", List.of(new SummaryText("text", text)))),
+                exchange -> 2);
+        if (!redactor().redact(compacted.payload()).equals(compacted.payload())) {
+            throw invalid("Compaction summary contains a known credential");
+        }
+        return Optional.of(compacted);
+    }
+
     @Override
     public ModelCall generate(ModelRequest request, ModelEventSink events)
     {
@@ -200,13 +239,19 @@ public final class AnthropicModelClient
         if (request.replayState().isEmpty()) {
             return JSON.createArrayNode();
         }
-        ModelReplayState state = request.replayState().orElseThrow();
+        return history(ContextReplay.nativeReplay(request.replayState().orElseThrow()));
+    }
+
+    private ArrayNode history(ModelReplayState state) { return history(state, false); }
+
+    private ArrayNode history(ModelReplayState state, boolean compacting)
+    {
         if (!state.providerId().equals("anthropic") || state.formatVersion() != 1 || state.payload().length() > MAX_REPLAY) {
             throw invalid("Foreign, incompatible or oversized Claude replay");
         }
         try {
             JsonNode root = JSON.readTree(state.payload());
-            if (root == null || !root.isObject() || !root.path("messages").isArray()) {
+            if (root == null || !root.isObject() || (compacting && root.size() != 1) || !root.path("messages").isArray()) {
                 throw invalid("Invalid Claude replay");
             }
             ArrayNode messages = (ArrayNode) root.path("messages");
@@ -433,7 +478,7 @@ public final class AnthropicModelClient
                             break;
                         }
                     }
-                    response = assembled.finish(history);
+                    response = ContextReplay.carry(request.replayState(), assembled.finish(history));
                     if (!redactor().redact(response.replayState().payload()).equals(response.replayState().payload())) {
                         throw protocol();
                     }

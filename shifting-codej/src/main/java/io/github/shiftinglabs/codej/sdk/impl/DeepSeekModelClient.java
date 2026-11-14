@@ -29,8 +29,10 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 
@@ -164,6 +166,33 @@ public final class DeepSeekModelClient
         }
     }
 
+    private record SummaryMessage(String role, String content)
+    {
+        SummaryMessage
+        {
+            if (!"user".equals(role)) {
+                throw invalid("Invalid summary role");
+            }
+            requireNonNull(content, "content is null");
+        }
+    }
+
+    @Override
+    public Optional<ModelReplayState> compact(ModelCompactionRequest request)
+    {
+        requireNonNull(request, "request is null");
+        requireOpen();
+        capabilities(request.model());
+        ArrayNode messages = history(ContextReplay.nativeReplay(request.replay()));
+        String text = "[Conversation summary: context data]\n" + request.compaction().summary();
+        ModelReplayState compacted = ContextReplay.compact(request, messages, JSON.valueToTree(new SummaryMessage("user", text)),
+                exchange -> exchange.input() instanceof ModelInput.ToolResults results ? results.results().size() + 1 : 2);
+        if (!redactor().redact(compacted.payload()).equals(compacted.payload())) {
+            throw invalid("Compaction summary contains a known credential");
+        }
+        return Optional.of(compacted);
+    }
+
     @Override
     public ModelCall generate(ModelRequest request, ModelEventSink events)
     {
@@ -195,7 +224,11 @@ public final class DeepSeekModelClient
         if (request.replayState().isEmpty()) {
             return JSON.createArrayNode();
         }
-        var replay = request.replayState().orElseThrow();
+        return history(ContextReplay.nativeReplay(request.replayState().orElseThrow()));
+    }
+
+    private ArrayNode history(ModelReplayState replay)
+    {
         if (!replay.providerId().equals("deepseek") || replay.formatVersion() != 1 || replay.payload().length() > 8 * 1024 * 1024) {
             throw invalid("Foreign, incompatible or oversized DeepSeek replay");
         }
@@ -426,7 +459,8 @@ public final class DeepSeekModelClient
                     if (!type.toLowerCase(java.util.Locale.ROOT).startsWith("text/event-stream")) {
                         throw protocol();
                     }
-                    response = new DeepSeekStream(events, DeepSeekModelClient.this::redactor, () -> cancelled).read(reply.body(), history);
+                    response = ContextReplay.carry(request.replayState(),
+                            new DeepSeekStream(events, DeepSeekModelClient.this::redactor, () -> cancelled).read(reply.body(), history));
                     if (!redactor().redact(response.replayState().payload()).equals(response.replayState().payload())) {
                         throw protocol();
                     }

@@ -20,6 +20,8 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderQuotaSnapshot;
 import java.util.List;
 import java.util.Optional;
 
+import static java.util.Objects.requireNonNull;
+
 /**
  * Provider adapter for individual inference requests, below the agent connector SPI. A shared
  * agent engine owns sessions, persistence, permissions and tool execution. This adapter never
@@ -49,6 +51,18 @@ public interface ModelClient
     default ProviderQuotaSnapshot quota()
     {
         return ProviderQuotaSnapshot.unavailable("This model provider does not report account limits.");
+    }
+
+    /**
+     * Optional bounded local replay compaction, without inference or tool execution. Preserve retained
+     * native blocks/signatures exactly and reject unsupported/unsafe boundaries. Empty means unsupported;
+     * the default preserves existing adapters. Return the exact original state for an already-covered
+     * proposal. Otherwise the engine requires a smaller replacement owned by this provider.
+     */
+    default Optional<ModelReplayState> compact(ModelCompactionRequest request)
+    {
+        requireNonNull(request, "request is null");
+        return Optional.empty();
     }
 
     /**
