@@ -26,8 +26,10 @@ import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
 import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
+import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolFailure;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolOutcome;
@@ -61,10 +63,13 @@ final class ApiSession
     ToolDispatcher dispatcher;
     Optional<BuiltinTools> builtins = Optional.empty();
     private final SessionToolSets toolSets = new SessionToolSets();
+    final SessionPromptSources prompts = new SessionPromptSources();
     final ToolRequirements grants;
     private ApiTurn running;
     private boolean closing;
     private boolean released;
+    private boolean initializing = true;
+    private boolean releasing;
     volatile boolean damaged;
 
     ApiSession(ApiEngine engine, AgentSessionContext context, AgentEventSink events, ApiSessionRepository store, AgentSessionRef reference)
@@ -115,12 +120,12 @@ final class ApiSession
 
     void initialize(ToolProviderPlan plan)
     {
-        ApiCheckpoint before = store.state();
-        boolean resources = engine.coding(context) || !plan.families().isEmpty();
-        if (resources) {
-            store.save(before.withPhase(ApiCheckpoint.Phase.BLOCKED));
-        }
         try {
+            ApiCheckpoint before = store.state();
+            boolean resources = engine.coding(context) || !plan.families().isEmpty() || !config.promptProviders.isEmpty();
+            if (resources) {
+                store.save(before.withPhase(ApiCheckpoint.Phase.BLOCKED));
+            }
             if (engine.coding(context)) {
                 builtins = Optional.of(new BuiltinTools(context.worktree(), config.codingTools.orElseThrow(),
                         context.access() == SessionAccess.FULL, List.of(engine.profile, context.runtimeDirectory()), engine.supervisor, reference.providerValue(),
@@ -134,6 +139,8 @@ final class ApiSession
             registrations.addAll(toolSets.open(plan, assembly()));
             tools = ApiToolRegistry.registered(registrations);
             dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
+            prompts.open(config.promptProviders, promptContext());
+            engine.requireOpen();
             if (builtins.isPresent() && before.recoverable()) {
                 builtins.orElseThrow().initialize();
             }
@@ -145,6 +152,32 @@ final class ApiSession
         catch (IOException | RuntimeException failure) {
             throw new AgentUnavailableException("API tool resources could not be initialized; required backends must enforce containment");
         }
+        finally {
+            synchronized (this) {
+                initializing = false;
+            }
+        }
+    }
+
+    private PromptSessionContext promptContext()
+    {
+        return new PromptSessionContext()
+        {
+            @Override
+            public AgentSessionRef reference() { return reference; }
+
+            @Override
+            public ConnectorIdentity identity() { return engine.identity(); }
+
+            @Override
+            public Path worktree() { return context.worktree(); }
+
+            @Override
+            public SessionAccess access() { return context.access(); }
+
+            @Override
+            public Duration shutdownTimeout() { return config.shutdownTimeout; }
+        };
     }
 
     private ToolSetContext assembly()
@@ -230,19 +263,27 @@ final class ApiSession
     private synchronized void release()
     {
         if (!released) {
+            if (initializing || releasing) {
+                throw new AgentUnavailableException("API session resource release cannot be confirmed during initialization or recursive cleanup");
+            }
+            releasing = true;
             try {
                 dispatcher.verifyStopped();
+                prompts.close();
                 toolSets.close();
                 if (builtins.isPresent()) {
                     builtins.orElseThrow().close();
                 }
+                store.close();
+                released = true;
+                engine.released(this);
             }
             catch (IOException | RuntimeException failure) {
                 throw new AgentUnavailableException("Coding tool resources could not be released; workspace ownership is retained");
             }
-            store.close();
-            released = true;
-            engine.released(this);
+            finally {
+                releasing = false;
+            }
         }
     }
 

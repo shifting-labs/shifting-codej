@@ -17,6 +17,11 @@ checkpoints use format 2; format 1 migrates in memory and retains native replay 
 receipts. Public session-reference versions remain unchanged, and incomplete legacy prefixes are
 explicit rather than reconstructed from opaque provider data.
 
+The [scoped prompt/context contributor plan](prompt-contributors.md) adds explicit `PromptProvider`
+installation through engine and API facade builders. Each underlying driver session owns its sources;
+new public turns capture ordered instructions and user-role context without changing permissions,
+tool definitions, pending-batch setup, checkpoint version or native replay ownership.
+
 ## Boundaries
 
 Keep the existing `Agent`, `Session`, `Turn`, `AgentConnector`, `ConnectorDriver`, `AgentDriver`,

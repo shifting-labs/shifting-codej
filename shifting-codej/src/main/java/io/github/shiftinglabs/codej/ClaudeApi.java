@@ -13,6 +13,8 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.impl.ClaudeApiConfig;
@@ -62,6 +64,7 @@ public final class ClaudeApi
         private Optional<Executor> callbacks = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
+        private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
 
         private Builder() {}
 
@@ -190,6 +193,20 @@ public final class ClaudeApi
         }
 
         /**
+         * Installs session-owned prompt/context contributors in the shared API engine.
+         *
+         * @param <C> provider configuration type
+         * @param provider thread-safe factory; each session owns its returned contributor
+         * @param configuration immutable provider configuration
+         * @return this builder
+         */
+        public <C> Builder promptProvider(PromptProvider<C> provider, C configuration)
+        {
+            promptProviders.add(PromptProviderBinding.of(provider, configuration));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -203,6 +220,7 @@ public final class ClaudeApi
             callbacks.ifPresent(settings::callbackExecutor);
             codingTools.ifPresent(settings::codingTools);
             toolProviders.forEach(settings::toolProvider);
+            promptProviders.forEach(settings::promptProvider);
             return DriverAgent.claudeApi(settings.build(), state, profile);
         }
     }

@@ -148,3 +148,7 @@ That model client also consumes the additive `ModelRequest.history()` SPI: it ve
 empty prefix on the first request, then validates ordered tool continuation against the settled
 assistant exchange and its provider/model provenance. Native replay remains separate from this
 provider-neutral prefix. This example runs from the shaded artifact with only the JDK on its classpath.
+
+The configured engine example also installs a session-owned `PromptProvider`. The model client
+checks that its instruction section reaches the prompt and its contextual section reaches user
+input, while tool continuation remains a typed result batch. The example starts no extra executor.

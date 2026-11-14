@@ -18,6 +18,8 @@ import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 
@@ -58,6 +60,7 @@ public final class ApiEngineConfig
     final Optional<Executor> toolExecutor;
     final Optional<CodingTools> codingTools;
     final List<ToolProviderBinding> toolProviders;
+    final List<PromptProviderBinding> promptProviders;
 
     private ApiEngineConfig(Builder b)
     {
@@ -82,6 +85,7 @@ public final class ApiEngineConfig
         toolExecutor = b.toolExecutor;
         codingTools = b.codingTools;
         toolProviders = List.copyOf(b.toolProviders);
+        promptProviders = PromptProviderBinding.snapshot(b.promptProviders);
     }
 
     SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
@@ -113,6 +117,7 @@ public final class ApiEngineConfig
         private Optional<Executor> toolExecutor = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
+        private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -240,6 +245,18 @@ public final class ApiEngineConfig
         public Builder toolProvider(ToolProviderBinding binding)
         {
             toolProviders.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Installs a fresh scoped contributor for every session, including text-only sessions. */
+        public <C> Builder promptProvider(PromptProvider<C> provider, C configuration)
+        {
+            return promptProvider(PromptProviderBinding.of(provider, configuration));
+        }
+
+        public Builder promptProvider(PromptProviderBinding binding)
+        {
+            promptProviders.add(requireNonNull(binding, "binding is null"));
             return this;
         }
 

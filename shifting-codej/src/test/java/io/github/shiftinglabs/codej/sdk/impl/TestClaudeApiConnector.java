@@ -14,10 +14,12 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.testing.AbstractTestApiConnector;
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredPrompts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +31,21 @@ class TestClaudeApiConnector
         extends AbstractTestApiConnector<ClaudeApiConfig>
 {
     private AnthropicHttpFixture http;
+
+    @Test
+    void promptBindingsAreTypedSnapshotBuilderStateAndRejectDuplicateIds()
+    {
+        var provider = new ConfiguredPrompts("project");
+        var binding = PromptProviderBinding.of(provider, "first");
+        var builder = ClaudeApiConfig.builder("model", () -> "key").promptProvider(binding);
+        var first = builder.build();
+        builder.promptProvider(new ConfiguredPrompts("second"), "next");
+        assertThat(first.promptProviders).containsExactly(binding);
+        assertThat(builder.build().promptProviders).hasSize(2);
+        assertThat(provider.opened).hasValue(0);
+        assertThatThrownBy(() -> builder.promptProvider((PromptProviderBinding) null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder.promptProvider(provider, "duplicate").build()).isInstanceOf(IllegalArgumentException.class);
+    }
 
     @Test
     void providerConfigurationBindingsAreExplicitAndSnapshotBuilderState()

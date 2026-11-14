@@ -14,6 +14,8 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.CodingTools;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 
@@ -40,6 +42,7 @@ public final class ClaudeApiConfig
     final Optional<Executor> callbacks;
     final Optional<CodingTools> codingTools;
     final List<ToolProviderBinding> toolProviders;
+    final List<PromptProviderBinding> promptProviders;
 
     private ClaudeApiConfig(Builder builder)
     {
@@ -51,6 +54,7 @@ public final class ClaudeApiConfig
         callbacks = builder.callbacks;
         codingTools = builder.codingTools;
         toolProviders = List.copyOf(builder.toolProviders);
+        promptProviders = PromptProviderBinding.snapshot(builder.promptProviders);
     }
 
     public static Builder builder(String model, Supplier<String> key) { return new Builder(model, key); }
@@ -65,6 +69,7 @@ public final class ClaudeApiConfig
         private Optional<Executor> callbacks = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
+        private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -114,6 +119,18 @@ public final class ClaudeApiConfig
         public Builder toolProvider(ToolProviderBinding binding)
         {
             toolProviders.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Installs a fresh scoped contributor for every session, including text-only sessions. */
+        public <C> Builder promptProvider(PromptProvider<C> provider, C configuration)
+        {
+            return promptProvider(PromptProviderBinding.of(provider, configuration));
+        }
+
+        public Builder promptProvider(PromptProviderBinding binding)
+        {
+            promptProviders.add(requireNonNull(binding, "binding is null"));
             return this;
         }
 

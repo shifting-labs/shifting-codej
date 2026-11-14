@@ -27,9 +27,11 @@ import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolRequirements;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolResource;
 
@@ -161,7 +163,8 @@ final class ApiTurn
                 // Reconcile an interrupted batch before adding fresh user input to the provider's transcript.
                 runLoop(results(true), saved.setup().orElseThrow());
             }
-            String answer = runLoop(input, requestSetup());
+            ApiPromptSnapshot prompt = prompt();
+            String answer = runLoop(prompt.input(), requestSetup(prompt.instructions()));
             checkStop();
             emit(new ProviderAgentEvent.Lifecycle(Optional.empty(), ProviderAgentEvent.LifecyclePhase.TURN_COMPLETED, "API turn completed", source("turn")));
             terminal = terminal(AgentTurnResult.State.COMPLETED, Optional.of(answer).filter(value -> !value.isBlank()), Optional.empty(), Optional.empty(), false);
@@ -204,10 +207,51 @@ final class ApiTurn
         return new AgentTurnResult(state, answer, reason, Duration.ofNanos(System.nanoTime() - startedNanos), true, kind, transientFailure);
     }
 
-    private ApiRequestSetup requestSetup()
+    private ApiRequestSetup requestSetup(String instructions)
     {
-        String instructions = session.engine.prompts.assemble(session.context, command, model, effort, session.tools);
         return new ApiRequestSetup(model, instructions, effort, command.serviceTier(), session.tools.definitions(), Optional.of(session.tools.contracts()));
+    }
+
+    private ApiPromptSnapshot prompt()
+    {
+        ModelHistory history = session.store.state().history();
+        Optional<Instant> deadline = command.maximumRuntime().isZero() ? Optional.empty() : Optional.of(started.plus(command.maximumRuntime()));
+        PromptContext context = new PromptContext()
+        {
+            @Override
+            public String turnId() { return command.turnId(); }
+
+            @Override
+            public String model() { return model; }
+
+            @Override
+            public Optional<String> effort() { return effort; }
+
+            @Override
+            public ModelInput.UserMessage input() { return input; }
+
+            @Override
+            public ModelHistory history() { return history; }
+
+            @Override
+            public Optional<Instant> deadline() { return deadline; }
+
+            @Override
+            public boolean cancelled() { return stopping.get() != null; }
+        };
+        ApiPromptSnapshot snapshot;
+        try {
+            checkStop();
+            interruptible = true;
+            String instructions = session.engine.prompts.assemble(session.context, command, model, effort, session.tools);
+            snapshot = session.prompts.capture(instructions, context, config.maximumTextChars, this::checkStop);
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
+        checkStop();
+        return snapshot;
     }
 
     private String runLoop(ModelInput initial, ApiRequestSetup setup)

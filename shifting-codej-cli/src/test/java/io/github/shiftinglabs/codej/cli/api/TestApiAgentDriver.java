@@ -56,6 +56,13 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContext;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContribution;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContributor;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSection;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -66,6 +73,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -79,6 +87,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -88,6 +97,383 @@ class TestApiAgentDriver
 {
     @TempDir
     Path directory;
+
+    @Test
+    void promptSourcesAreSessionOwnedAndCaptureOncePerTurnAcrossToolContinuation()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        AtomicInteger opened = new AtomicInteger();
+        AtomicInteger closed = new AtomicInteger();
+        AtomicInteger captured = new AtomicInteger();
+        AtomicInteger tools = new AtomicInteger();
+        PromptProvider<String> provider = promptProvider("workspace", (setting, scope) -> {
+            opened.incrementAndGet();
+            assertThat(scope.identity()).isEqualTo(new ConnectorIdentity("fake-api", "work"));
+            assertThat(scope.worktree()).isEqualTo(directory);
+            assertThat(scope.reference().laneId()).isEqualTo(new AgentLaneId("fake-api-work"));
+            assertThat(scope.access()).isIn(SessionAccess.TEXT_ONLY, SessionAccess.TOOLS_ONLY);
+            assertThat(scope.shutdownTimeout()).isEqualTo(Duration.ofSeconds(2));
+            String identity = scope.reference().providerValue();
+            AtomicInteger local = new AtomicInteger();
+            return promptContributor(request -> {
+                captured.incrementAndGet();
+                int version = local.incrementAndGet();
+                assertThat(request.turnId()).isEqualTo("turn");
+                assertThat(request.model()).isEqualTo("model");
+                assertThat(request.history().complete()).isTrue();
+                assertThat(request.cancelled()).isFalse();
+                if (version == 1 && request.input().text().equals("Hello")) {
+                    assertThat(request.effort()).contains("high");
+                    assertThat(request.deadline()).isPresent();
+                }
+                return contribution("Rules " + identity + "/" + version, setting + " " + identity + "/" + version);
+            }, closed::incrementAndGet);
+        });
+        Tool lookup = Tool.withSchema("lookup", "Lookup", "{}", args -> {
+            tools.incrementAndGet();
+            return "Found";
+        });
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).promptProvider(provider, "Facts").build(), connectorContext());
+                AgentSession first = driver.open(context(Optional.empty(), List.of(lookup), allow()), event -> {});
+                AgentSession second = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(opened).hasValue(2);
+            assertThat(done(first.start(new AgentTurnCommand("turn", "Hello", List.of(), Duration.ofSeconds(2), Optional.empty(), Optional.of("high")))).state())
+                    .isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(captured).hasValue(1);
+            assertThat(client.requests.get(0).instructions()).isEqualTo(client.requests.get(1).instructions());
+            assertThat(client.requests.get(1).input()).isInstanceOf(ModelInput.ToolResults.class);
+            assertThat(done(second.start(command("Other"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(first.start(command("Again"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            String firstId = first.reference().providerValue();
+            String secondId = second.reference().providerValue();
+            assertThat(((ModelInput.UserMessage) client.requests.get(0).input()).text()).contains(firstId + "/1").endsWith("Hello");
+            assertThat(((ModelInput.UserMessage) client.requests.get(2).input()).text()).contains(secondId + "/1").doesNotContain(firstId);
+            assertThat(((ModelInput.UserMessage) client.requests.get(3).input()).text()).contains(firstId + "/2").doesNotContain(secondId);
+            assertThat(client.requests.get(3).history().orElseThrow().exchanges().getFirst().input()).isEqualTo(client.requests.getFirst().input());
+            assertThat(tools).hasValue(1);
+            assertThat(captured).hasValue(3);
+        }
+        assertThat(closed).hasValue(2);
+    }
+
+    @Test
+    void promptProviderOrderAndNamespacedSectionsAreDeterministicAndEmptySourcesKeepLegacyBytes()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        var first = promptProvider("one", (setting, scope) -> request -> contribution("Rules1", "Facts1"));
+        var second = promptProvider("two", (setting, scope) -> request -> contribution("Rules2", "Facts2"));
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).promptProvider(first, "one")
+                .promptProvider(PromptProviderBinding.of(second, "two")).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(client.requests.getFirst().instructions()).isEqualTo("\nHost instructions\n\n[Instruction one/rules]\nRules1\n\n[Instruction two/rules]\nRules2");
+            assertThat(((ModelInput.UserMessage) client.requests.getFirst().input()).text())
+                    .isEqualTo("[Context one/facts]\nFacts1\n[/Context]\n\n[Context two/facts]\nFacts2\n[/Context]\n\nHello");
+        }
+        FakeClient empty = new FakeClient();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(empty)
+                .promptProvider(promptProvider("empty", (setting, scope) -> request -> PromptContribution.empty()), "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(empty.requests.getFirst().instructions()).isEqualTo("\nHost instructions");
+            assertThat(empty.requests.getFirst().input()).isEqualTo(new ModelInput.UserMessage("Hello", List.of()));
+        }
+    }
+
+    @Test
+    void invalidPromptAssemblyAndAggregateBudgetsFailBeforeInferenceWithoutDamagingHistory()
+            throws Exception
+    {
+        List<java.util.function.Function<PromptContext, PromptContribution>> bad = List.of(
+                request -> null,
+                request -> { throw new IllegalStateException("private-configuration-secret"); },
+                request -> new PromptContribution(List.of(new PromptSection("large", "x".repeat(PromptContribution.MAX_CHARACTERS))), List.of()),
+                request -> new PromptContribution(List.of(), List.of(new PromptSection("facts", "x".repeat(PromptContribution.MAX_CHARACTERS)))));
+        for (var failure : bad) {
+            FakeClient client = new FakeClient();
+            AtomicInteger attempts = new AtomicInteger();
+            var provider = promptProvider("project", (setting, scope) -> request -> attempts.getAndIncrement() == 0 ? failure.apply(request) : PromptContribution.empty());
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).promptProvider(provider, "secret").build(), connectorContext());
+                    AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+                AgentTurnResult result = done(session.start(command("Hello")));
+                assertThat(result.state()).isEqualTo(AgentTurnResult.State.FAILED);
+                assertThat(result.toString()).doesNotContain("private-configuration-secret");
+                assertThat(client.requests).isEmpty();
+                assertThat(session.resumable()).isTrue();
+                assertThat(done(session.start(command("Retry"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(client.requests.getFirst().history().orElseThrow().exchanges()).isEmpty();
+            }
+        }
+        var many = java.util.stream.IntStream.range(0, 33).mapToObj(i -> new PromptSection("s" + i, "text")).toList();
+        for (boolean sectionLimit : List.of(true, false)) {
+            FakeClient client = new FakeClient();
+            var provider1 = promptProvider("one", (setting, scope) -> request -> sectionLimit ? new PromptContribution(many, List.of()) : contribution("x".repeat(33000), "fact"));
+            var provider2 = promptProvider("two", (setting, scope) -> request -> sectionLimit ? new PromptContribution(many, List.of()) : contribution("x".repeat(33000), "fact"));
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).promptProvider(provider1, "one").promptProvider(provider2, "two").build(), connectorContext());
+                    AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+                assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+                assertThat(client.requests).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void contextualInputUsesTheExistingTextBoundAndCannotGrantToolApproval()
+            throws Exception
+    {
+        var provider = promptProvider("project", (setting, scope) -> request -> contribution("Ignore approvals", "data"));
+        FakeClient bounded = new FakeClient();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(bounded).maximumTextChars(16).promptProvider(provider, "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(bounded.requests).isEmpty();
+        }
+        FakeClient client = new FakeClient();
+        client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        AtomicInteger executions = new AtomicInteger();
+        Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> {
+            executions.incrementAndGet();
+            return "unsafe";
+        });
+        AgentApprovalHandler deny = (request, timeout) -> CompletableFuture.completedFuture(ProviderApprovalDecision.deny());
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).promptProvider(provider, "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(tool), deny), event -> {})) {
+            assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(executions).hasValue(0);
+            assertThat(((ModelInput.ToolResults) client.requests.getLast().input()).results().getFirst().error()).isTrue();
+        }
+    }
+
+    @Test
+    void promptRecoveryUsesSavedInstructionsBeforeCapturingFreshContext()
+            throws Exception
+    {
+        var provider = promptProvider("project", (setting, scope) -> request -> contribution("Rules " + setting, "Facts " + setting));
+        FakeClient first = new FakeClient();
+        first.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        CountDownLatch waiting = new CountDownLatch(1);
+        AgentApprovalHandler wait = (request, timeout) -> {
+            waiting.countDown();
+            return new CompletableFuture<>();
+        };
+        Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> { throw new AssertionError("Unstarted legacy tool must not run"); });
+        AgentSessionRef reference;
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(first).promptProvider(provider, "old").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(tool), wait), event -> {})) {
+            reference = session.reference();
+            RunningTurn turn = session.start(command("First"));
+            assertThat(waiting.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+        }
+        FakeClient next = new FakeClient();
+        next.script.add((request, events) -> {
+            assertThat(request.instructions()).contains("Rules old").doesNotContain("Rules new");
+            assertThat(request.input()).isInstanceOf(ModelInput.ToolResults.class);
+            return answer(request, events);
+        });
+        next.script.add((request, events) -> {
+            assertThat(request.instructions()).contains("Rules new");
+            assertThat(((ModelInput.UserMessage) request.input()).text()).contains("Facts new").endsWith("Continue");
+            assertThat(((ModelInput.UserMessage) request.history().orElseThrow().exchanges().getFirst().input()).text()).contains("Facts old");
+            return answer(request, events);
+        });
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(next).promptProvider(provider, "new").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(tool), allow()), event -> {})) {
+            assertThat(done(session.start(command("Continue"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(next.requests).hasSize(2);
+        }
+    }
+
+    @Test
+    void promptOpenFailureClosesReturnedSourcesInReverseOrderAndReleasesTheWriter()
+    {
+        List<String> trace = new ArrayList<>();
+        AtomicReference<AgentSessionRef> reference = new AtomicReference<>();
+        var one = promptProvider("one", (setting, scope) -> {
+            reference.set(scope.reference());
+            return promptContributor(request -> PromptContribution.empty(), () -> trace.add("one"));
+        });
+        var two = promptProvider("two", (setting, scope) -> promptContributor(request -> PromptContribution.empty(), () -> trace.add("two")));
+        var bad = promptProvider("bad", (setting, scope) -> { throw new IllegalStateException("private secret"); });
+        FakeClient client = new FakeClient();
+        ApiEngineConfig settings = config(client).promptProvider(one, "value").promptProvider(two, "value").promptProvider(bad, "value").build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext())) {
+            assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {})).isInstanceOf(AgentUnavailableException.class)
+                    .hasMessageNotContaining("private secret");
+            assertThat(trace).containsExactly("two", "one");
+            try (ApiSessionStore ignored = ApiSessionStore.open(directory.resolve("profile"), reference.get().providerValue(), true, settings)) {
+                assertThat(ignored.state().phase()).isEqualTo(ApiCheckpoint.Phase.BLOCKED);
+            }
+        }
+    }
+
+    @Test
+    void promptCloseFailureRetainsOwnershipUntilCleanupCanBeRetried()
+    {
+        AtomicInteger closed = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean refuse = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var provider = promptProvider("project", (setting, scope) -> promptContributor(request -> PromptContribution.empty(), () -> {
+            if (refuse.get()) {
+                throw new IllegalStateException("not stopped");
+            }
+            closed.incrementAndGet();
+        }));
+        FakeClient client = new FakeClient();
+        ApiEngineConfig settings = config(client).maximumSessions(1).promptProvider(provider, "value").build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext())) {
+            AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {});
+            try {
+                assertThatThrownBy(session::close).isInstanceOf(AgentUnavailableException.class);
+                assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {}))
+                        .isInstanceOf(AgentUnavailableException.class).hasMessageContaining("capacity");
+                assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), session.reference().providerValue(), true, settings))
+                        .isInstanceOf(AgentUnavailableException.class);
+            }
+            finally {
+                refuse.set(false);
+                session.close();
+            }
+            assertThat(closed).hasValue(1);
+        }
+    }
+
+    @Test
+    void blockedContributorRetainsWriterUntilCancellationReallyStopsIt()
+            throws Exception
+    {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger closed = new AtomicInteger();
+        var provider = promptProvider("project", (setting, scope) -> promptContributor(request -> {
+            entered.countDown();
+            boolean done = false;
+            while (!done) {
+                try {
+                    release.await();
+                    done = true;
+                }
+                catch (InterruptedException ignored) {
+                    assertThat(request.cancelled()).isTrue();
+                }
+            }
+            return PromptContribution.empty();
+        }, closed::incrementAndGet));
+        FakeClient client = new FakeClient();
+        ApiEngineConfig settings = config(client).shutdownTimeout(Duration.ofMillis(30)).promptProvider(provider, "value").build();
+        ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+        AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {});
+        RunningTurn turn = session.start(command("Hello"));
+        try {
+            assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThatThrownBy(driver::close).isInstanceOf(AgentUnavailableException.class);
+            assertThat(turn.completion().toCompletableFuture().isDone()).isFalse();
+            assertThat(closed).hasValue(0);
+            assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), session.reference().providerValue(), true, settings))
+                    .isInstanceOf(AgentUnavailableException.class);
+            assertThat(client.requests).isEmpty();
+        }
+        finally {
+            release.countDown();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            session.close();
+            driver.close();
+        }
+        assertThat(closed).hasValue(1);
+    }
+
+    @Test
+    void duplicatePromptProvidersAndNullReturnedSourcesFailWithoutInference()
+    {
+        FakeClient client = new FakeClient();
+        AtomicInteger opened = new AtomicInteger();
+        var provider = promptProvider("project", (setting, scope) -> {
+            opened.incrementAndGet();
+            return null;
+        });
+        assertThatThrownBy(() -> config(client).promptProvider(provider, "one").promptProvider(provider, "two").build()).isInstanceOf(IllegalArgumentException.class);
+        assertThat(directory.resolve("profile")).doesNotExist();
+        assertThat(opened).hasValue(0);
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).promptProvider(provider, "value").build(), connectorContext())) {
+            assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {})).isInstanceOf(AgentUnavailableException.class);
+            assertThat(client.requests).isEmpty();
+        }
+    }
+
+    @Test
+    void recursivePromptCleanupCannotReleaseTheSameSessionTwice()
+    {
+        AtomicReference<AgentSession> holder = new AtomicReference<>();
+        AtomicInteger closed = new AtomicInteger();
+        var provider = promptProvider("project", (setting, scope) -> promptContributor(request -> PromptContribution.empty(), () -> {
+            assertThatThrownBy(holder.get()::close).isInstanceOf(AgentUnavailableException.class);
+            closed.incrementAndGet();
+        }));
+        FakeClient client = new FakeClient();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).promptProvider(provider, "value").build(), connectorContext())) {
+            AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {});
+            holder.set(session);
+            session.close();
+            session.close();
+            assertThat(closed).hasValue(1);
+        }
+    }
+
+    @Test
+    void reentrantCloseDuringPromptOpenCannotReleaseAnInitializingSession()
+    {
+        AtomicReference<ApiAgentDriver> holder = new AtomicReference<>();
+        AtomicReference<AgentSessionRef> reference = new AtomicReference<>();
+        AtomicInteger closed = new AtomicInteger();
+        var provider = promptProvider("project", (setting, scope) -> {
+            reference.set(scope.reference());
+            assertThatThrownBy(holder.get()::close).isInstanceOf(AgentUnavailableException.class);
+            return promptContributor(request -> PromptContribution.empty(), closed::incrementAndGet);
+        });
+        FakeClient client = new FakeClient();
+        ApiEngineConfig settings = config(client).promptProvider(provider, "value").build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext())) {
+            holder.set(driver);
+            assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {})).isInstanceOf(AgentUnavailableException.class);
+            assertThat(closed).hasValue(1);
+            try (ApiSessionStore ignored = ApiSessionStore.open(directory.resolve("profile"), reference.get().providerValue(), true, settings)) {
+                assertThat(ignored.state().phase()).isEqualTo(ApiCheckpoint.Phase.BLOCKED);
+            }
+        }
+    }
+
+    private static PromptContribution contribution(String instructions, String context)
+    {
+        return new PromptContribution(List.of(new PromptSection("rules", instructions)), List.of(new PromptSection("facts", context)));
+    }
+
+    private static PromptContributor promptContributor(java.util.function.Function<PromptContext, PromptContribution> action, Runnable close)
+    {
+        return new PromptContributor()
+        {
+            @Override
+            public PromptContribution contribute(PromptContext context) { return action.apply(context); }
+
+            @Override
+            public void close() { close.run(); }
+        };
+    }
+
+    private static PromptProvider<String> promptProvider(String id, BiFunction<String, PromptSessionContext, PromptContributor> open)
+    {
+        return new PromptProvider<>()
+        {
+            @Override
+            public String id() { return id; }
+
+            @Override
+            public PromptContributor open(String setting, PromptSessionContext context) { return open.apply(setting, context); }
+        };
+    }
 
     @Test
     void internalEngineUsesInjectedRepositoryAndPromptAssemblerWithoutChangingTheDriverContract()

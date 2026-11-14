@@ -15,6 +15,7 @@ package io.github.shiftinglabs.codej;
 
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredPrompts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,6 +63,40 @@ class TestClaudeApi
     private SessionOptions options()
     {
         return SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+    }
+
+    @Test
+    void scopedPromptsFlowThroughTheFacadeWithoutTurningContextIntoSystemInstructions()
+            throws Exception
+    {
+        var provider = new ConfiguredPrompts("project");
+        SessionRef saved;
+        try (Agent agent = builder().promptProvider(provider, "alpha").build()) {
+            assertThat(provider.opened).hasValue(0);
+            try (Session session = agent.startSession(options())) {
+                assertThat(provider.opened).hasValue(1);
+                assertThat(provider.captured).hasValue(0);
+                assertThat(session.run(Input.text("Hello"))).isInstanceOf(TurnResult.Completed.class);
+                saved = session.ref().orElseThrow();
+            }
+            assertThat(provider.closed).hasValue(1);
+        }
+        try (Agent agent = builder().promptProvider(provider, "beta").build();
+                Session session = agent.resumeSession(saved, options())) {
+            assertThat(session.run(Input.text("Continue"))).isInstanceOf(TurnResult.Completed.class);
+        }
+        assertThat(provider.opened).hasValue(2);
+        assertThat(provider.captured).hasValue(2);
+        assertThat(provider.closed).hasValue(2);
+        var post = http.requests().stream().filter(request -> request.method().equals("POST")).toList().getLast().body();
+        assertThat(post.path("system").toString()).contains("beta rules").doesNotContain("beta facts", "alpha facts");
+        assertThat(post.path("messages").get(0).toString()).contains("alpha facts", "Hello");
+        assertThat(post.path("messages").get(2).path("role").textValue()).isEqualTo("user");
+        assertThat(post.path("messages").get(2).toString()).contains("beta facts", "Continue");
+        assertThatThrownBy(() -> builder().promptProvider(null, "value")).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().promptProvider(provider, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().promptProvider(provider, "one").promptProvider(provider, "two").build())
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

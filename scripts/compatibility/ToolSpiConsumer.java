@@ -43,6 +43,11 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContribution;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptContributor;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSection;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecution;
@@ -142,6 +147,10 @@ public final class ToolSpiConsumer
                 public ModelCall generate(ModelRequest request, ModelEventSink events)
                 {
                     boolean tool = ++calls == 1;
+                    require(request.instructions().contains("project rules") && !request.instructions().contains("project facts"), "Prompt roles were mixed");
+                    if (tool) {
+                        require(((ModelInput.UserMessage) request.input()).text().contains("project facts"), "User context was not contributed");
+                    }
                     var history = request.history().orElseThrow();
                     require(history.complete() && history.exchanges().size() == (tool ? 0 : 1), "Engine lost canonical history");
                     history.validateNext(request.input());
@@ -166,8 +175,21 @@ public final class ToolSpiConsumer
                 @Override
                 public void close() {}
             };
+            PromptProvider<String> prompts = new PromptProvider<>()
+            {
+                @Override
+                public String id() { return "project"; }
+
+                @Override
+                public PromptContributor open(String setting, PromptSessionContext scope)
+                {
+                    require(scope.worktree().equals(root), "Prompt source has the wrong session scope");
+                    return request -> new PromptContribution(List.of(new PromptSection("rules", setting + " rules")),
+                            List.of(new PromptSection("facts", setting + " facts")));
+                }
+            };
             var configurationBuilder = ApiEngineConfig.builder(new ConnectorIdentity("fixture", "tools"), new AgentLaneId("fixture-tools"), "model", () -> model)
-                    .maximumSessions(1).toolProvider(provider, configuration);
+                    .maximumSessions(1).toolProvider(provider, configuration).promptProvider(prompts, "project");
             var context = new AgentSessionContext("fixture", root, root.resolve("runtime"), root.resolve("runtime/provider"), AgentPermissionPolicy.AUTO,
                     Optional.empty(), (request, timeout) -> CompletableFuture.completedStage(ProviderApprovalDecision.allow(Optional.empty())),
                     Optional.empty(), Optional.empty(), SessionAccess.TOOLS_ONLY, "", List.of());

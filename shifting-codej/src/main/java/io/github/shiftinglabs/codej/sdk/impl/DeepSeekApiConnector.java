@@ -51,6 +51,7 @@ public final class DeepSeekApiConnector
                     .toolExecutor(config.callbacks.orElse(command -> Thread.ofVirtual().start(command)));
             config.codingTools.ifPresent(engine::codingTools);
             config.toolProviders.forEach(engine::toolProvider);
+            config.promptProviders.forEach(engine::promptProvider);
             return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {

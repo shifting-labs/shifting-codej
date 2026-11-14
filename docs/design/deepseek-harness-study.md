@@ -111,7 +111,8 @@ format-1 read migration. The version-1 layout described above records the initia
 - [x] Verify unchanged public signatures and preserve unrelated work; commit the completed step.
 - [x] Add provider-neutral settled-exchange history and explicit versioned migrations; see
       [conversation history](conversation-history.md).
-- [ ] Add scoped prompt/context contributors, policy extensions and observers when their callers exist.
+- [x] Add scoped prompt/context contributors; see [prompt contributors](prompt-contributors.md).
+- [ ] Add policy extensions and observers when their callers exist.
 - [ ] Evaluate bounded parallel tools under a host-wide budget, with cancellation/ordering contracts.
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event
       mapping and focused connector contract tests before any default-route change.
