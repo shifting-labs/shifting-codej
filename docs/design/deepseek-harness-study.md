@@ -119,6 +119,8 @@ format-1 read migration. The version-1 layout described above records the initia
 - [x] Implement opt-in asynchronous batch overlap with explicit eligibility, atomic checkpoint updates and draining cancellation.
 - [x] Add opt-in provider-owned [context compaction](context-compaction.md), preserving full durable
       conversation history and tool chains without hidden inference calls.
+- [x] Add opt-in LLM summary generation through the shared engine's existing inference budgets;
+      see [context compaction](context-compaction.md#engine-budgeted-llm-summaries).
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event
       mapping and focused connector contract tests before any default-route change.
 

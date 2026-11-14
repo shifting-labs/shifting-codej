@@ -53,6 +53,10 @@ class TestModelCompaction
     {
         ModelHistory history = new ModelHistory(true, List.of(exchange("one", new ModelInput.UserMessage("input", List.of()), List.of())));
         var proposal = new ModelCompaction("summary", 0);
+        ModelCompactionRequest.validateBoundary(history, REPLAY, 0);
+        assertThatThrownBy(() -> ModelCompactionRequest.validateBoundary(null, REPLAY, 0)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> ModelCompactionRequest.validateBoundary(history, null, 0)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> ModelCompactionRequest.validateBoundary(history, REPLAY, -1)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new ModelCompactionRequest("model", new ModelHistory(false, history.exchanges()), REPLAY, proposal, Optional.empty()))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new ModelCompactionRequest("model", new ModelHistory(true, List.of()), REPLAY, proposal, Optional.empty()))

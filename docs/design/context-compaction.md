@@ -8,8 +8,9 @@ Status: implemented and verified. Follows [conversation history](conversation-hi
 Compact model context, preserving the full durable conversation history, execution journal and
 tool receipts. `ContextCompactor` is an explicitly installed, borrowed, thread-safe host service.
 It proposes a bounded `ModelCompaction` containing summary text and a retained exchange count.
-The callback performs no inference or tool effects. Automatic LLM summarization, token estimation,
-audit retention and storage compaction are separate follow-ups; no hidden model calls are added.
+The callback performs no inference or tool effects. An alternative `ContextSummarizationPolicy`
+explicitly opts into an engine-budgeted LLM summary. Token estimation, audit retention and storage
+compaction remain separate follow-ups. Neither mode is installed by default.
 
 The engine runs proposals once per new public turn, after reconciling pending tools and before
 capturing fresh prompts. Empty sessions skip the callback. Incomplete legacy history cannot be
@@ -65,6 +66,63 @@ The proposal summary is bounded to 65,536 characters and remains subject to the 
 Usage and failure examples are exercised by `TestApiAgentDriver`, `TestApiContextCompaction` and
 the JDK-only [packaged consumer](../../scripts/compatibility/ContextCompactionConsumer.java).
 
+## Engine-budgeted LLM summaries
+
+`contextSummarization(ContextSummarizationPolicy)` is additive on the engine, both adapter configs
+and both public API facade builders. The borrowed policy receives the same immutable context as a
+local compactor and returns `Optional<ContextSummarizationPlan>`. A plan selects `retainExchanges`
+and `maximumOutputTokens`; an empty result declines. Installing both modes is rejected at build time.
+
+For example, a host may use its own character threshold (not a token estimate):
+
+```java
+ContextSummarizationPolicy policy = context -> {
+    if (!context.history().complete() || context.replayCharacters() < 100_000
+            || context.history().exchanges().size() < 4) {
+        return Optional.empty();
+    }
+    // The host must select a suffix beginning at a user exchange, keeping tool groups intact.
+    return Optional.of(new ContextSummarizationPlan(0, 1024));
+};
+// ClaudeApi.builder().contextSummarization(policy) ...
+// DeepSeekApi.builder().contextSummarization(policy) ...
+```
+
+After recovery and before fresh prompt capture, the engine validates the complete prefix/tool
+boundary and the adapter's additive `supportsContextCompaction()` opt-in. The default is false,
+preserving existing custom clients and local compaction behavior. It then encodes just the selected
+canonical prefix as typed JSON data. No private reasoning, native replay, fresh input or session
+instructions enter this transcript. Attachment names/media types are metadata; paths and bytes are
+excluded, and no files are opened. A bounded writer rejects oversized escaped JSON before submission.
+
+Exactly one isolated `ModelClient.generate` call uses the current model, effort, service tier and
+remaining turn deadline, fixed summary instructions, empty history, no replay and no tools. The
+transcript is untrusted context data. The engine counts this call against `maximumRequests` and
+caps its output by the plan, engine output limit and remaining observed token budget. Admission
+reserves a further request slot and at least one output token for continuation. Observed input usage
+can still exhaust the turn; missing usage stays unknown. There is no pre-submission input-token or
+billing guarantee, automatic retry, recursive summarization, new client, executor or worker pool.
+
+Summary deltas count against the turn's text budget without emitting message events. Final usage
+is charged once and emitted through the existing usage event. The additive metadata-only
+`ContextSummaryCompleted` observation identifies a received summary response, including rejected
+stop reasons; `ModelCompleted` retains its existing durable-conversation meaning. A summary must be
+nonblank, bounded, completed, free of tool calls and known credentials. Refused, truncated, oversized,
+tool-bearing or budget-exhausting responses do not reach the replay rewrite. The successful text
+becomes a regular `ModelCompaction` and follows the same validation and synchronous commit path.
+
+The synthetic request/response is not a conversation exchange, native continuation or tool receipt.
+Its transient replay is discarded. Failure or uncertain delivery leaves the original checkpoint
+usable, since this call has no tool effects or conversation continuation to reconcile; a later
+explicit turn may pay for another summary. Cancellation retains the session writer until the
+adapter's completion fence confirms it stopped. Only the final replay replacement is committed.
+There is no new checkpoint format or persistence migration.
+
+This first step summarizes the selected full canonical prefix, including earlier compacted audit
+content. It does not silently truncate or chunk an oversized prefix, restore removed native blocks,
+guarantee summary fidelity, or reduce full audit storage. Native-boundary and reduction checks still
+apply after generation, so a provider rejection can consume summary budget without changing replay.
+
 ## Checkbox plan
 
 - [x] Add validated proposal/request records, borrowed compactor context and optional model-client SPI.
@@ -74,9 +132,14 @@ the JDK-only [packaged consumer](../../scripts/compatibility/ContextCompactionCo
 - [x] Add baseline SPI, engine failure/recovery, repeated compaction and fake-HTTP consumer tests.
 - [x] Run focused tests and packaged/API compatibility checks with bounded JVMs and one test fork.
 - [x] Reconcile the engine plan, preserve unrelated edits and commit.
-- [ ] Evaluate explicit engine-budgeted LLM summarization and independent audit/storage retention later.
+- [x] Add an opt-in typed summary policy and plan without changing existing compactor/client contracts.
+- [x] Reuse the engine's model-call ownership, request/token/text/deadline budgets and usage events.
+- [x] Isolate summary transcripts and outputs from tools, answers and canonical history.
+- [x] Wire both API providers and add fake-client, fake-HTTP and packaged consumer coverage.
+- [x] Verify the focused summary tests and compatibility checks, record results, and commit.
+- [ ] Evaluate independent audit/storage retention and bounded incremental summary inputs later.
 
-## Validation
+## Local-compaction validation (preceding stage)
 
 The isolated source snapshot passed **341 focused Java cases**, with zero failures, errors or skips:
 
@@ -112,3 +175,41 @@ Javadocs and shaded packaging passed; the final cosmetic private constant rename
 tests skipped. No agents, broad suites, Bytequay tests, live providers, provider CLIs, native builds
 or simulators were started. This verifies the exercised contracts, not all downstream behavior or
 performance; storage retention and automatic summary quality remain outside this step.
+
+## LLM-summary validation
+
+The isolated snapshot based on `44d7486` passed **272 focused Java cases**, zero failures, errors
+or skips:
+
+- **148 CLI cases**: engine (88), summary transcript encoding (2), checkpoint codec (33), model
+  compaction values/boundaries (4), model SPI values (17) and extension SPI/observations (4).
+- **124 SDK cases**: each public API facade (13 each), Anthropic/DeepSeek clients (21/20), shared
+  connector contract (9), context compaction/summarization across both providers (10), each API
+  connector (15 each), replay codec (4) and session-reference compatibility (4).
+- **Five Python compatibility-checker controls** passed.
+
+Tests exercise capped summary output, shared request/observed-token/text budgets, decline and
+unsupported clients, invalid boundaries, bounded escaped input, null/throwing policies, malformed
+or rejected summary output, credentials, uncertain delivery, cancellation/deadlines, writer retention
+until model quiescence, isolated history/events, repeated compaction and durable resume. Fake HTTP
+confirms one extra inference per selected summary and recovery from summary HTTP failure. Attachment
+metadata tests open no files. Existing normal tool/recovery and local-compaction behavior also pass.
+
+The published `0.164.0-1` compatibility check passed on the final shaded artifact. The JDK-only
+`ContextSummarizationConsumer` uses both public builders and performs five conversation inferences
+plus two summary inferences per provider, including restart and policy-disabled resume. The unchanged
+baseline consumer and existing candidate fixtures passed. A separate comparison against the preceding
+compaction artifact checked **123 existing types**: all old descriptors, record components, enum order
+and sealed shapes are unchanged. Existing types gained only five summary-policy builder setters, the
+default capability method, its two provider overrides and the static boundary validator.
+
+Final candidate SHA-256:
+`da2a5e84020f1f12b3b31af08bd3f131561746b4db2682030bc581e2feae1d83`.
+
+Maven ran offline with `-T1`, one Surefire fork, disabled JUnit parallel execution, low process priority
+and `JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC'`. After correcting
+test fixtures/imports/style, the passing CLI results were reused for the SDK-only run. Strict style,
+license, Javadocs and shaded packaging passed. The tested source excludes the same four unrelated
+Claude CLI edits, preserved byte-for-byte and excluded from this commit. No agents, broad suites,
+Bytequay tests, live providers, provider CLIs, native builds or simulators ran. These checks establish
+the exercised contracts; LLM summary fidelity and live billing remain unverified.

@@ -15,6 +15,7 @@ package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
@@ -51,6 +52,7 @@ public final class ClaudeApiConfig
     final Optional<ToolExecutionBudget> toolExecutionBudget;
     final int maximumParallelTools;
     final Optional<ContextCompactor> contextCompactor;
+    final Optional<ContextSummarizationPolicy> contextSummarization;
 
     private ClaudeApiConfig(Builder builder)
     {
@@ -67,6 +69,8 @@ public final class ClaudeApiConfig
         toolExecutionBudget = builder.toolExecutionBudget;
         maximumParallelTools = builder.maximumParallelTools;
         contextCompactor = builder.contextCompactor;
+        contextSummarization = builder.contextSummarization;
+        checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
@@ -87,6 +91,7 @@ public final class ClaudeApiConfig
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
         private int maximumParallelTools = 1;
         private Optional<ContextCompactor> contextCompactor = Optional.empty();
+        private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -182,6 +187,19 @@ public final class ClaudeApiConfig
         public Builder contextCompactor(ContextCompactor compactor)
         {
             contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
+            return this;
+        }
+
+        /**
+         * Borrows a policy enabling one tool-free summary inference charged to the current turn.
+         * Cannot be combined with a local context compactor. Disabled by default.
+         *
+         * @param policy thread-safe selector; the engine performs inference with its existing budgets
+         * @return this builder
+         */
+        public Builder contextSummarization(ContextSummarizationPolicy policy)
+        {
+            contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
             return this;
         }
 

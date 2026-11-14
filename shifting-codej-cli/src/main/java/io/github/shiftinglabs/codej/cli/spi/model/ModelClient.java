@@ -54,6 +54,12 @@ public interface ModelClient
     }
 
     /**
+     * Explicit opt-in for engine-generated summaries. The default does not change existing local
+     * compact implementations; adapters supporting the new mode must also implement compact safely.
+     */
+    default boolean supportsContextCompaction() { return false; }
+
+    /**
      * Optional bounded local replay compaction, without inference or tool execution. Preserve retained
      * native blocks/signatures exactly and reject unsupported/unsafe boundaries. Empty means unsupported;
      * the default preserves existing adapters. Return the exact original state for an already-covered

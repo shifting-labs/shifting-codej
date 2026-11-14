@@ -21,7 +21,7 @@ import java.util.Optional;
  * Borrowed, thread-safe host policy producing an optional bounded summary proposal. Runs serially on
  * the existing turn worker, after recovery and before fresh prompt capture. It must be bounded and
  * cooperate with cancellation/interruption; it performs no inference, tool effects or authority changes.
- * The engine never closes this host service. Summary generation with extra model calls is separate.
+ * The engine never closes this host service. Use ContextSummarizationPolicy for engine-budgeted model summaries.
  */
 @FunctionalInterface
 public interface ContextCompactor

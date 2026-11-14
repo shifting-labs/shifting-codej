@@ -18,6 +18,7 @@ import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
@@ -69,6 +70,7 @@ public final class ApiEngineConfig
     final Optional<ToolExecutionBudget> toolExecutionBudget;
     final int maximumParallelTools;
     final Optional<ContextCompactor> contextCompactor;
+    final Optional<ContextSummarizationPolicy> contextSummarization;
 
     private ApiEngineConfig(Builder b)
     {
@@ -98,6 +100,8 @@ public final class ApiEngineConfig
         toolExecutionBudget = b.toolExecutionBudget;
         maximumParallelTools = b.maximumParallelTools;
         contextCompactor = b.contextCompactor;
+        contextSummarization = b.contextSummarization;
+        checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
@@ -135,6 +139,7 @@ public final class ApiEngineConfig
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
         private int maximumParallelTools = 1;
         private Optional<ContextCompactor> contextCompactor = Optional.empty();
+        private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -308,6 +313,19 @@ public final class ApiEngineConfig
         public Builder contextCompactor(ContextCompactor compactor)
         {
             contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
+            return this;
+        }
+
+        /**
+         * Borrows a policy enabling one tool-free summary inference charged to the current turn.
+         * Cannot be combined with a local context compactor. Disabled by default.
+         *
+         * @param policy thread-safe selector; the engine performs inference with its existing budgets
+         * @return this builder
+         */
+        public Builder contextSummarization(ContextSummarizationPolicy policy)
+        {
+            contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
             return this;
         }
 

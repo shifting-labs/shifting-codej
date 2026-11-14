@@ -194,6 +194,9 @@ public final class AnthropicModelClient
     }
 
     @Override
+    public boolean supportsContextCompaction() { return true; }
+
+    @Override
     public Optional<ModelReplayState> compact(ModelCompactionRequest request)
     {
         requireNonNull(request, "request is null");

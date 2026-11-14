@@ -188,6 +188,16 @@ def verify(args, report):
             (output / "context-compaction-consumer.txt").write_text(result)
             report["passed"].append("Context compaction: local Claude/DeepSeek replay rewrite, full audit history and durable resume; JDK + jar only")
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_summary = PREFIX + "cli/spi/context/ContextSummarizationPolicy.class" in artifact.namelist()
+        if has_summary:
+            summary_fixture = Path(__file__).parent / "compatibility" / "ContextSummarizationConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(summary_fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "ContextSummarizationConsumer", str(Path(folder) / "summary-api")])
+            (output / "context-summarization-consumer.txt").write_text(result)
+            report["passed"].append("LLM summarization: budgeted Claude/DeepSeek summary calls and durable replay; JDK + jar only")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

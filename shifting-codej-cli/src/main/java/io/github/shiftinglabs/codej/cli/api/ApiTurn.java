@@ -26,6 +26,7 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderUsageSample;
 import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactionContext;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPlan;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
 import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicyContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
@@ -252,7 +253,7 @@ final class ApiTurn
 
     private void compact()
     {
-        if (config.contextCompactor.isEmpty() || session.store.state().replay().isEmpty()) {
+        if ((config.contextCompactor.isEmpty() && config.contextSummarization.isEmpty()) || session.store.state().replay().isEmpty()) {
             return;
         }
         ApiCheckpoint before = session.store.state();
@@ -287,7 +288,15 @@ final class ApiTurn
         try {
             interruptible = true;
             checkStop();
-            Optional<ModelCompaction> offered = requireNonNull(config.contextCompactor.orElseThrow().propose(context), "compactor returned null");
+            Optional<ModelCompaction> offered;
+            if (config.contextSummarization.isPresent()) {
+                var plan = requireNonNull(config.contextSummarization.orElseThrow().plan(context), "summary policy returned null");
+                checkStop();
+                offered = plan.map(value -> summarize(before, value, context.deadline()));
+            }
+            else {
+                offered = requireNonNull(config.contextCompactor.orElseThrow().propose(context), "compactor returned null");
+            }
             checkStop();
             if (offered.isEmpty()) {
                 return;
@@ -298,6 +307,7 @@ final class ApiTurn
             }
             ModelReplayState original = before.replay().orElseThrow();
             ModelCompactionRequest request = new ModelCompactionRequest(model, before.history(), original, proposal, context.deadline());
+            interruptible = true;
             replacement = requireNonNull(session.engine.client.compact(request), "adapter returned null").orElseThrow(() ->
                     new IllegalArgumentException("Model adapter does not support context compaction"));
             checkStop();
@@ -317,6 +327,87 @@ final class ApiTurn
         }
         observe(() -> new EngineObservation.ContextCompacted(observedTurnId(), before.history().exchanges().size() - proposal.retainExchanges(), proposal.retainExchanges()));
         checkStop();
+    }
+
+    private ModelCompaction summarize(ApiCheckpoint before, ContextSummarizationPlan plan, Optional<Instant> deadline)
+    {
+        if (!session.engine.client.supportsContextCompaction()) {
+            throw new IllegalArgumentException("Model adapter does not support engine context summarization");
+        }
+        // Validate complete canonical/tool boundaries before spending any inference budget.
+        ModelCompactionRequest.validateBoundary(before.history(), before.replay().orElseThrow(), plan.retainExchanges());
+        String transcript = config.redactor().redact(ApiSummaryPrompt.encode(before.history(),
+                before.history().exchanges().size() - plan.retainExchanges(), config.maximumTextChars));
+        int outputTokens = reserveRequest(plan.maximumOutputTokens(), true);
+        String id = UUID.randomUUID().toString();
+        var builder = ModelRequest.builder(id, model, new ModelInput.UserMessage(transcript, List.of()), outputTokens)
+                .instructions(ApiSummaryPrompt.INSTRUCTIONS).history(new ModelHistory(true, List.of()));
+        deadline.ifPresent(builder::deadline);
+        effort.ifPresent(builder::effort);
+        command.serviceTier().ifPresent(builder::serviceTier);
+        int maximum = Math.min(ModelCompaction.MAX_SUMMARY_CHARACTERS, config.maximumTextChars - textChars);
+        if (maximum <= 0) {
+            throw new Stopped("API turn text budget exhausted");
+        }
+        int previousText = textChars;
+        ModelResponse response = generate(builder.build(), new StreamText(id, false, maximum));
+        recordUsage(id, response);
+        observe(() -> new EngineObservation.ContextSummaryCompleted(observedTurnId(), id, response.stopReason(), response.usage()));
+        checkStop();
+        if (tokens >= config.maximumTokens) {
+            throw new Stopped("API turn token budget exhausted");
+        }
+        if (response.stopReason() != ModelResponse.StopReason.COMPLETED || !response.toolCalls().isEmpty()
+                || response.text().isBlank() || response.text().length() > maximum) {
+            throw new IllegalArgumentException("Context summary was not a bounded complete text response");
+        }
+        textChars = Math.max(textChars, previousText + response.text().length());
+        if (!config.redactor().redact(response.text()).equals(response.text())) {
+            throw new IllegalArgumentException("Context summary contains a known credential");
+        }
+        return new ModelCompaction(response.text(), plan.retainExchanges());
+    }
+
+    private int reserveRequest(int requestedOutputTokens, boolean continuation)
+    {
+        checkStop();
+        int reserve = continuation ? 1 : 0;
+        if (config.maximumRequests - requests <= reserve || config.maximumTokens - tokens <= reserve) {
+            throw new Stopped("API turn request or token budget exhausted");
+        }
+        requests++;
+        return (int) Math.min(requestedOutputTokens, Math.min(config.maximumOutputTokens, config.maximumTokens - tokens - reserve));
+    }
+
+    private ModelResponse generate(ModelRequest request, StreamText stream)
+    {
+        try {
+            checkStop();
+            interruptible = true;
+            call = requireNonNull(session.engine.client.generate(request, stream::text), "adapter returned null call");
+            interruptible = false;
+            Thread.interrupted();
+            if (stopping.get() != null) {
+                call.cancel();
+            }
+            ModelResponse response = requireNonNull(awaitCall(call), "adapter returned null response");
+            stream.finish();
+            return response;
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+            call = null;
+        }
+    }
+
+    private void recordUsage(String requestId, ModelResponse response)
+    {
+        response.usage().ifPresent(sample -> {
+            tokens = Math.addExact(tokens, Math.addExact(sample.inputTokens(), sample.outputTokens()));
+            emit(new ProviderAgentEvent.Usage(new ProviderUsageSample(Optional.of(requestId), ProviderUsageSample.Semantics.DELTA,
+                    sample.inputTokens(), sample.cachedInputTokens(), sample.outputTokens(), sample.cost()), source(requestId)));
+        });
     }
 
     private ApiPromptSnapshot prompt()
@@ -366,13 +457,11 @@ final class ApiTurn
         ModelInput nextInput = initial;
         while (true) {
             checkStop();
-            if (++requests > config.maximumRequests || tokens >= config.maximumTokens) {
-                throw new Stopped("API turn request or token budget exhausted");
-            }
+            int outputTokens = reserveRequest(config.maximumOutputTokens, false);
             String requestId = UUID.randomUUID().toString();
             ApiCheckpoint before = session.store.state();
             ModelRequest.Builder builder = ModelRequest.builder(requestId, setup.model(), nextInput,
-                    (int) Math.min(config.maximumOutputTokens, config.maximumTokens - tokens)).instructions(setup.instructions()).tools(setup.tools()).history(before.history());
+                    outputTokens).instructions(setup.instructions()).tools(setup.tools()).history(before.history());
             before.replay().ifPresent(builder::replayState);
             setup.effort().ifPresent(builder::effort);
             setup.tier().ifPresent(builder::serviceTier);
@@ -382,18 +471,8 @@ final class ApiTurn
             ModelRequest request = builder.build();
             save(before.submitting(requestId, setup, nextInput));
             ModelResponse response;
-            StreamText stream = new StreamText(requestId);
             try {
-                checkStop();
-                interruptible = true;
-                call = session.engine.client.generate(request, stream::text);
-                interruptible = false;
-                Thread.interrupted();
-                if (stopping.get() != null) {
-                    call.cancel();
-                }
-                response = awaitCall(call);
-                stream.finish();
+                response = generate(request, new StreamText(requestId, true, config.maximumTextChars));
             }
             catch (ModelClientException failure) {
                 if (!failure.deliveryUncertain()) {
@@ -401,22 +480,13 @@ final class ApiTurn
                 }
                 throw failure;
             }
-            finally {
-                interruptible = false;
-                Thread.interrupted();
-                call = null;
-            }
             if (response.text().length() > config.maximumTextChars || response.replayState().payload().length() > config.maximumCheckpointBytes) {
                 throw new Stopped("API response exceeded its size budget");
             }
             save(session.store.state().observed(requestId, response));
             observe(() -> new EngineObservation.ModelCompleted(observedTurnId(), requestId, response.stopReason(), response.usage().map(sample ->
                     new ProviderUsageSample(Optional.of(requestId), sample.semantics(), sample.inputTokens(), sample.cachedInputTokens(), sample.outputTokens(), sample.cost()))));
-            response.usage().ifPresent(sample -> {
-                tokens = Math.addExact(tokens, Math.addExact(sample.inputTokens(), sample.outputTokens()));
-                emit(new ProviderAgentEvent.Usage(new ProviderUsageSample(Optional.of(requestId), ProviderUsageSample.Semantics.DELTA,
-                        sample.inputTokens(), sample.cachedInputTokens(), sample.outputTokens(), sample.cost()), source(requestId)));
-            });
+            recordUsage(requestId, response);
             emit(new ProviderAgentEvent.Message(Optional.empty(), response.stopReason() == ModelResponse.StopReason.TOOL_CALLS
                     ? ProviderAgentEvent.MessageKind.COMMENTARY : ProviderAgentEvent.MessageKind.ANSWER,
                     ProviderAgentEvent.MessagePhase.FINAL, config.redactor().redact(response.text()), source(requestId)));
@@ -735,17 +805,29 @@ final class ApiTurn
     private final class StreamText
     {
         private final String id;
+        private final boolean visible;
+        private final int maximum;
+        private int characters;
         private String held = "";
 
-        StreamText(String id) { this.id = id; }
+        StreamText(String id, boolean visible, int maximum)
+        {
+            this.id = id;
+            this.visible = visible;
+            this.maximum = maximum;
+        }
 
         synchronized void text(String delta)
         {
             requireNonNull(delta, "delta is null");
-            if (delta.length() > config.maximumTextChars - textChars) {
+            if (delta.length() > config.maximumTextChars - textChars || delta.length() > maximum - characters) {
                 throw new ModelClientException(ModelClientException.Kind.PROTOCOL, "API stream exceeded its text budget", true);
             }
             textChars += delta.length();
+            characters += delta.length();
+            if (!visible) {
+                return;
+            }
             SecretRedactor.Chunk chunk = config.redactor().redactChunk(held, delta);
             held = chunk.held();
             if (!chunk.text().isEmpty()) {

@@ -83,13 +83,13 @@ public final class ContextCompactionConsumer
         System.out.println("PASS: local Claude/DeepSeek context compaction, complete audit prefix, repeated rewrites and durable resume; JDK + jar only");
     }
 
-    private static void completed(Session session, String input)
+    static void completed(Session session, String input)
             throws InterruptedException
     {
         require(session.run(Input.text(input)) instanceof TurnResult.Completed, "Compacted session turn failed");
     }
 
-    private static final class Fixture
+    static final class Fixture
             implements AutoCloseable
     {
         final boolean claude;

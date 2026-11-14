@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej;
 
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
@@ -73,6 +74,7 @@ public final class DeepSeekApi
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
         private int maximumParallelTools = 1;
         private Optional<ContextCompactor> contextCompactor = Optional.empty();
+        private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
 
         private Builder() {}
 
@@ -270,6 +272,19 @@ public final class DeepSeekApi
         }
 
         /**
+         * Borrows a policy enabling one tool-free summary inference charged to the current turn.
+         * Cannot be combined with a local context compactor. Disabled by default.
+         *
+         * @param policy thread-safe selector; the engine performs inference with its existing budgets
+         * @return this builder
+         */
+        public Builder contextSummarization(ContextSummarizationPolicy policy)
+        {
+            contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -288,6 +303,7 @@ public final class DeepSeekApi
             toolExecutionBudget.ifPresent(settings::toolExecutionBudget);
             settings.maximumParallelTools(maximumParallelTools);
             contextCompactor.ifPresent(settings::contextCompactor);
+            contextSummarization.ifPresent(settings::contextSummarization);
             return DriverAgent.deepSeekApi(settings.build(), state, profile);
         }
     }

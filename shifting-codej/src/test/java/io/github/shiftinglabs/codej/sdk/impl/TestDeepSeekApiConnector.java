@@ -15,6 +15,7 @@ package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
@@ -28,6 +29,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Optional;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -35,6 +38,21 @@ class TestDeepSeekApiConnector
         extends AbstractTestApiConnector<DeepSeekApiConfig>
 {
     private DeepSeekHttpFixture http;
+
+    @Test
+    void summaryPoliciesAreOptionalBorrowedAndRejectConflictingCompactors()
+    {
+        ContextSummarizationPolicy firstPolicy = context -> { throw new AssertionError("No eager callback"); };
+        ContextSummarizationPolicy secondPolicy = context -> Optional.empty();
+        var builder = DeepSeekApiConfig.builder("model", () -> "key");
+        assertThat(builder.build().contextSummarization).isEmpty();
+        var first = builder.contextSummarization(firstPolicy).build();
+        builder.contextSummarization(secondPolicy);
+        assertThat(first.contextSummarization).containsSame(firstPolicy);
+        assertThat(builder.build().contextSummarization).containsSame(secondPolicy);
+        assertThatThrownBy(() -> builder.contextSummarization(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder.contextCompactor(context -> Optional.empty()).build()).isInstanceOf(IllegalArgumentException.class);
+    }
 
     @Test
     void contextCompactorIsBorrowedOptionalAndCapturedWithoutCallingIt()

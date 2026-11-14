@@ -26,6 +26,8 @@ import io.github.shiftinglabs.codej.SessionOptions;
 import io.github.shiftinglabs.codej.SessionRef;
 import io.github.shiftinglabs.codej.TurnResult;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPlan;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
@@ -75,6 +77,70 @@ class TestApiContextCompaction
     }
 
     private record Thinking(String reasoning_content) {}
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void facadesGenerateIsolatedSummariesAndResumeCompactedContext(boolean claude)
+            throws Exception
+    {
+        try (Fixture f = new Fixture(claude)) {
+            ContextSummarizationPolicy policy = context -> context.history().exchanges().size() >= 2
+                    ? Optional.of(new ContextSummarizationPlan(1, 64)) : Optional.empty();
+            var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+            SessionRef saved;
+            try (Agent agent = f.summaryAgent(policy); Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("original audit " + "x".repeat(12000)))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(session.run(Input.text("recent context " + "y".repeat(2000)))).isInstanceOf(TurnResult.Completed.class);
+                int before = f.requests();
+                f.textReply("generated memory");
+                assertThat(session.run(Input.text("fresh input"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.requests()).isEqualTo(before + 2);
+                String summaryBody = f.bodies().get(f.bodies().size() - 2);
+                BodyView summary = JSON.readValue(summaryBody, BodyView.class);
+                assertThat(summary.messages().stream().filter(message -> message.role().equals("user"))).hasSize(1);
+                assertThat(summaryBody).contains("original audit", "untrusted context data").doesNotContain("recent context", "fresh input", "generated memory", "sk-context-test");
+                assertThat(f.lastBody()).contains("generated memory", "recent context", "fresh input").doesNotContain("original audit");
+                saved = session.ref().orElseThrow();
+            }
+            try (Agent agent = f.summaryAgent(policy); Session session = agent.resumeSession(saved, options)) {
+                f.textReply("updated memory");
+                assertThat(session.run(Input.text("after restart"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.lastBody()).contains("updated memory", "fresh input", "after restart").doesNotContain("recent context", "original audit");
+            }
+            try (Agent agent = f.agent(Optional.empty()); Session session = agent.resumeSession(saved, options)) {
+                assertThat(session.run(Input.text("policy disabled"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.lastBody()).contains("updated memory", "policy disabled");
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void summaryHttpFailureLeavesDurableNativeReplayUsable(boolean claude)
+            throws Exception
+    {
+        try (Fixture f = new Fixture(claude)) {
+            var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+            SessionRef saved;
+            try (Agent agent = f.summaryAgent(context -> Optional.of(new ContextSummarizationPlan(0, 64))); Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("original audit " + "x".repeat(12000)))).isInstanceOf(TurnResult.Completed.class);
+                if (claude) {
+                    f.anthropic.reply(503, "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Unavailable\"}}");
+                }
+                else {
+                    f.deepseek.reply(503, "{\"error\":{\"message\":\"Unavailable\",\"type\":\"server_error\"}}");
+                }
+                int before = f.requests();
+                assertThat(session.run(Input.text("failed fresh input"))).isInstanceOf(TurnResult.Failed.class);
+                assertThat(f.requests()).isEqualTo(before + 1);
+                saved = session.ref().orElseThrow();
+            }
+            try (Agent agent = f.agent(Optional.empty()); Session session = agent.resumeSession(saved, options)) {
+                assertThat(session.run(Input.text("retry normally"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.lastBody()).contains("original audit", "retry normally").doesNotContain("failed fresh input");
+            }
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
@@ -244,17 +310,39 @@ class TestApiContextCompaction
 
         String lastBody() { return anthropic != null ? anthropic.requests().getLast().body().toString() : deepseek.requests().getLast().body().toString(); }
 
-        Agent agent(Optional<ContextCompactor> policy)
+        List<String> bodies()
+        {
+            return anthropic != null ? anthropic.requests().stream().map(request -> request.body().toString()).toList()
+                    : deepseek.requests().stream().map(request -> request.body().toString()).toList();
+        }
+
+        void textReply(String text)
+        {
+            if (anthropic != null) {
+                anthropic.reply(200, AnthropicHttpFixture.textStream(text));
+            }
+            else {
+                deepseek.reply(200, DeepSeekHttpFixture.textStream(text));
+            }
+        }
+
+        Agent summaryAgent(ContextSummarizationPolicy policy) { return agent(Optional.empty(), Optional.of(policy)); }
+
+        Agent agent(Optional<ContextCompactor> policy) { return agent(policy, Optional.empty()); }
+
+        private Agent agent(Optional<ContextCompactor> policy, Optional<ContextSummarizationPolicy> summarization)
         {
             if (anthropic != null) {
                 var builder = ClaudeApi.builder().model(model).apiKey(() -> "sk-context-test").baseUrl(anthropic.baseUrl())
                         .stateDirectory(directory.resolve("state")).profileDirectory(directory.resolve("profile"));
                 policy.ifPresent(builder::contextCompactor);
+                summarization.ifPresent(builder::contextSummarization);
                 return builder.build();
             }
             var builder = DeepSeekApi.builder().model(model).apiKey(() -> "sk-context-test").baseUrl(deepseek.baseUrl())
                     .stateDirectory(directory.resolve("state")).profileDirectory(directory.resolve("profile"));
             policy.ifPresent(builder::contextCompactor);
+            summarization.ifPresent(builder::contextSummarization);
             return builder.build();
         }
 

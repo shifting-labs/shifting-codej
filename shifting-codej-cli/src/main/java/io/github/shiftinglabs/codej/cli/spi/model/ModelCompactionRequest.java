@@ -31,12 +31,21 @@ public record ModelCompactionRequest(String model, ModelHistory history, ModelRe
         requireNonNull(replay, "replay is null");
         requireNonNull(compaction, "compaction is null");
         requireNonNull(deadline, "deadline is null");
+        validateBoundary(history, replay, compaction.retainExchanges());
+    }
+
+    /** Validate a summary boundary before generating its text or spending an inference budget. */
+    public static void validateBoundary(ModelHistory history, ModelReplayState replay, int retainExchanges)
+    {
+        requireNonNull(history, "history is null");
+        requireNonNull(replay, "replay is null");
+        checkArgument(retainExchanges >= 0, "retained exchanges must not be negative");
         var exchanges = history.exchanges();
         checkArgument(history.complete(), "compaction requires complete history");
         checkArgument(exchanges.stream().allMatch(exchange -> exchange.providerId().equals(replay.providerId())), "compaction cannot mix provider history");
-        checkArgument(compaction.retainExchanges() < exchanges.size(), "compaction must summarize a nonempty prefix");
+        checkArgument(retainExchanges < exchanges.size(), "compaction must summarize a nonempty prefix");
         checkArgument(exchanges.getLast().toolCalls().isEmpty(), "cannot compact a pending tool batch");
-        int boundary = exchanges.size() - compaction.retainExchanges();
+        int boundary = exchanges.size() - retainExchanges;
         checkArgument(exchanges.get(boundary - 1).toolCalls().isEmpty(), "compaction cannot split a tool batch");
         checkArgument(boundary == exchanges.size() || exchanges.get(boundary).input() instanceof ModelInput.UserMessage,
                 "retained context must start with a complete user exchange");

@@ -13,11 +13,13 @@
  */
 package io.github.shiftinglabs.codej.cli.spi.extension;
 
+import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -83,6 +85,23 @@ class TestEngineExtensionSpi
         assertThatThrownBy(() -> new EngineObservation.TurnFinished("turn", io.github.shiftinglabs.codej.cli.driver.AgentTurnResult.State.COMPLETED,
                 java.time.Duration.ofSeconds(-1)))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void summaryObservationsExposeOnlyValidatedMetadata()
+    {
+        var value = new EngineObservation.ContextSummaryCompleted("turn", "request", ModelResponse.StopReason.COMPLETED, Optional.empty());
+        assertThat(value.turnId()).isEqualTo("turn");
+        assertThat(value.requestId()).isEqualTo("request");
+        assertThat(value.stopReason()).isEqualTo(ModelResponse.StopReason.COMPLETED);
+        assertThat(value.usage()).isEmpty();
+        assertThatThrownBy(() -> new EngineObservation.ContextSummaryCompleted(" ", "request", ModelResponse.StopReason.COMPLETED, Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextSummaryCompleted("turn", " ", ModelResponse.StopReason.COMPLETED, Optional.empty()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextSummaryCompleted("turn", "request", null, Optional.empty())).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextSummaryCompleted("turn", "request", ModelResponse.StopReason.COMPLETED, null))
+                .isInstanceOf(NullPointerException.class);
     }
 
     private static EngineExtensionProvider<String> provider(String id, java.util.function.BiFunction<String, EngineExtensionContext, EngineExtension> factory)

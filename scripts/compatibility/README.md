@@ -168,3 +168,9 @@ replay twice, and resumes across agents with the policy later disabled. The poli
 canonical history while outgoing requests contain the compacted active context. Loopback HTTP
 counts prove that compaction adds no hidden inference calls; no live model or provider CLI is used.
 Older candidates skip this additive fixture and keep the existing baseline consumer checks.
+
+`ContextSummarizationConsumer` is enabled separately when `ContextSummarizationPolicy` is present.
+It reuses that loopback fixture to opt both public facades into engine-owned LLM summaries. Five
+conversation inferences plus two selected summary inferences are counted per provider, with repeated
+compaction, full audit-prefix visibility and durable resume after disabling the policy. Summary
+generation uses the existing model client; no live provider or separate summary backend is used.

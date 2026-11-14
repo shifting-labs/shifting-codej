@@ -96,6 +96,19 @@ public interface EngineObservation
         }
     }
 
+    /** An isolated summary response was received and charged; it is not a durable conversation exchange. */
+    record ContextSummaryCompleted(String turnId, String requestId, ModelResponse.StopReason stopReason, Optional<ProviderUsageSample> usage)
+            implements EngineObservation
+    {
+        public ContextSummaryCompleted
+        {
+            checkText(turnId, "turnId");
+            checkText(requestId, "requestId");
+            requireNonNull(stopReason, "stopReason is null");
+            requireNonNull(usage, "usage is null");
+        }
+    }
+
     enum Admission
     {
         INVALID_ARGUMENTS,
