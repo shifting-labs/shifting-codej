@@ -30,6 +30,7 @@ public final class ModelRequest
     private final int maximumOutputTokens;
     private final String instructions;
     private final Optional<ModelReplayState> replayState;
+    private final Optional<ModelHistory> history;
     private final List<ToolDefinition> tools;
     private final Optional<String> effort;
     private final Optional<String> serviceTier;
@@ -43,11 +44,16 @@ public final class ModelRequest
         maximumOutputTokens = builder.maximumOutputTokens;
         instructions = builder.instructions;
         replayState = builder.replayState;
+        history = builder.history;
         tools = builder.tools;
         effort = builder.effort;
         serviceTier = builder.serviceTier;
         deadline = builder.deadline;
         checkArgument(!(input instanceof ModelInput.ToolResults) || replayState.isPresent(), "tool results require replay state");
+        history.ifPresent(value -> {
+            value.validateNext(input);
+            checkArgument(value.exchanges().stream().noneMatch(exchange -> exchange.requestId().equals(requestId)), "history already contains this request ID");
+        });
     }
 
     /** requestId is local correlation, not a provider idempotency guarantee. The token bound must be explicit and positive. */
@@ -67,6 +73,9 @@ public final class ModelRequest
     public String instructions() { return instructions; }
 
     public Optional<ModelReplayState> replayState() { return replayState; }
+
+    /** Optional canonical prefix, excluding input(). Native replay remains authoritative for exact continuation. */
+    public Optional<ModelHistory> history() { return history; }
 
     public List<ToolDefinition> tools() { return tools; }
 
@@ -96,6 +105,7 @@ public final class ModelRequest
         private final int maximumOutputTokens;
         private String instructions = "";
         private Optional<ModelReplayState> replayState = Optional.empty();
+        private Optional<ModelHistory> history = Optional.empty();
         private List<ToolDefinition> tools = List.of();
         private Optional<String> effort = Optional.empty();
         private Optional<String> serviceTier = Optional.empty();
@@ -127,6 +137,13 @@ public final class ModelRequest
             List<ToolDefinition> copy = List.copyOf(tools);
             checkArgument(copy.stream().map(ToolDefinition::name).distinct().count() == copy.size(), "duplicate tool name");
             this.tools = copy;
+            return this;
+        }
+
+        /** Supply the immutable known conversation prefix; existing clients may continue using native replay. */
+        public Builder history(ModelHistory history)
+        {
+            this.history = Optional.of(requireNonNull(history, "history is null"));
             return this;
         }
 

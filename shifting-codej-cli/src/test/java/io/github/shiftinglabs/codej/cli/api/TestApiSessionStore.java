@@ -105,18 +105,18 @@ class TestApiSessionStore
         String id = UUID.randomUUID().toString();
         ApiEngineConfig original = builder().build();
         try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, original)) {
-            assertThat(store.state().version()).isEqualTo(1);
+            assertThat(store.state().version()).isEqualTo(ApiCheckpoint.CURRENT_VERSION);
         }
         ApiEngineConfig wrong = ApiEngineConfig.builder(new ConnectorIdentity("fake-api", "other"), new AgentLaneId("fake-api"), "model",
                 () -> { throw new AssertionError("No client construction"); }).build();
         assertThatThrownBy(() -> ApiSessionStore.open(directory, id, true, wrong)).isInstanceOf(AgentUnavailableException.class);
         Path file = directory.resolve("api-sessions").resolve(id).resolve("checkpoint.json");
         var fixed = (com.fasterxml.jackson.databind.node.ObjectNode) ApiCheckpointCodec.JSON.readTree(Files.readString(file));
-        Files.writeString(file, ApiCheckpointCodec.JSON.writeValueAsString(fixed.put("version", 2)));
+        Files.writeString(file, ApiCheckpointCodec.JSON.writeValueAsString(fixed.put("version", 999)));
         assertThatThrownBy(() -> ApiSessionStore.open(directory, id, true, original)).isInstanceOf(AgentUnavailableException.class);
-        Files.writeString(file, ApiCheckpointCodec.JSON.writeValueAsString(fixed.put("version", 1)));
+        Files.writeString(file, ApiCheckpointCodec.JSON.writeValueAsString(fixed.put("version", ApiCheckpoint.CURRENT_VERSION)));
         try (ApiSessionStore store = ApiSessionStore.open(directory, id, true, original)) {
-            assertThat(store.state().version()).isEqualTo(1);
+            assertThat(store.state().version()).isEqualTo(ApiCheckpoint.CURRENT_VERSION);
         }
     }
 

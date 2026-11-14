@@ -412,6 +412,89 @@ class TestApiAgentDriver
     }
 
     @Test
+    void neutralHistoryTracksToolContinuationAndSurvivesRestartWithoutPrivateReplayContent()
+            throws Exception
+    {
+        FakeClient first = new FakeClient();
+        first.script.add((request, sink) -> {
+            assertThat(request.history().orElseThrow().complete()).isTrue();
+            assertThat(request.history().orElseThrow().exchanges()).isEmpty();
+            return completed(toolResponse("lookup", "{}"));
+        });
+        first.script.add((request, sink) -> {
+            var history = request.history().orElseThrow();
+            assertThat(history.exchanges()).hasSize(1);
+            var exchange = history.exchanges().getFirst();
+            assertThat(exchange.input()).isEqualTo(new ModelInput.UserMessage("Look up", List.of()));
+            assertThat(exchange.toolCalls()).containsExactly(new ModelResponse.ToolCall("call-1", "lookup", "{}"));
+            assertThat(exchange.providerId()).isEqualTo("fake-api");
+            assertThat(exchange.model()).isEqualTo(request.model());
+            assertThat(exchange.text()).isEmpty();
+            assertThat(request.input()).isEqualTo(new ModelInput.ToolResults(List.of(new ModelInput.ToolResult("call-1", "Found", false))));
+            return answer(request, sink);
+        });
+        Tool tool = Tool.withSchema("lookup", "Lookup", "{}", input -> "Found");
+        AgentSessionRef reference;
+        try (ApiAgentDriver driver = driver(first); AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
+            assertThat(done(session.start(command("Look up"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            reference = session.reference();
+        }
+        FakeClient second = new FakeClient();
+        second.script.add((request, sink) -> {
+            var history = request.history().orElseThrow();
+            assertThat(history.complete()).isTrue();
+            assertThat(history.exchanges()).hasSize(2);
+            assertThat(history.exchanges().getLast().input()).isInstanceOf(ModelInput.ToolResults.class);
+            assertThat(history.exchanges().getLast().text()).isEqualTo("answer");
+            assertThat(history.toString()).doesNotContain("after-call", "Found");
+            assertThat(request.input()).isEqualTo(new ModelInput.UserMessage("Continue", List.of()));
+            return answer(request, sink);
+        });
+        try (ApiAgentDriver driver = driver(second); AgentSession session = driver.open(context(Optional.of(reference), List.of(tool), allow()), event -> {})) {
+            assertThat(done(session.start(command("Continue"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+        }
+        try (ApiSessionStore store = ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, config(new FakeClient()).build())) {
+            assertThat(store.state().history().exchanges()).hasSize(3);
+            assertThat(store.state().history().complete()).isTrue();
+        }
+    }
+
+    @Test
+    void legacyRestartPreservesPrivateContinuationAndExtendsOnlyTheKnownHistorySuffix()
+            throws Exception
+    {
+        AgentSessionRef reference;
+        try (ApiAgentDriver driver = driver(new FakeClient()); AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("Legacy input"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            reference = session.reference();
+        }
+        var old = (com.fasterxml.jackson.databind.node.ObjectNode) ApiCheckpointCodec.JSON.readTree(Files.readAllBytes(checkpoint(reference)));
+        String nativeReplay = old.withObject("replay").path("payload").textValue();
+        old.put("version", 1);
+        old.remove("history");
+        byte[] legacy = ApiCheckpointCodec.JSON.writeValueAsBytes(old);
+        Files.write(checkpoint(reference), legacy);
+        FakeClient client = new FakeClient();
+        client.script.add((request, sink) -> {
+            assertThat(request.history().orElseThrow().complete()).isFalse();
+            assertThat(request.history().orElseThrow().exchanges()).isEmpty();
+            assertThat(request.replayState().orElseThrow().payload()).isEqualTo(nativeReplay);
+            return answer(request, sink);
+        });
+        try (ApiAgentDriver driver = driver(client); AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(Files.readAllBytes(checkpoint(reference))).isEqualTo(legacy);
+            assertThat(session.reference().contractVersion()).isEqualTo(1);
+            assertThat(done(session.start(command("Known suffix"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+        }
+        try (ApiSessionStore store = ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, config(new FakeClient()).build())) {
+            assertThat(store.state().version()).isEqualTo(ApiCheckpoint.CURRENT_VERSION);
+            assertThat(store.state().history().complete()).isFalse();
+            assertThat(store.state().history().exchanges()).hasSize(1);
+            assertThat(store.state().history().exchanges().getFirst().input()).isEqualTo(new ModelInput.UserMessage("Known suffix", List.of()));
+        }
+    }
+
+    @Test
     void replaySurvivesDriverRestartAndKeysAreAbsentFromVisibleEvents()
             throws Exception
     {
@@ -598,11 +681,13 @@ class TestApiAgentDriver
             assertThat(setup.toolContracts()).isPresent();
             var legacy = new ApiRequestSetup(setup.model(), setup.instructions(), setup.effort(), setup.tier(), setup.tools(), Optional.empty());
             store.save(new ApiCheckpoint(state.version(), state.id(), state.identity(), state.lane(), state.phase(), state.journal(), state.receipts(),
-                    state.replay(), Optional.of(legacy), state.input()));
+                    state.replay(), Optional.of(legacy), state.input(), state.history()));
         }
         FakeClient second = new FakeClient();
         second.script.add((request, sink) -> {
             assertThat(((ModelInput.ToolResults) request.input()).results()).containsExactly(new ModelInput.ToolResult("call-1", "Report saved", false));
+            assertThat(request.history().orElseThrow().exchanges()).hasSize(1);
+            assertThat(request.history().orElseThrow().exchanges().getFirst().input()).isNotEqualTo(new ModelInput.UserMessage("Continue", List.of()));
             return answer(request, sink);
         });
         try (ApiAgentDriver driver = driver(second); AgentSession session = driver.open(context(Optional.of(reference), List.of(tool), allow()), event -> {})) {
@@ -627,7 +712,7 @@ class TestApiAgentDriver
             ApiCheckpoint state = store.state();
             var receipt = new ApiToolReceipt("call-1", "write_report", "{}", Optional.empty(), true, Optional.empty());
             store.save(new ApiCheckpoint(state.version(), state.id(), state.identity(), state.lane(), ApiCheckpoint.Phase.TOOLS,
-                    state.journal(), List.of(receipt), state.replay(), state.setup(), state.input()));
+                    state.journal(), List.of(receipt), state.replay(), state.setup(), state.input(), new io.github.shiftinglabs.codej.cli.spi.model.ModelHistory(false, List.of())));
         }
         try (ApiAgentDriver driver = driver(client); AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
             assertThat(session.resumable()).isFalse();

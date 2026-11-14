@@ -95,6 +95,9 @@ recovery behavior and borrowed-resource ownership. Injected repository implement
 the same commit/failure contract. No background persistence, new pools, retry policy, tool
 parallelism, hot reload, DSH dependency or new public SPI is introduced in this step.
 
+The follow-up [conversation history stage](conversation-history.md) now adds format 2 with explicit
+format-1 read migration. The version-1 layout described above records the initial separation step.
+
 ## Checkbox plan
 
 - [x] Study DSH composition, sessions, prompt assembly, tool execution, adapters and SDK limitations.
@@ -106,7 +109,8 @@ parallelism, hot reload, DSH dependency or new public SPI is introduced in this 
 - [x] Add focused typed-state, malformed-file, recovery and component-boundary coverage.
 - [x] Run affected engine/store/dispatcher/provider tests with one fork and bounded JVM resources.
 - [x] Verify unchanged public signatures and preserve unrelated work; commit the completed step.
-- [ ] Add provider-neutral conversation projections and explicit versioned migrations separately.
+- [x] Add provider-neutral settled-exchange history and explicit versioned migrations; see
+      [conversation history](conversation-history.md).
 - [ ] Add scoped prompt/context contributors, policy extensions and observers when their callers exist.
 - [ ] Evaluate bounded parallel tools under a host-wide budget, with cancellation/ordering contracts.
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event

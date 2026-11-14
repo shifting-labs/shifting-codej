@@ -40,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TestApiCheckpointCodec
 {
     @Test
-    void versionOneFixtureRoundTripsEveryJournalAndInputKindWithoutChangingWireShape()
+    void versionOneMigrationPreservesLegacyFactsAndMarksTheUnknownPrefix()
             throws Exception
     {
         byte[] original = fixture();
@@ -53,7 +53,14 @@ class TestApiCheckpointCodec
         assertThat(state.journal().getFirst()).isInstanceOf(ApiJournal.User.class);
         assertThat(((ApiJournal.User) state.journal().getFirst()).input().attachments().getFirst().name()).isEqualTo("image.png");
         assertThat(state.receipts().getFirst().result()).contains(new ToolRegistration.Result("Saved", false));
-        assertThat(ApiCheckpointCodec.JSON.readTree(ApiCheckpointCodec.encode(state))).isEqualTo(ApiCheckpointCodec.JSON.readTree(original));
+        assertThat(state.version()).isEqualTo(ApiCheckpoint.CURRENT_VERSION);
+        assertThat(state.history().complete()).isFalse();
+        assertThat(state.history().exchanges()).isEmpty();
+        var upgraded = (ObjectNode) ApiCheckpointCodec.JSON.readTree(ApiCheckpointCodec.encode(state));
+        assertThat(upgraded.withObject("history").path("complete").booleanValue()).isFalse();
+        upgraded.remove("history");
+        upgraded.put("version", 1);
+        assertThat(upgraded).isEqualTo(ApiCheckpointCodec.JSON.readTree(original));
         assertThat(state.toString()).doesNotContain("opaque", "signed", "Hello", "Host instructions");
         assertThat(state.setup().orElseThrow().toString()).doesNotContain("Host instructions");
     }
@@ -120,7 +127,9 @@ class TestApiCheckpointCodec
                 malformed("fractional version", root -> root.put("version", 1.5)),
                 malformed("missing version", root -> root.remove("version")),
                 malformed("null version", root -> root.putNull("version")),
-                malformed("foreign version", root -> root.put("version", 2)),
+                malformed("future version", root -> root.put("version", 999)),
+                malformed("current version without history", root -> root.put("version", 2)),
+                malformed("legacy version with new history", root -> root.putObject("history").put("complete", true).putArray("exchanges")),
                 malformed("noncanonical id", root -> root.put("id", "../escape")),
                 malformed("unknown phase", root -> root.put("phase", "TOOLS")),
                 malformed("missing tools replay", root -> root.remove("replay")),
@@ -151,7 +160,8 @@ class TestApiCheckpointCodec
             throws Exception
     {
         String valid = new String(ApiCheckpointCodec.encode(initial()), StandardCharsets.UTF_8);
-        for (String corrupt : List.of(valid.replace("\"version\":1", "\"version\":1,\"version\":1"), valid + " {}", "null", "[]")) {
+        String version = "\"version\":" + ApiCheckpoint.CURRENT_VERSION;
+        for (String corrupt : List.of(valid.replace(version, version + "," + version), valid + " {}", "null", "[]")) {
             assertThatThrownBy(() -> ApiCheckpointCodec.decode(corrupt.getBytes(StandardCharsets.UTF_8))).isInstanceOf(IOException.class);
         }
         assertThatThrownBy(() -> initial().withPhase(ApiCheckpoint.Phase.TOOLS)).isInstanceOf(IllegalArgumentException.class);

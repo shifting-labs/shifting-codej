@@ -15,6 +15,7 @@ package io.github.shiftinglabs.codej.cli.api;
 
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
@@ -30,13 +31,15 @@ import static java.util.Objects.requireNonNull;
 /** Immutable committed snapshot. Changes remain local until the repository's durable save succeeds. */
 record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLaneId lane, Phase phase,
         List<ApiJournal.Entry> journal, List<ApiToolReceipt> receipts, Optional<ModelReplayState> replay,
-        Optional<ApiRequestSetup> setup, Optional<ModelInput> input)
+        Optional<ApiRequestSetup> setup, Optional<ModelInput> input, ModelHistory history)
 {
+    static final int CURRENT_VERSION = 2;
+
     enum Phase { READY, REQUEST, TOOLS, BLOCKED }
 
     ApiCheckpoint
     {
-        checkArgument(version == 1, "unsupported checkpoint version");
+        checkArgument(version == CURRENT_VERSION, "unsupported checkpoint version");
         checkArgument(UUID.fromString(id).toString().equals(id), "noncanonical session id");
         requireNonNull(identity, "identity is null");
         requireNonNull(lane, "lane is null");
@@ -46,14 +49,25 @@ record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLa
         requireNonNull(replay, "replay is null");
         requireNonNull(setup, "setup is null");
         requireNonNull(input, "input is null");
+        requireNonNull(history, "history is null");
         checkArgument(receipts.stream().map(ApiToolReceipt::id).distinct().count() == receipts.size(), "duplicate tool receipt");
         checkArgument(phase != Phase.TOOLS || (replay.isPresent() && setup.isPresent() && !receipts.isEmpty()), "incomplete tool checkpoint");
         checkArgument(phase != Phase.REQUEST || (setup.isPresent() && input.isPresent()), "incomplete request checkpoint");
+        if (phase == Phase.REQUEST) {
+            history.validateNext(input.orElseThrow());
+        }
+        if (!history.exchanges().isEmpty()) {
+            List<ModelResponse.ToolCall> pending = history.exchanges().getLast().toolCalls();
+            checkArgument(phase != Phase.READY || pending.isEmpty(), "ready history has unanswered tool calls");
+            checkArgument(phase != Phase.TOOLS || pending.equals(receipts.stream()
+                    .map(receipt -> new ModelResponse.ToolCall(receipt.id(), receipt.name(), receipt.arguments())).toList()), "history and tool receipts disagree");
+        }
     }
 
     static ApiCheckpoint initial(String id, ConnectorIdentity identity, AgentLaneId lane)
     {
-        return new ApiCheckpoint(1, id, identity, lane, Phase.READY, List.of(), List.of(), Optional.empty(), Optional.empty(), Optional.empty());
+        return new ApiCheckpoint(CURRENT_VERSION, id, identity, lane, Phase.READY, List.of(), List.of(), Optional.empty(), Optional.empty(), Optional.empty(),
+                new ModelHistory(true, List.of()));
     }
 
     boolean recoverable() { return phase != Phase.REQUEST && phase != Phase.BLOCKED && receipts.stream().noneMatch(ApiToolReceipt::uncertain); }
@@ -76,9 +90,15 @@ record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLa
 
     ApiCheckpoint observed(String requestId, ModelResponse response)
     {
-        return copy(response.stopReason() == ModelResponse.StopReason.TOOL_CALLS ? Phase.TOOLS : Phase.READY, journal,
+        checkArgument(phase == Phase.REQUEST, "a response requires a submitted request");
+        checkArgument(journal.getLast() instanceof ApiJournal.Request request && request.id().equals(requestId), "response request ID mismatch");
+        ModelHistory nextHistory = history.append(new ModelHistory.Exchange(requestId, response.replayState().providerId(), setup.orElseThrow().model(),
+                input.orElseThrow(), response.text(), response.toolCalls(), response.stopReason()));
+        List<ApiJournal.Entry> entries = new ArrayList<>(journal);
+        entries.add(new ApiJournal.Response(requestId, response.stopReason()));
+        return new ApiCheckpoint(version, id, identity, lane, response.stopReason() == ModelResponse.StopReason.TOOL_CALLS ? Phase.TOOLS : Phase.READY, entries,
                 response.toolCalls().stream().map(call -> ApiToolReceipt.pending(requestId, call)).toList(),
-                Optional.of(response.replayState()), setup, input).append(new ApiJournal.Response(requestId, response.stopReason()));
+                Optional.of(response.replayState()), setup, input, nextHistory);
     }
 
     ApiCheckpoint started(int index)
@@ -103,7 +123,7 @@ record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLa
     private ApiCheckpoint copy(Phase nextPhase, List<ApiJournal.Entry> entries, List<ApiToolReceipt> calls, Optional<ModelReplayState> nextReplay,
             Optional<ApiRequestSetup> nextSetup, Optional<ModelInput> nextInput)
     {
-        return new ApiCheckpoint(version, id, identity, lane, nextPhase, entries, calls, nextReplay, nextSetup, nextInput);
+        return new ApiCheckpoint(version, id, identity, lane, nextPhase, entries, calls, nextReplay, nextSetup, nextInput, history);
     }
 
     @Override

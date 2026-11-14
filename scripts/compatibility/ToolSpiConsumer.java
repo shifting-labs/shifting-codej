@@ -142,8 +142,14 @@ public final class ToolSpiConsumer
                 public ModelCall generate(ModelRequest request, ModelEventSink events)
                 {
                     boolean tool = ++calls == 1;
+                    var history = request.history().orElseThrow();
+                    require(history.complete() && history.exchanges().size() == (tool ? 0 : 1), "Engine lost canonical history");
+                    history.validateNext(request.input());
                     if (!tool) {
                         require(request.input().equals(new ModelInput.ToolResults(List.of(new ModelInput.ToolResult("call", "hello", false)))), "Engine lost typed result");
+                        var exchange = history.exchanges().getFirst();
+                        require(exchange.providerId().equals("fixture") && exchange.model().equals("model"), "History lost model provenance");
+                        require(exchange.text().isEmpty() && exchange.toolCalls().getFirst().id().equals("call"), "History lost the assistant tool call");
                     }
                     ModelResponse response = new ModelResponse(tool ? "" : "done", tool ? List.of(new ModelResponse.ToolCall("call", "greet", "{}")) : List.of(),
                             tool ? ModelResponse.StopReason.TOOL_CALLS : ModelResponse.StopReason.COMPLETED, new ModelReplayState("fixture", 1, "replay"), Optional.empty());

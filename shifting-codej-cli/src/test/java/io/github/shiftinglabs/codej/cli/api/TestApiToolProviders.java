@@ -723,7 +723,7 @@ class TestApiToolProviders
                     ApiRequestSetup setup = state.setup().orElseThrow();
                     var legacy = new ApiRequestSetup(setup.model(), setup.instructions(), setup.effort(), setup.tier(), setup.tools(), Optional.empty());
                     store.save(new ApiCheckpoint(state.version(), state.id(), state.identity(), state.lane(), state.phase(), state.journal(), state.receipts(),
-                            state.replay(), Optional.of(legacy), state.input()));
+                            state.replay(), Optional.of(legacy), state.input(), state.history()));
                 }
             }
             Provider changed = new Provider();

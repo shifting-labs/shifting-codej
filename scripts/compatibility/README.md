@@ -143,3 +143,8 @@ real shared engine with a fake ModelClient. It approves and executes the configu
 checks its result returns to the model boundary, and closes the session/tool set. This example
 uses one bounded engine worker and temporary checkpoint state, with no subprocess, network or
 live model request. Configured providers remain separate from model/agent connectors.
+
+That model client also consumes the additive `ModelRequest.history()` SPI: it verifies a complete
+empty prefix on the first request, then validates ordered tool continuation against the settled
+assistant exchange and its provider/model provenance. Native replay remains separate from this
+provider-neutral prefix. This example runs from the shaded artifact with only the JDK on its classpath.

@@ -24,6 +24,8 @@ import java.util.Optional;
  * Provider adapter for individual inference requests, below the agent connector SPI. A shared
  * agent engine owns sessions, persistence, permissions and tool execution. This adapter never
  * invokes host tools or runs an agent loop. Provider SDK objects do not cross this boundary.
+ * Requests may additionally carry a provider-neutral history prefix. Existing adapters can ignore
+ * it and continue using their lossless private replay; partial histories must never replace replay.
  *
  * <p>A client is thread-safe and may serve independent calls concurrently. Construction makes no
  * inference request. Credentials belong to its configuration, never to requests or replay state.

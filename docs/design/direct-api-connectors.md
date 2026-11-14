@@ -4,13 +4,18 @@ Status: option 2 selected: own the Java engine and selectively adopt Codex runti
 The model SPI, shared engine, Anthropic Java SDK and direct DeepSeek adapters, additive
 `ClaudeApi` / `DeepSeekApi` facades, and opt-in contained coding tools are implemented. Validation uses fake clients and loopback HTTP; no live account was exercised.
 
-The [DeepSeek Harness study and separation plan](deepseek-harness-study.md) records the next
+The [DeepSeek Harness study and separation plan](deepseek-harness-study.md) records the first
 internal refactor. `ApiAgentDriver` remains the compatible public facade; package-private
 `ApiEngine`, `ApiSession` and `ApiTurn` separate runtime ownership, session resources and execution.
 `ApiSessionRepository` and `ApiPromptAssembler` are internal substitution boundaries.
 `ApiCheckpoint`, `ApiRequestSetup`, `ApiToolReceipt` and `ApiJournal` carry validated immutable
-state; `ApiCheckpointCodec` alone binds the version-1 checkpoint wire format. These types remain
-in `io.github.shiftinglabs.codej.cli.api` and do not change the published artifact layout or SPI.
+state; `ApiCheckpointCodec` alone binds the checkpoint wire format. These types remain
+in `io.github.shiftinglabs.codej.cli.api` and do not change the published artifact layout.
+The [conversation history and migration plan](conversation-history.md) adds optional
+`ModelRequest.history()` through `ModelHistory`, with no new mandatory adapter method. New
+checkpoints use format 2; format 1 migrates in memory and retains native replay and pending-tool
+receipts. Public session-reference versions remain unchanged, and incomplete legacy prefixes are
+explicit rather than reconstructed from opaque provider data.
 
 ## Boundaries
 

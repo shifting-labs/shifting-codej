@@ -221,20 +221,21 @@ final class ApiTurn
             String requestId = UUID.randomUUID().toString();
             ApiCheckpoint before = session.store.state();
             ModelRequest.Builder builder = ModelRequest.builder(requestId, setup.model(), nextInput,
-                    (int) Math.min(config.maximumOutputTokens, config.maximumTokens - tokens)).instructions(setup.instructions()).tools(setup.tools());
+                    (int) Math.min(config.maximumOutputTokens, config.maximumTokens - tokens)).instructions(setup.instructions()).tools(setup.tools()).history(before.history());
             before.replay().ifPresent(builder::replayState);
             setup.effort().ifPresent(builder::effort);
             setup.tier().ifPresent(builder::serviceTier);
             if (!command.maximumRuntime().isZero()) {
                 builder.deadline(started.plus(command.maximumRuntime()));
             }
+            ModelRequest request = builder.build();
             save(before.submitting(requestId, setup, nextInput));
             ModelResponse response;
             StreamText stream = new StreamText(requestId);
             try {
                 checkStop();
                 interruptible = true;
-                call = session.engine.client.generate(builder.build(), stream::text);
+                call = session.engine.client.generate(request, stream::text);
                 interruptible = false;
                 Thread.interrupted();
                 if (stopping.get() != null) {

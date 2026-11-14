@@ -38,6 +38,7 @@ import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import io.github.shiftinglabs.codej.cli.driver.AgentAttachment;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
@@ -51,8 +52,9 @@ import java.util.Locale;
 import java.util.Optional;
 
 import static com.fasterxml.jackson.annotation.JsonInclude.Include.NON_ABSENT;
+import static com.google.common.base.Preconditions.checkArgument;
 
-/** The version-1 wire boundary. Strict record binding never coerces untrusted checkpoint metadata. */
+/** Versioned wire boundary. Strict record binding and pure migrations precede all repository writes. */
 final class ApiCheckpointCodec
 {
     static final ObjectMapper JSON = mapper();
@@ -114,9 +116,15 @@ final class ApiCheckpointCodec
     {
         try {
             CheckpointData data = JSON.readValue(bytes, CheckpointData.class);
-            return new ApiCheckpoint(data.version(), data.id(), new ConnectorIdentity(data.connector(), data.profile()), new AgentLaneId(data.lane()),
-                    phase(data.phase()), data.journal().stream().map(EventData::entry).toList(), data.receipts().stream().map(ReceiptData::receipt).toList(),
-                    data.replay().map(ReplayData::replay), data.setup().map(SetupData::setup), data.input().map(InputData::input));
+            ApiCheckpoint.Phase phase = phase(data.phase());
+            List<ApiJournal.Entry> journal = data.journal().stream().map(EventData::entry).toList();
+            Optional<ModelReplayState> replay = data.replay().map(ReplayData::replay);
+            ModelHistory history = ApiCheckpointMigrations.history(data.version(), data.history().map(HistoryData::history), phase, journal, replay);
+            ApiCheckpoint state = new ApiCheckpoint(ApiCheckpoint.CURRENT_VERSION, data.id(), new ConnectorIdentity(data.connector(), data.profile()), new AgentLaneId(data.lane()),
+                    phase, journal, data.receipts().stream().map(ReceiptData::receipt).toList(), replay,
+                    data.setup().map(SetupData::setup), data.input().map(InputData::input), history);
+            validateHistory(state);
+            return state;
         }
         catch (IllegalArgumentException | NullPointerException failure) {
             throw new IOException("Invalid API checkpoint", failure);
@@ -126,10 +134,28 @@ final class ApiCheckpointCodec
     static byte[] encode(ApiCheckpoint state)
             throws IOException
     {
+        validateHistory(state);
         return JSON.writeValueAsBytes(new CheckpointData(state.version(), state.id(), state.identity().connectorId(), state.identity().profileId(),
                 state.lane().value(), state.phase().name().toLowerCase(Locale.ROOT), state.journal().stream().map(ApiCheckpointCodec::event).toList(),
                 state.receipts().stream().map(ReceiptData::of).toList(), state.replay().map(ReplayData::of), state.setup().map(SetupData::of),
-                state.input().map(ApiCheckpointCodec::input)));
+                state.input().map(ApiCheckpointCodec::input), Optional.of(HistoryData.of(state.history()))));
+    }
+
+    /** Validate only at persistence boundaries; ordinary immutable snapshot reads remain constant-time. */
+    private static void validateHistory(ApiCheckpoint state)
+    {
+        List<ApiJournal.Response> responses = state.journal().stream().filter(ApiJournal.Response.class::isInstance).map(ApiJournal.Response.class::cast).toList();
+        List<ModelHistory.Exchange> exchanges = state.history().exchanges();
+        int missing = responses.size() - exchanges.size();
+        checkArgument(missing >= 0 && (!state.history().complete() || missing == 0), "history completeness disagrees with response journal");
+        for (int index = 0; index < exchanges.size(); index++) {
+            ApiJournal.Response response = responses.get(missing + index);
+            ModelHistory.Exchange exchange = exchanges.get(index);
+            checkArgument(response.id().equals(exchange.requestId()) && response.stop() == exchange.stopReason(), "history disagrees with response journal");
+        }
+        if (!exchanges.isEmpty() && (state.phase() == ApiCheckpoint.Phase.READY || state.phase() == ApiCheckpoint.Phase.TOOLS)) {
+            checkArgument(state.setup().isPresent() && state.setup().orElseThrow().model().equals(exchanges.getLast().model()), "history model disagrees with saved setup");
+        }
     }
 
     static ApiRequestSetup decodeSetup(byte[] bytes)
@@ -158,7 +184,30 @@ final class ApiCheckpointCodec
             @JsonProperty(required = true) String connector, @JsonProperty(required = true) String profile, @JsonProperty(required = true) String lane,
             @JsonProperty(required = true) String phase, @JsonProperty(required = true) List<EventData> journal,
             @JsonProperty(required = true) List<ReceiptData> receipts, Optional<ReplayData> replay,
-            Optional<SetupData> setup, Optional<InputData> input) {}
+            Optional<SetupData> setup, Optional<InputData> input, Optional<HistoryData> history) {}
+
+    private record HistoryData(@JsonProperty(required = true) boolean complete, @JsonProperty(required = true) List<ExchangeData> exchanges)
+    {
+        ModelHistory history() { return new ModelHistory(complete, exchanges.stream().map(ExchangeData::exchange).toList()); }
+
+        static HistoryData of(ModelHistory value) { return new HistoryData(value.complete(), value.exchanges().stream().map(ExchangeData::of).toList()); }
+    }
+
+    private record ExchangeData(@JsonProperty(required = true) String requestId, @JsonProperty(required = true) String providerId,
+            @JsonProperty(required = true) String model, @JsonProperty(required = true) InputData input, @JsonProperty(required = true) String text,
+            @JsonProperty(required = true) List<ModelResponse.ToolCall> toolCalls, @JsonProperty(required = true) String stopReason)
+    {
+        ModelHistory.Exchange exchange()
+        {
+            return new ModelHistory.Exchange(requestId, providerId, model, input.input(), text, toolCalls, ModelResponse.StopReason.valueOf(stopReason));
+        }
+
+        static ExchangeData of(ModelHistory.Exchange value)
+        {
+            return new ExchangeData(value.requestId(), value.providerId(), value.model(), ApiCheckpointCodec.input(value.input()), value.text(),
+                    value.toolCalls(), value.stopReason().name());
+        }
+    }
 
     private record SetupData(@JsonProperty(required = true) String model, @JsonProperty(required = true) String instructions,
             Optional<String> effort, Optional<String> tier,
