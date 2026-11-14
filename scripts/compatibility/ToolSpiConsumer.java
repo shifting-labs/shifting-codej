@@ -14,12 +14,35 @@
 
 import io.github.shiftinglabs.codej.RecordToolParameters;
 import io.github.shiftinglabs.codej.Tool;
+import io.github.shiftinglabs.codej.cli.api.ApiAgentDriver;
+import io.github.shiftinglabs.codej.cli.api.ApiEngineConfig;
 import io.github.shiftinglabs.codej.cli.api.tools.LegacyToolAdapter;
 import io.github.shiftinglabs.codej.cli.api.tools.ReadFileTool;
 import io.github.shiftinglabs.codej.cli.api.tools.ToolMessages;
 import io.github.shiftinglabs.codej.cli.api.tools.WorkspaceReader;
+import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
+import io.github.shiftinglabs.codej.cli.driver.AgentPermissionPolicy;
+import io.github.shiftinglabs.codej.cli.driver.AgentProviderStatus;
 import io.github.shiftinglabs.codej.cli.driver.AgentSessionContext;
+import io.github.shiftinglabs.codej.cli.driver.AgentTurnCommand;
+import io.github.shiftinglabs.codej.cli.driver.AgentTurnResult;
+import io.github.shiftinglabs.codej.cli.driver.ProviderApprovalDecision;
+import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
+import io.github.shiftinglabs.codej.cli.mcp.ToolServer;
+import io.github.shiftinglabs.codej.cli.process.OwnedProcessRecovery;
+import io.github.shiftinglabs.codej.cli.process.PreparedProcess;
+import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
+import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
+import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecution;
@@ -40,10 +63,16 @@ import io.github.shiftinglabs.codej.tool.ToolOutput;
 import io.github.shiftinglabs.codej.tool.ToolParameters;
 import io.github.shiftinglabs.codej.tool.ToolSchema;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
@@ -73,7 +102,82 @@ public final class ToolSpiConsumer
                 "Legacy adapter round trip failed");
         require(Tool.of("count", "Returns a count", Count.class, input -> "ok").inputSchema().equals(oldFacade.inputSchema()), "Record schema changed");
         verifyCodingHandler();
+        verifyEngineInstallation(provider, configuration);
         System.out.println("PASS: Class-free SPI, codecs, legacy facade and built-in handler with an alternate workspace resource; JDK + jar only");
+    }
+
+    private static void verifyEngineInstallation(ToolProvider<Configuration> provider, Configuration configuration)
+            throws Exception
+    {
+        Path root = Files.createTempDirectory("codej-tool-install-");
+        try {
+            ProcessSupervisor processes = new ProcessSupervisor()
+            {
+                @Override
+                public PreparedProcess prepare(ProcessSpec spec) { throw new AssertionError("No process launch"); }
+
+                @Override
+                public List<OwnedProcessRecovery> recoverOwnedProcesses() { throw new AssertionError("No recovery"); }
+
+                @Override
+                public OwnedProcessRecovery recoverOwnedProcess(String id) { throw new AssertionError("No recovery"); }
+
+                @Override
+                public boolean launchedHere(String id) { throw new AssertionError("No launch"); }
+
+                @Override
+                public void acknowledge(String id) { throw new AssertionError("No process acknowledgement"); }
+            };
+            ModelClient model = new ModelClient()
+            {
+                private int calls;
+
+                @Override
+                public ModelCapabilities capabilities(String selected) { return new ModelCapabilities(true, Set.of(), Set.of(), Set.of()); }
+
+                @Override
+                public AgentProviderStatus probe(Optional<String> selected) { throw new AssertionError("No probe"); }
+
+                @Override
+                public ModelCall generate(ModelRequest request, ModelEventSink events)
+                {
+                    boolean tool = ++calls == 1;
+                    if (!tool) {
+                        require(request.input().equals(new ModelInput.ToolResults(List.of(new ModelInput.ToolResult("call", "hello", false)))), "Engine lost typed result");
+                    }
+                    ModelResponse response = new ModelResponse(tool ? "" : "done", tool ? List.of(new ModelResponse.ToolCall("call", "greet", "{}")) : List.of(),
+                            tool ? ModelResponse.StopReason.TOOL_CALLS : ModelResponse.StopReason.COMPLETED, new ModelReplayState("fixture", 1, "replay"), Optional.empty());
+                    return new ModelCall()
+                    {
+                        @Override
+                        public CompletionStage<ModelResponse> completion() { return CompletableFuture.completedStage(response); }
+
+                        @Override
+                        public void cancel() {}
+                    };
+                }
+
+                @Override
+                public void close() {}
+            };
+            var configurationBuilder = ApiEngineConfig.builder(new ConnectorIdentity("fixture", "tools"), new AgentLaneId("fixture-tools"), "model", () -> model)
+                    .maximumSessions(1).toolProvider(provider, configuration);
+            var context = new AgentSessionContext("fixture", root, root.resolve("runtime"), root.resolve("runtime/provider"), AgentPermissionPolicy.AUTO,
+                    Optional.empty(), (request, timeout) -> CompletableFuture.completedStage(ProviderApprovalDecision.allow(Optional.empty())),
+                    Optional.empty(), Optional.empty(), SessionAccess.TOOLS_ONLY, "", List.of());
+            try (var engine = new ApiAgentDriver(configurationBuilder.build(), new ConnectorContext(root.resolve("profile"), processes, ToolServer.DEFAULT));
+                    var session = engine.open(context, event -> {})) {
+                var result = session.start(new AgentTurnCommand("turn", "hello", List.of(), Duration.ZERO)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                require(result.state() == AgentTurnResult.State.COMPLETED, "Configured provider engine turn failed");
+            }
+        }
+        finally {
+            try (var paths = Files.walk(root)) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                    Files.delete(path);
+                }
+            }
+        }
     }
 
     private static void verifyCodingHandler()

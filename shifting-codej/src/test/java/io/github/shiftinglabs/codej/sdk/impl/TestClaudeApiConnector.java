@@ -14,15 +14,35 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.testing.AbstractTestApiConnector;
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestClaudeApiConnector
         extends AbstractTestApiConnector<ClaudeApiConfig>
 {
     private AnthropicHttpFixture http;
+
+    @Test
+    void providerConfigurationBindingsAreExplicitAndSnapshotBuilderState()
+    {
+        var provider = new ConfiguredLookupTools();
+        var binding = ToolProviderBinding.of(provider, new ConfiguredLookupTools.Configuration("configured:"));
+        var builder = ClaudeApiConfig.builder("model", () -> "key").toolProvider(binding);
+        var first = builder.build();
+        builder.toolProvider(provider, new ConfiguredLookupTools.Configuration("second:"));
+        assertThat(first.toolProviders).containsExactly(binding);
+        assertThat(builder.build().toolProviders).hasSize(2);
+        assertThat(provider.opened).hasValue(0);
+        assertThatThrownBy(() -> builder.toolProvider((ToolProviderBinding) null)).isInstanceOf(NullPointerException.class);
+    }
 
     @BeforeEach
     void setup()

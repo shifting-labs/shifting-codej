@@ -1,7 +1,7 @@
 # Extensible tool framework proposal
 
-Status: the SPI, legacy adapters, shared dispatcher, built-in handlers and resource interfaces are implemented.
-Existing public APIs and tool behavior are retained; configured provider assembly remains planned. It builds on [coding-tools.md](coding-tools.md) and the existing connector
+Status: the SPI, legacy adapters, dispatcher, built-in handlers/resource interfaces and configured provider assembly are implemented.
+Existing public APIs and default behavior are retained. New logical tools and richer features remain separate follow-ups. It builds on [coding-tools.md](coding-tools.md) and the existing connector
 SPI. Frequent tool additions, implementation replacements, typed parameters, and backward
 compatibility are primary requirements.
 
@@ -278,14 +278,13 @@ Implementation stages:
 - [x] Bind existing secure filesystem and Seatbelt implementations; retain all current limits.
 - [x] Run focused adapter/dispatcher contracts, affected tool/facade tests, and artifact compatibility checks for this migration.
 - [x] Run existing production handlers against alternate fake resources without editing the dispatcher or providers.
-- [ ] Install explicitly configured ToolProvider sets into ApiAgentDriver with session-owned ToolSet cleanup.
+- [x] Install explicitly configured ToolProvider sets into ApiAgentDriver with session-owned ToolSet cleanup.
 - [ ] Add a new logical tool when its feature and behavioral contract are chosen.
 - [ ] Consider richer execution, directory/move tools, plans/questions, and optional integrations separately.
 
-Stage 3 routes built-in actions through typed handlers borrowing explicit resource interfaces.
-ToolProvider assembly into ApiAgentDriver remains follow-up work. Existing production sessions
-retain the legacy facade path for argument-binding compatibility; the dispatcher also accepts
-typed registrations, exercised with fake implementations.
+Stage 4 installs configured ToolProvider sets into the shared engine and both direct API facades.
+Built-in and existing host tools retain the legacy facade path for argument-binding compatibility;
+new configured families use typed registrations through the same dispatcher.
 No dependency or artifact layout changed. New interfaces do not require Class tokens or Record type bounds.
 
 ## Stage 1 validation
@@ -466,3 +465,118 @@ one CPU, a 512 MiB heap, serial GC, low priority, one test fork and disabled JUn
 No agents, broad/stress or Bytequay suites, live model calls, provider CLI, native application
 build or simulator were started. Configured ToolProvider assembly and new logical tools remain
 separate follow-up stages.
+
+
+## Stage 4: configured tool families in the engine and API facades
+
+ToolProvider is a **tool family factory**, separate from a model provider or an agent lane
+connector. ApiEngineConfig.Builder, ClaudeApi.Builder and DeepSeekApi.Builder now expose the
+additive `toolProvider(provider, configuration)` method. The engine/configuration builders also
+accept ToolProviderBinding for forwarding an already bound configuration. The binding captures
+configuration through generic functions without casts or Class tokens; configuration must be
+immutable, and its diagnostic string never renders configuration values. Diagnostic family IDs
+are bounded nonblank text without control characters; they are not filesystem paths or grants.
+A shared family can be configured more than once when its model-facing tool names are distinct.
+
+```java
+var agent = ClaudeApi.builder()
+        .model(modelId)
+        .apiKey(credentials)
+        .toolProvider(toolFamily, immutableConfiguration)
+        .build();
+
+var options = SessionOptions.in(workspace)
+        .access(Access.TOOLS_ONLY)
+        .approvals(request -> CompletableFuture.completedStage(Decision.ALLOW_ONCE))
+        .build();
+```
+
+The same registration works through DeepSeekApi or ApiEngineConfig. The concrete
+[ConfiguredLookupTools](../../shifting-codej/src/test/java/io/github/shiftinglabs/codej/sdk/testing/ConfiguredLookupTools.java)
+fixture runs through both facades over fake HTTP. The standalone ToolSpiConsumer installs a
+Class-free greeting provider through ApiAgentDriver and a fake ModelClient using only the JDK
+and shaded artifact. Neither example changes model transport or dispatch code for the new family.
+
+ToolProviderPlan captures advertised contracts during pure validation before profile I/O. It
+compiles supported schemas and rejects name collisions across legacy tools, built-ins and all
+configured families. Coding mode reserves all existing built-in names, including the edit tool
+withheld in read-only mode. A factory's definitions method must perform no resource I/O,
+inference or model-requested action. Metadata/probe methods do not open tool sets.
+
+SessionToolSets takes ownership immediately after each successful open return, before reading
+tools or inspecting their contracts. Actual definitions must exactly match the advertised ordered
+name/description/schema/version/fingerprint snapshot. Codec objects are captured once in the
+immutable registration. Implementation diagnostic revisions do not change logical compatibility.
+A mismatched set, failed inspection or later factory failure triggers reverse-order cleanup of
+all sets already returned. Factories own their own failure cleanup before returning a set.
+Initialization errors also attempt cleanup of earlier sets. Failed close keeps the remaining
+sets, session/profile writer and driver ownership reachable for retry.
+
+Resource initialization is checkpointed as blocked until setup succeeds. The session is tracked
+before any provider resources open. Existing built-in initialization and its durable launch
+acknowledgement retain their ordering. Release verifies outstanding invocation handles, closes
+tool sets in reverse order and then closes built-ins before releasing the session writer.
+Factories and borrowed services are not closed by the engine. Providers remain responsible for
+honoring ToolSetContext.shutdownTimeout and proving quiescence before releasing owned resources.
+
+Invocation authority is captured from the session and narrowed to that request's requirements:
+
+| Internal session access | Configured families | Available authority |
+| --- | --- | --- |
+| TEXT_ONLY | Not described or opened | None |
+| TOOLS_ONLY | Installed | HOST_INVOKE |
+| READ_ONLY | Installed | HOST_INVOKE, workspace-root read, PROCESS_EXECUTE |
+| FULL | Installed | The read-only authority plus workspace-root write |
+
+Typed calls always require approval, including when the legacy approveTools setting is false.
+Approval cannot widen authority. Unknown capabilities and NETWORK_ACCESS fail closed. Required
+unsupported backends fail during open without a fallback. Resource implementations still enforce
+containment at use; arbitrary in-process plugins remain trusted host Java code. Scope options
+that the engine cannot enforce remain rejected. Existing codingTools still selects the current
+contained built-ins; a custom provider can supply other supported resources without enabling
+those platform-specific built-ins.
+
+The provider assembly context borrows the configured tool executor. With none configured it uses
+direct execution, keeping the shared turn worker free of nested work queued behind itself. The
+single-worker integration test protects this default from deadlock. No additional executor pool
+or per-tool worker is introduced. A ToolSet follows its underlying driver session's lifetime;
+the SDK may reopen driver sessions between public turns under its existing retention behavior.
+
+The SDK's existing TOOLS_ONLY inference now considers configured families as well as the legacy
+session tool list. An agent with configured families reaches internal TOOLS_ONLY even when its
+legacy tool list is empty. With no configured families, the original TEXT_ONLY inference remains
+unchanged. No public access enum, record shape or connector/driver method changed.
+
+Typed parameter validation precedes approval and resource effects. Invalid-input diagnostics are
+sanitized through the registration's failure renderer; legacy messages retain their old behavior.
+Typed ToolFailure codes/messages use their full existing bounds (including numeric codes and
+messages above the legacy built-in failure bound). Outputs still go through the engine's redaction,
+size limits, durable result receipt and post-result committed hook. Null ownership intents fail
+before backend effects. Cancellation retains observed results; unverified or uncertain work keeps
+ownership and blocks unsafe replay. Pending typed batches require their recorded contracts and
+manifest; pre-migration manifests remain accepted only for legacy version-one tools.
+
+Validation: **174 distinct focused cases passed** across the selected runtime/resource/provider
+contracts and affected API facade/connector suites. Coverage includes pure validation, explicit
+binding/configuration snapshots, text-only suppression, multiple configurations of one family,
+legacy/built-in name collisions, opened-contract mismatch, failed-open and failed-inspection
+cleanup, initialization errors, retryable close/retained writers, scoped/unknown/network capability
+denial, mandatory approval, sanitized validation/failures, full failure bounds, resource intent,
+single-worker execution, async cancellation and saved-result reuse, and incompatible/missing
+resume manifests. The final 70 affected cases were rerun after the SDK access bridge and reserved
+namespace fixes; other passing focused results were reused.
+
+Checkstyle, licenses, strict public Javadocs and publish-profile shaded packaging passed. The
+published 0.164.0-1 compatibility gate and unchanged baseline-compiled consumer passed. A separate
+comparison with the immediately preceding verified artifact checked 49 existing runtime/SPI/SDK
+classes, keeping every existing descriptor, record component, enum order and sealed shape exact.
+It allowed only the eight additive toolProvider builder methods; ToolProviderBinding is a new
+supporting value. The updated JDK-only fixture also proved a configured provider could run an
+approved tool loop through the real shared engine and shut down without process/network access.
+
+Candidate SHA-256: `e59cda1a6b9e1b16962227c62f6a5d8bdb325e44dc74dcb296f29b7556d3bcb0`.
+
+Validation used one CPU, a 512 MiB heap, serial GC, low priority, one test fork and disabled JUnit
+parallelism in an isolated snapshot excluding the four unrelated Claude CLI edits. No agents,
+broad/stress or Bytequay suites, live model calls, provider CLI, Xcode build or simulator ran.
+New logical tool features and hot replacement remain separate stages.

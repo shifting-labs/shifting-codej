@@ -13,12 +13,16 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.impl.DeepSeekApiConfig;
 import io.github.shiftinglabs.codej.sdk.impl.DriverAgent;
 
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
@@ -57,6 +61,7 @@ public final class DeepSeekApi
         private int maximumOutputTokens = 4096;
         private Optional<Executor> callbacks = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
+        private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
 
         private Builder() {}
 
@@ -171,6 +176,20 @@ public final class DeepSeekApi
         }
 
         /**
+         * Installs a configured tool family in non-text sessions. Every typed call requires approval.
+         *
+         * @param <C> configuration type, bound explicitly without reflection
+         * @param provider tool family; owns cleanup if open fails
+         * @param configuration immutable provider configuration
+         * @return this builder
+         */
+        public <C> Builder toolProvider(ToolProvider<C> provider, C configuration)
+        {
+            toolProviders.add(ToolProviderBinding.of(provider, configuration));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -183,6 +202,7 @@ public final class DeepSeekApi
                     .baseUrl(baseUrl).requestTimeout(timeout).maximumOutputTokens(maximumOutputTokens);
             callbacks.ifPresent(settings::callbackExecutor);
             codingTools.ifPresent(settings::codingTools);
+            toolProviders.forEach(settings::toolProvider);
             return DriverAgent.deepSeekApi(settings.build(), state, profile);
         }
     }

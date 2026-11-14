@@ -50,6 +50,7 @@ public final class DeepSeekApiConnector
                     .maximumOutputTokens(config.maximumOutputTokens).redactorSupplier(client::redactor)
                     .toolExecutor(config.callbacks.orElse(command -> Thread.ofVirtual().start(command)));
             config.codingTools.ifPresent(engine::codingTools);
+            config.toolProviders.forEach(engine::toolProvider);
             return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {

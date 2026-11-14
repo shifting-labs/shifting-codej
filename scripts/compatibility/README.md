@@ -128,8 +128,8 @@ checks continue unchanged.
 
 `ToolSpiConsumer` is a candidate-only usage example of the new tool SPI. It implements parameter
 binding without Class tokens, installs a configured provider, invokes a typed tool through a
-wildcard registry entry, encodes the result, and verifies shutdown. It starts no process, thread,
-network, or model request and depends only on the JDK and shaded candidate jar. It also uses
+wildcard registry entry, encodes the result, and verifies shutdown. Those direct tool examples
+start no background work and depend only on the JDK and shaded candidate jar. It also uses
 `RecordToolParameters`, the additive `Tool.withParameters` factory and `LegacyToolAdapter` to
 run an existing facade tool through the SPI, with explicit host-invocation authority.
 
@@ -137,3 +137,9 @@ The same consumer now injects an alternate WorkspaceReader into the production R
 It binds the existing optional record parameters, supplies an explicit scoped read grant and
 encodes the typed FileContent result. This checks the exported handler/resource boundary from
 the shaded jar without filesystem access, provider execution or changes to the shared engine.
+
+The provider-installation example also calls ApiEngineConfig.Builder.toolProvider and opens the
+real shared engine with a fake ModelClient. It approves and executes the configured greeting tool,
+checks its result returns to the model boundary, and closes the session/tool set. This example
+uses one bounded engine worker and temporary checkpoint state, with no subprocess, network or
+live model request. Configured providers remain separate from model/agent connectors.

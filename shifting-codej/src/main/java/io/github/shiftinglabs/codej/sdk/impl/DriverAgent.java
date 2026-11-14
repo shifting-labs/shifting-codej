@@ -68,6 +68,7 @@ public final class DriverAgent
     private final List<AutoCloseable> owned;
     private final Executor callbacks;
     private final UnaryOperator<AgentPermissionScope> sandbox;
+    private final boolean toolProviders;
     /** Why no session can start, when the agent has no CLI to run. */
     private final Optional<String> unavailable;
     /** The release this library is tested with, for a CLI the caller chose that may be newer. */
@@ -122,6 +123,12 @@ public final class DriverAgent
     private DriverAgent(AgentDriver driver, String provider, StateFolder state, List<AutoCloseable> owned, Executor callbacks, UnaryOperator<AgentPermissionScope> sandbox,
             Optional<String> unavailable, Optional<String> testedVersion)
     {
+        this(driver, provider, state, owned, callbacks, sandbox, unavailable, testedVersion, false);
+    }
+
+    private DriverAgent(AgentDriver driver, String provider, StateFolder state, List<AutoCloseable> owned, Executor callbacks, UnaryOperator<AgentPermissionScope> sandbox,
+            Optional<String> unavailable, Optional<String> testedVersion, boolean toolProviders)
+    {
         this.unavailable = requireNonNull(unavailable, "unavailable is null");
         this.testedVersion = requireNonNull(testedVersion, "testedVersion is null");
         this.driver = requireNonNull(driver, "driver is null");
@@ -130,6 +137,7 @@ public final class DriverAgent
         this.owned = ImmutableList.copyOf(owned);
         this.callbacks = requireNonNull(callbacks, "callbacks is null");
         this.sandbox = requireNonNull(sandbox, "sandbox is null");
+        this.toolProviders = toolProviders;
     }
 
     /** Codex's connector owns its broker; the facade still owns its optional transcript sweep. */
@@ -166,7 +174,7 @@ public final class DriverAgent
         Path profile = profileDirectory.orElse(state.root().resolve("profile")).toAbsolutePath();
         ConnectorDriver driver = new ClaudeApiConnector().create(settings, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
         return new DriverAgent(driver, "claude-api", state, ImmutableList.of(driver), settings.callbacks.orElse(VIRTUAL_THREADS),
-                UnaryOperator.identity(), Optional.empty(), Optional.empty());
+                UnaryOperator.identity(), Optional.empty(), Optional.empty(), !settings.toolProviders.isEmpty());
     }
 
     public static Agent deepSeekApi(DeepSeekApiConfig settings, Optional<Path> stateDirectory, Optional<Path> profileDirectory)
@@ -175,7 +183,7 @@ public final class DriverAgent
         Path profile = profileDirectory.orElse(state.root().resolve("profile")).toAbsolutePath();
         ConnectorDriver driver = new DeepSeekApiConnector().create(settings, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
         return new DriverAgent(driver, "deepseek-api", state, ImmutableList.of(driver), settings.callbacks.orElse(VIRTUAL_THREADS),
-                UnaryOperator.identity(), Optional.empty(), Optional.empty());
+                UnaryOperator.identity(), Optional.empty(), Optional.empty(), !settings.toolProviders.isEmpty());
     }
 
     public static Agent claude(ClaudeSettings settings)
@@ -338,6 +346,8 @@ public final class DriverAgent
     {
         return callbacks;
     }
+
+    boolean hasToolProviders() { return toolProviders; }
 
     UnaryOperator<AgentPermissionScope> sandbox()
     {

@@ -20,7 +20,8 @@ import java.util.List;
 /**
  * Installs a tool family using explicitly bound generic configuration; no runtime Class token is
  * required. Definitions are side-effect-free. Open owns failure cleanup and starts no inference
- * or model-requested effects. Required unsupported backends fail closed.
+ * or model-requested effects. Required unsupported backends fail closed. A shared factory may
+ * serve independent sessions concurrently; each returned ToolSet owns only its session's resources.
  *
  * @param <C> provider configuration
  */

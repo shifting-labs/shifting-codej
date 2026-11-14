@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej;
 
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -126,6 +127,36 @@ class TestClaudeApi
             }
             assertThat(callbacks.isShutdown()).isFalse();
         }
+    }
+
+    @Test
+    void configuredToolProviderRunsThroughThePublicFacadeAndOwnsItsSessionResources()
+            throws Exception
+    {
+        var provider = new ConfiguredLookupTools();
+        AtomicInteger approvals = new AtomicInteger();
+        var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).approvals(approval -> {
+            approvals.incrementAndGet();
+            return java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE);
+        }).build();
+        try (ExecutorService callbacks = Executors.newSingleThreadExecutor()) {
+            try (Agent agent = builder().callbackExecutor(callbacks).toolProvider(provider, new ConfiguredLookupTools.Configuration("typed:")).build()) {
+                assertThat(provider.opened).hasValue(0);
+                try (Session session = agent.startSession(options)) {
+                    assertThat(provider.opened).hasValue(1);
+                    assertThat(session.run(Input.text("Lookup"))).isInstanceOf(TurnResult.Completed.class);
+                    assertThat(provider.opened).hasValue(1);
+                    assertThat(provider.context.executor()).isSameAs(callbacks);
+                    assertThat(provider.called).hasValue(1);
+                    assertThat(approvals).hasValue(1);
+                    assertThat(http.requests().getLast().body().toString()).contains("typed:CONTRACT-1");
+                }
+                assertThat(provider.closed).hasValue(1);
+            }
+            assertThat(callbacks.isShutdown()).isFalse();
+        }
+        assertThatThrownBy(() -> builder().toolProvider(null, new ConfiguredLookupTools.Configuration("value"))).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().toolProvider(provider, null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test

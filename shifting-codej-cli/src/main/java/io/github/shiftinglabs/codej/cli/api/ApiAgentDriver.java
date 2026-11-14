@@ -59,6 +59,7 @@ import io.github.shiftinglabs.codej.cli.spi.tool.ToolFailure;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolOutcome;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolRequirements;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolResource;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolSetContext;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -76,6 +77,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -99,6 +101,7 @@ public final class ApiAgentDriver
     private static final ThreadLocal<ApiSession> CALLBACK = new ThreadLocal<>();
     private final ApiEngineConfig config;
     private final Path profile;
+    private final ConnectorContext host;
     private final ProcessSupervisor supervisor;
     private final ModelClient client;
     private final ExecutorService workers;
@@ -109,7 +112,8 @@ public final class ApiAgentDriver
     public ApiAgentDriver(ApiEngineConfig config, ConnectorContext context)
     {
         this.config = requireNonNull(config, "config is null");
-        profile = requireNonNull(context, "context is null").profileDirectory();
+        host = requireNonNull(context, "context is null");
+        profile = host.profileDirectory();
         supervisor = context.processSupervisor();
         client = requireNonNull(config.clients.get(), "client factory returned null");
         workers = config.executor.orElseGet(() -> new ThreadPoolExecutor(config.maximumSessions, config.maximumSessions, 0, TimeUnit.MILLISECONDS,
@@ -159,15 +163,18 @@ public final class ApiAgentDriver
     }
 
     @Override
-    public void validate(AgentSessionContext context)
+    public void validate(AgentSessionContext context) { plan(context); }
+
+    private ToolProviderPlan plan(AgentSessionContext context)
     {
         requireOpen();
         requireNonNull(context, "context is null");
         var scope = context.scope();
         boolean coding = coding(context);
-        if ((!coding && context.access() != SessionAccess.TEXT_ONLY && context.access() != SessionAccess.TOOLS_ONLY) || scope.policy() != AgentPermissionPolicy.AUTO
-                || context.review() || context.publicationProtected() || context.asksUser() || scope.readOnlySubagents() || (!coding && scope.fixedSandbox())
-                || (coding && scope.network()) || scope.webSearch() || scope.commits() || (!coding && (scope.approveEveryCommand() || scope.approveEveryEdit()))
+        boolean workspace = coding || (!config.toolProviders.isEmpty() && (context.access() == SessionAccess.FULL || context.access() == SessionAccess.READ_ONLY));
+        if ((!workspace && context.access() != SessionAccess.TEXT_ONLY && context.access() != SessionAccess.TOOLS_ONLY) || scope.policy() != AgentPermissionPolicy.AUTO
+                || context.review() || context.publicationProtected() || context.asksUser() || scope.readOnlySubagents() || (!workspace && scope.fixedSandbox())
+                || (workspace && scope.network()) || scope.webSearch() || scope.commits() || (!workspace && (scope.approveEveryCommand() || scope.approveEveryEdit()))
                 || !scope.writableRoots().isEmpty()
                 || !scope.unsandboxedCommands().isEmpty() || !scope.unixSockets().isEmpty() || !scope.reviewerContext().isEmpty()
                 || !scope.reviewerRules().isEmpty() || scope.reviewSandboxedCommands()
@@ -181,13 +188,17 @@ public final class ApiAgentDriver
             }
             definitions.addAll(BuiltinTools.definitions(context.access() == SessionAccess.FULL));
         }
-        new ApiToolRegistry(definitions);
-        options(context.model().orElse(config.model), context.effort(), Optional.empty(), !definitions.isEmpty());
+        ToolProviderPlan plan = ToolProviderPlan.create(context.textOnly() ? List.of() : config.toolProviders, definitions);
+        if (coding && plan.families().stream().flatMap(family -> family.catalog().stream()).anyMatch(entry -> BuiltinTools.contains(entry.wire().name()))) {
+            throw new AgentUnavailableException("Built-in tool names are reserved");
+        }
+        options(context.model().orElse(config.model), context.effort(), Optional.empty(), plan.hasTools());
         context.sessionReference().ifPresent(reference -> {
             if (!reference.laneId().equals(id()) || reference.contractVersion() != 1 || !canonicalId(reference.providerValue())) {
                 throw new AgentUnavailableException("API session reference belongs to another lane or version");
             }
         });
+        return plan;
     }
 
     private boolean coding(AgentSessionContext context)
@@ -214,7 +225,7 @@ public final class ApiAgentDriver
     @Override
     public synchronized AgentSession open(AgentSessionContext context, AgentEventSink events)
     {
-        validate(context);
+        ToolProviderPlan plan = plan(context);
         requireNonNull(events, "events is null");
         if (sessions.size() >= config.maximumSessions) {
             throw new AgentUnavailableException("API session capacity reached");
@@ -225,21 +236,21 @@ public final class ApiAgentDriver
         try {
             session = new ApiSession(context, events, store, new AgentSessionRef(id(), 1, id));
         }
-        catch (RuntimeException failure) {
+        catch (RuntimeException | Error failure) {
             store.close();
             throw failure;
         }
         sessions.add(session);
         try {
-            session.initialize();
+            session.initialize(plan);
             return session;
         }
-        catch (RuntimeException failure) {
+        catch (RuntimeException | Error failure) {
             session.damaged = true;
             try {
                 session.close();
             }
-            catch (RuntimeException stopFailure) {
+            catch (RuntimeException | Error stopFailure) {
                 failure.addSuppressed(stopFailure);
             }
             throw failure;
@@ -307,7 +318,15 @@ public final class ApiAgentDriver
 
     private record CodingLaunch(String kind, String launchId) {}
 
-    private record PreparedResource(String kind, String id, ToolResource resource) {}
+    private record PreparedResource(String kind, String id, ToolResource resource)
+    {
+        private PreparedResource
+        {
+            requireNonNull(kind, "kind is null");
+            requireNonNull(id, "id is null");
+            requireNonNull(resource, "resource is null");
+        }
+    }
 
     private final class ApiSession
             implements AgentSession
@@ -316,9 +335,11 @@ public final class ApiAgentDriver
         private final AgentEventSink events;
         private final ApiSessionStore store;
         private final AgentSessionRef reference;
-        private final ApiToolRegistry tools;
-        private final ToolDispatcher dispatcher;
-        private final Optional<BuiltinTools> builtins;
+        private ApiToolRegistry tools = new ApiToolRegistry(List.of());
+        private ToolDispatcher dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
+        private Optional<BuiltinTools> builtins = Optional.empty();
+        private final SessionToolSets toolSets = new SessionToolSets();
+        private final ToolRequirements grants;
         private ApiTurn running;
         private boolean closing;
         private boolean released;
@@ -330,23 +351,17 @@ public final class ApiAgentDriver
             this.events = events;
             this.store = store;
             this.reference = reference;
-            try {
-                builtins = coding(context) ? Optional.of(new BuiltinTools(context.worktree(), config.codingTools.orElseThrow(),
-                        context.access() == SessionAccess.FULL, List.of(profile, context.runtimeDirectory()), supervisor, reference.providerValue(),
-                        config.maximumToolOutputChars, launch -> {
-                            ObjectNode state = store.state();
-                            state.withArray("journal").add(JSON.valueToTree(new CodingLaunch("coding-launch", launch)));
-                            store.save(state);
-                        })) : Optional.empty();
+            var authority = ToolRequirements.builder();
+            if (!context.textOnly()) {
+                authority.require(ToolCapability.HOST_INVOKE);
+                if (context.access() == SessionAccess.FULL || context.access() == SessionAccess.READ_ONLY) {
+                    authority.read(Path.of(".")).require(ToolCapability.PROCESS_EXECUTE);
+                    if (context.access() == SessionAccess.FULL) {
+                        authority.write(Path.of("."));
+                    }
+                }
             }
-            catch (IOException | RuntimeException failure) {
-                throw new AgentUnavailableException("Coding tools could not establish workspace containment");
-            }
-            List<ToolRegistration> registrations = new ArrayList<>();
-            context.sessionTools().forEach(tool -> registrations.add(legacy(tool, false)));
-            builtins.ifPresent(value -> value.tools().forEach(tool -> registrations.add(legacy(tool, true))));
-            tools = ApiToolRegistry.registered(registrations);
-            dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
+            grants = authority.build();
         }
 
         private ToolRegistration legacy(Tool tool, boolean builtin)
@@ -373,21 +388,59 @@ public final class ApiAgentDriver
                     : new ToolFailure("TOOL_FAILED", "Host tool failed"));
         }
 
-        private void initialize()
+        private void initialize(ToolProviderPlan plan)
         {
-            if (builtins.isEmpty() || !recoverable(store.state())) {
-                return;
-            }
             ObjectNode before = store.state();
-            store.save(before.deepCopy().put("phase", "blocked"));
+            boolean resources = coding(context) || !plan.families().isEmpty();
+            if (resources) {
+                store.save(before.deepCopy().put("phase", "blocked"));
+            }
             try {
-                builtins.orElseThrow().initialize();
-                store.save(before);
-                builtins.orElseThrow().committed();
+                if (coding(context)) {
+                    builtins = Optional.of(new BuiltinTools(context.worktree(), config.codingTools.orElseThrow(),
+                            context.access() == SessionAccess.FULL, List.of(profile, context.runtimeDirectory()), supervisor, reference.providerValue(),
+                            config.maximumToolOutputChars, launch -> {
+                                ObjectNode state = store.state();
+                                state.withArray("journal").add(JSON.valueToTree(new CodingLaunch("coding-launch", launch)));
+                                store.save(state);
+                            }));
+                }
+                List<ToolRegistration> registrations = new ArrayList<>();
+                context.sessionTools().forEach(tool -> registrations.add(legacy(tool, false)));
+                builtins.ifPresent(value -> value.tools().forEach(tool -> registrations.add(legacy(tool, true))));
+                registrations.addAll(toolSets.open(plan, assembly()));
+                tools = ApiToolRegistry.registered(registrations);
+                dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
+                if (builtins.isPresent() && recoverable(before)) {
+                    builtins.orElseThrow().initialize();
+                }
+                if (resources) {
+                    store.save(before);
+                }
+                builtins.ifPresent(BuiltinTools::committed);
             }
             catch (IOException | RuntimeException failure) {
-                throw new AgentUnavailableException("Coding command sandbox is unavailable; no unsandboxed fallback is permitted");
+                throw new AgentUnavailableException("API tool resources could not be initialized; required backends must enforce containment");
             }
+        }
+
+        private ToolSetContext assembly()
+        {
+            Executor executor = config.toolExecutor.orElse(Runnable::run);
+            return new ToolSetContext()
+            {
+                @Override
+                public AgentSessionContext session() { return context; }
+
+                @Override
+                public ConnectorContext connector() { return host; }
+
+                @Override
+                public Executor executor() { return executor; }
+
+                @Override
+                public Duration shutdownTimeout() { return config.shutdownTimeout; }
+            };
         }
 
         @Override
@@ -458,6 +511,7 @@ public final class ApiAgentDriver
             if (!released) {
                 try {
                     dispatcher.verifyStopped();
+                    toolSets.close();
                     if (builtins.isPresent()) {
                         builtins.orElseThrow().close();
                     }
@@ -866,8 +920,7 @@ public final class ApiAgentDriver
                     @Override
                     public ToolRequirements grants()
                     {
-                        // Opaque legacy callbacks are trusted host capabilities. Built-ins enforce their existing containment internally.
-                        return ToolRequirements.builder().require(ToolCapability.HOST_INVOKE).build();
+                        return session.grants;
                     }
 
                     @Override

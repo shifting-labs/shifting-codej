@@ -13,6 +13,7 @@
  */
 package io.github.shiftinglabs.codej.cli.api;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import io.github.shiftinglabs.codej.Tool;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
@@ -90,9 +91,10 @@ final class ToolRegistration
     final boolean approval;
     final Optional<Tool> original;
     private final Preparation preparation;
+    private final Function<ToolFailure, String> failures;
 
     private ToolRegistration(ModelRequest.ToolDefinition definition, Contract contract, boolean legacy, boolean approval,
-            Optional<Tool> original, Preparation preparation)
+            Optional<Tool> original, Preparation preparation, Function<ToolFailure, String> failures)
     {
         this.definition = definition;
         this.contract = contract;
@@ -100,6 +102,7 @@ final class ToolRegistration
         this.approval = approval;
         this.original = original;
         this.preparation = preparation;
+        this.failures = requireNonNull(failures, "failures is null");
     }
 
     static <P, R> ToolRegistration create(AgentTool<P, R> tool, boolean legacy, boolean approval, Optional<Tool> original,
@@ -164,7 +167,46 @@ final class ToolRegistration
                             };
                         }
                     };
-                });
+                }, failures);
+    }
+
+    record Catalog(ModelRequest.ToolDefinition wire, Contract contract)
+    {
+        Catalog
+        {
+            requireNonNull(wire, "wire is null");
+            requireNonNull(contract, "contract is null");
+        }
+    }
+
+    static Catalog catalog(ToolDefinition<?, ?> definition)
+    {
+        requireNonNull(definition, "definition is null");
+        var descriptor = requireNonNull(definition.descriptor(), "descriptor is null");
+        var parameters = requireNonNull(definition.parameters(), "parameters is null");
+        var schema = requireNonNull(parameters.schema(), "schema is null");
+        requireNonNull(definition.results(), "result codec is null");
+        JsonSchemaParameters.of(schema.json(), ToolArguments::json);
+        return new Catalog(new ModelRequest.ToolDefinition(descriptor.name(), descriptor.description(), schema.json()),
+                new Contract(descriptor.name(), descriptor.contractVersion(), schema.fingerprint()));
+    }
+
+    Catalog catalog() { return new Catalog(definition, contract); }
+
+    String rejection(ToolDispatcher.Context context, String code, String message)
+    {
+        return legacy ? context.rejection(code, message) : failures.apply(new ToolFailure(code,
+                code.equals("INVALID_ARGUMENTS") ? "Invalid tool arguments" : message));
+    }
+
+    static String failureText(ToolFailure failure)
+    {
+        try {
+            return ApiSessionStore.JSON.writeValueAsString(failure);
+        }
+        catch (JsonProcessingException impossible) {
+            throw new IllegalStateException("Cannot encode tool failure", impossible);
+        }
     }
 
     Prepared prepare(String arguments, ToolPreparationContext context) { return preparation.prepare(() -> arguments, context); }

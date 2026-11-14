@@ -18,8 +18,12 @@ import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -53,6 +57,7 @@ public final class ApiEngineConfig
     final Supplier<SecretRedactor> redactors;
     final Optional<Executor> toolExecutor;
     final Optional<CodingTools> codingTools;
+    final List<ToolProviderBinding> toolProviders;
 
     private ApiEngineConfig(Builder b)
     {
@@ -76,6 +81,7 @@ public final class ApiEngineConfig
         redactors = b.redactors.orElse(() -> redactor);
         toolExecutor = b.toolExecutor;
         codingTools = b.codingTools;
+        toolProviders = List.copyOf(b.toolProviders);
     }
 
     SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
@@ -106,6 +112,7 @@ public final class ApiEngineConfig
         private Optional<Supplier<SecretRedactor>> redactors = Optional.empty();
         private Optional<Executor> toolExecutor = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
+        private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -220,6 +227,19 @@ public final class ApiEngineConfig
         public Builder codingTools(CodingTools value)
         {
             codingTools = Optional.of(requireNonNull(value, "codingTools is null"));
+            return this;
+        }
+
+        /** Installs a provider in non-text sessions; configuration must be immutable. Typed calls always require approval. */
+        public <C> Builder toolProvider(ToolProvider<C> provider, C configuration)
+        {
+            return toolProvider(ToolProviderBinding.of(provider, configuration));
+        }
+
+        /** Adds an explicitly bound provider; the session owns and verifies every returned tool set. */
+        public Builder toolProvider(ToolProviderBinding binding)
+        {
+            toolProviders.add(requireNonNull(binding, "binding is null"));
             return this;
         }
 

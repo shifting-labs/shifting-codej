@@ -144,18 +144,24 @@ final class ToolDispatcher
             ToolRegistration.Prepared prepared;
             try {
                 registration = registry.registration(call.name());
-                prepared = registration.prepare(call.arguments(), context);
             }
             catch (IllegalArgumentException failure) {
                 context.recordResult(new ToolRegistration.Result(context.rejection("INVALID_ARGUMENTS", failure.getMessage()), true));
                 return;
             }
+            try {
+                prepared = registration.prepare(call.arguments(), context);
+            }
+            catch (IllegalArgumentException failure) {
+                context.recordResult(new ToolRegistration.Result(registration.rejection(context, "INVALID_ARGUMENTS", failure.getMessage()), true));
+                return;
+            }
             if (!context.grants().permits(prepared.requirements())) {
-                context.recordResult(new ToolRegistration.Result(context.rejection("PERMISSION_DENIED", "Tool requirements are not permitted"), true));
+                context.recordResult(new ToolRegistration.Result(registration.rejection(context, "PERMISSION_DENIED", "Tool requirements are not permitted"), true));
                 return;
             }
             if (registration.approval && !context.allowed(call)) {
-                context.recordResult(new ToolRegistration.Result(context.rejection("APPROVAL_DENIED", "Tool invocation denied"), true));
+                context.recordResult(new ToolRegistration.Result(registration.rejection(context, "APPROVAL_DENIED", "Tool invocation denied"), true));
                 return;
             }
             context.checkStop();

@@ -14,9 +14,13 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.CodingTools;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
@@ -35,6 +39,7 @@ public final class DeepSeekApiConfig
     final int maximumOutputTokens;
     final Optional<Executor> callbacks;
     final Optional<CodingTools> codingTools;
+    final List<ToolProviderBinding> toolProviders;
 
     private DeepSeekApiConfig(Builder builder)
     {
@@ -45,6 +50,7 @@ public final class DeepSeekApiConfig
         maximumOutputTokens = builder.maximumOutputTokens;
         callbacks = builder.callbacks;
         codingTools = builder.codingTools;
+        toolProviders = List.copyOf(builder.toolProviders);
     }
 
     public static Builder builder(String model, Supplier<String> key) { return new Builder(model, key); }
@@ -58,6 +64,7 @@ public final class DeepSeekApiConfig
         private int maximumOutputTokens = 4096;
         private Optional<Executor> callbacks = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
+        private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -96,6 +103,17 @@ public final class DeepSeekApiConfig
         public Builder codingTools(CodingTools value)
         {
             codingTools = Optional.of(requireNonNull(value, "codingTools is null"));
+            return this;
+        }
+
+        public <C> Builder toolProvider(ToolProvider<C> provider, C configuration)
+        {
+            return toolProvider(ToolProviderBinding.of(provider, configuration));
+        }
+
+        public Builder toolProvider(ToolProviderBinding binding)
+        {
+            toolProviders.add(requireNonNull(binding, "binding is null"));
             return this;
         }
 
