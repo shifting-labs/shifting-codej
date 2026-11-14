@@ -29,7 +29,9 @@ grant authority or bypass approval; observers cannot rewrite requests, results o
 
 The [tool scheduling plan](tool-scheduling.md) adds an optional borrowed `ToolExecutionBudget` shared
 across API drivers. Capacity is reserved after approval, before durable admission, and retained until
-execution/resource cleanup confirms release. It introduces no worker pool or within-batch overlap.
+execution/resource cleanup confirms release. Explicit `maximumParallelTools` opt-in adds asynchronous
+batch overlap for declared safe pure/read tools, with exclusive effect barriers and provider-order
+results. Defaults remain serial, and the scheduler introduces no additional worker pool.
 
 ## Boundaries
 

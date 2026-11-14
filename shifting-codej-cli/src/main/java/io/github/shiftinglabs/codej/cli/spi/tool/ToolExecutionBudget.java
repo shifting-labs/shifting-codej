@@ -13,6 +13,10 @@
  */
 package io.github.shiftinglabs.codej.cli.spi.tool;
 
+import java.util.Optional;
+
+import static java.util.Objects.requireNonNull;
+
 /**
  * Borrowed host admission service; share one instance across drivers to bound aggregate tool invocations.
  * It creates no workers. This limits invocation count, not CPU, subprocess descendants or model requests.
@@ -30,6 +34,18 @@ public interface ToolExecutionBudget
      */
     Lease acquire(Context context)
             throws InterruptedException;
+
+    /**
+     * Nonblocking admission for a coordinator already holding leases. Empty means drain active work
+     * before blocking acquisition; the default preserves existing custom budgets by serializing them.
+     * The same cancellation, deadline and failed-acquisition ownership contract applies.
+     */
+    default Optional<Lease> tryAcquire(Context context)
+            throws InterruptedException
+    {
+        requireNonNull(context, "context is null");
+        return Optional.empty();
+    }
 
     /** Create a thread-safe bounded budget, without starting threads or acquiring external resources. */
     static ToolExecutionBudget bounded(int maximumConcurrent) { return new BoundedToolExecutionBudget(maximumConcurrent); }

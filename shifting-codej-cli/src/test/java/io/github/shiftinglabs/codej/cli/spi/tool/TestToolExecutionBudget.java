@@ -31,6 +31,35 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TestToolExecutionBudget
 {
     @Test
+    void nonblockingAdmissionPreservesCapacityCancellationAndLegacyBudgetDefaults()
+            throws Exception
+    {
+        var budget = ToolExecutionBudget.bounded(1);
+        var request = context(Optional.empty(), () -> false);
+        try (var first = budget.tryAcquire(request).orElseThrow()) {
+            assertThat(budget.tryAcquire(request)).isEmpty();
+        }
+        AtomicInteger checks = new AtomicInteger();
+        assertThatThrownBy(() -> budget.tryAcquire(context(Optional.empty(), () -> checks.incrementAndGet() == 2)))
+                .isInstanceOf(CancellationException.class);
+        try (var next = budget.tryAcquire(request).orElseThrow()) {
+            assertThat(budget.tryAcquire(request)).isEmpty();
+        }
+        ToolExecutionBudget legacy = ignored -> { throw new AssertionError("The default must not call a blocking acquire"); };
+        assertThat(legacy.tryAcquire(request)).isEmpty();
+        assertThatThrownBy(() -> legacy.tryAcquire(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> budget.tryAcquire(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> budget.tryAcquire(context(Optional.of(Instant.MIN), () -> false))).isInstanceOf(CancellationException.class);
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> budget.tryAcquire(request)).isInstanceOf(InterruptedException.class);
+        }
+        finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
     void capacityIsBoundedAndLeaseReleaseIsIdempotent()
             throws Exception
     {

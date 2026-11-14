@@ -48,6 +48,7 @@ public final class ClaudeApiConfig
     final List<PromptProviderBinding> promptProviders;
     final List<EngineExtensionBinding> extensions;
     final Optional<ToolExecutionBudget> toolExecutionBudget;
+    final int maximumParallelTools;
 
     private ClaudeApiConfig(Builder builder)
     {
@@ -62,6 +63,8 @@ public final class ClaudeApiConfig
         promptProviders = PromptProviderBinding.snapshot(builder.promptProviders);
         extensions = EngineExtensionBinding.snapshot(builder.extensions);
         toolExecutionBudget = builder.toolExecutionBudget;
+        maximumParallelTools = builder.maximumParallelTools;
+        checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
     public static Builder builder(String model, Supplier<String> key) { return new Builder(model, key); }
@@ -79,6 +82,7 @@ public final class ClaudeApiConfig
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
+        private int maximumParallelTools = 1;
 
         private Builder(String model, Supplier<String> key)
         {
@@ -159,6 +163,14 @@ public final class ClaudeApiConfig
         public Builder toolExecutionBudget(ToolExecutionBudget budget)
         {
             toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
+            return this;
+        }
+
+        /** Opts into a bounded asynchronous batch window; values greater than one require a shared budget. */
+        public Builder maximumParallelTools(int value)
+        {
+            checkArgument(value >= 1 && value <= 64, "parallel tool window must be between 1 and 64");
+            maximumParallelTools = value;
             return this;
         }
 

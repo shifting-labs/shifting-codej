@@ -42,8 +42,15 @@ class TestDeepSeekApiConnector
         var secondBudget = ToolExecutionBudget.bounded(2);
         var builder = DeepSeekApiConfig.builder("model", () -> "key");
         assertThat(builder.build().toolExecutionBudget).isEmpty();
+        assertThat(builder.build().maximumParallelTools).isEqualTo(1);
+        assertThatThrownBy(() -> builder.maximumParallelTools(2).build()).isInstanceOf(IllegalArgumentException.class);
+        builder.maximumParallelTools(1);
+        assertThatThrownBy(() -> builder.maximumParallelTools(0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> builder.maximumParallelTools(65)).isInstanceOf(IllegalArgumentException.class);
         var first = builder.toolExecutionBudget(firstBudget).build();
-        builder.toolExecutionBudget(secondBudget);
+        builder.toolExecutionBudget(secondBudget).maximumParallelTools(2);
+        assertThat(first.maximumParallelTools).isEqualTo(1);
+        assertThat(builder.build().maximumParallelTools).isEqualTo(2);
         assertThat(first.toolExecutionBudget).containsSame(firstBudget);
         assertThat(builder.build().toolExecutionBudget).containsSame(secondBudget);
         assertThatThrownBy(() -> builder.toolExecutionBudget(null)).isInstanceOf(NullPointerException.class);

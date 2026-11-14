@@ -1,11 +1,11 @@
 # Bounded tool scheduling
 
-Status: shared-budget prerequisite implemented and verified; batch overlap remains planned. Follows [policy extensions](policy-extensions.md)
+Status: shared-budget admission and opt-in asynchronous batch overlap implemented and verified. Follows [policy extensions](policy-extensions.md)
 and the [DeepSeek Harness study](deepseek-harness-study.md).
 
 ## Evaluation and staged decision
 
-Keep existing batches serial. Concurrent driver sessions already execute independently, so their
+The shared-budget prerequisite kept batches serial. Concurrent driver sessions execute independently, so their
 aggregate tool concurrency needs a shared host limit before overlapping a batch. Introduce an
 explicit borrowed `ToolExecutionBudget`, which a host may install on multiple engine/provider
 builders. Avoid a static global registry, implicit process-wide defaults or another executor pool.
@@ -31,7 +31,7 @@ This is an in-process limit; sharing across JVMs requires a separately implement
 
 ## Batch overlap requirements
 
-A later opt-in scheduler needs all of these before changing runtime dispatch:
+The opt-in scheduler follows these requirements:
 
 1. Explicit eligibility from typed tool implementations; legacy wrappers, built-ins, shell and
    unknown/custom effect scopes remain exclusive by default. A read declaration alone proves
@@ -48,9 +48,8 @@ A later opt-in scheduler needs all of these before changing runtime dispatch:
 6. Keep observer callbacks serial and bounded. Synchronous execute methods cannot overlap without
    more workers; prefer existing asynchronous execution handles before adding an executor.
 
-This stage implements the shared admission prerequisite and its consumer wiring. Batch overlap,
-eligibility declarations and asynchronous checkpoint serialization belong to the next implementation
-stage, rather than unused new SPI methods in this commit.
+The prerequisite introduced shared admission and consumer wiring. The batch-overlap stage below
+adds eligibility, bounded scheduling and atomic asynchronous checkpoint updates.
 
 ## Checkbox plan
 
@@ -61,7 +60,7 @@ stage, rather than unused new SPI methods in this commit.
 - [x] Add baseline budget, dispatcher, cross-driver and upstream fake-HTTP tests.
 - [x] Run focused tests and packaged/API compatibility checks with bounded JVMs and one fork.
 - [x] Update plans, preserve unrelated edits and commit the completed shared-budget stage.
-- [ ] Implement opt-in batch overlap only after the eligibility, checkpoint and draining contracts above.
+- [x] Implement opt-in batch overlap with the eligibility, checkpoint and draining contracts above.
 
 ## Usage and validation
 
@@ -108,4 +107,97 @@ JUnit parallel execution, low process priority and
 The tested shaded candidate SHA-256 is
 `5b1e57a068d96b138089d10dd8967d5a9f7d03f536592492af106cc2f5b2200d`.
 No agents, live inference, provider CLIs, broad/Bytequay suites, Xcode builds or simulators ran.
-This verifies admission and ownership behavior, not a throughput benchmark or parallel batch scheduler.
+This prerequisite evidence covers admission/ownership behavior. Batch-overlap evidence follows below.
+
+## Opt-in batch overlap
+
+The next stage adds `maximumParallelTools(1..64)` on the engine, API configs and public facades.
+One remains the default; a value greater than one requires an explicit shared budget. Tool authors
+separately opt in through the additive default `AgentTool.parallelSafe()`. Captured registration
+metadata, validated requirements, session permissions, policy and approval all remain authoritative.
+Only pure operations and scoped workspace reads qualify in this stage. Writes, process/network/host
+invocation, custom capabilities, legacy wrappers and built-ins are exclusive barriers even if a
+caller marks them parallel-safe. Read declarations without implementation opt-in remain exclusive.
+
+The coordinator starts asynchronous handles on the existing turn worker and keeps at most the
+configured window active. Inputs are prepared lazily in provider order; no batch-sized execution
+queue or executor pool is created. Calls requiring a barrier drain previous work, execute alone,
+and settle before later calls start. These barriers apply within the batch; the shared host budget bounds
+aggregate capacity across driver sessions. Synchronous execute methods naturally remain synchronous.
+
+`ToolExecutionBudget.tryAcquire` is a nonblocking additive default. The built-in budget implements
+it; existing host implementations default to empty and retain serial admission. A coordinator
+holding leases never calls blocking acquire: if capacity is unavailable it settles active work
+before retrying. This avoids self-deadlock when the host budget is smaller than the batch window.
+
+Policies, human approvals, result encoding, durable outcome commits, acknowledgements and observers
+run serially on the coordinator. Ready executions may settle in completion order, but the model's
+result batch is assembled in original provider order from the saved receipts. Frontend events are
+serialized, including progress from asynchronous resource callbacks. Compound prepared-resource,
+started and result transitions hold the repository monitor around state/read-modify-save, avoiding
+lost journal updates without changing checkpoint format or public record shapes.
+
+Turn cancellation requests every returned active handle immediately, including while approval is
+pending; late-returning handles receive the same request once. Cancellation or another batch failure
+stops admission and drains the admitted prefix. Observed success is encoded/persisted before releasing
+its lease; unknown outcomes, failed persistence/acknowledgement and unverified termination retain
+claims for cleanup/reconciliation. Unstarted queued calls remain unstarted. Restart recovery keeps
+the existing saved-result/synthetic-interruption behavior and never re-executes old receipts.
+
+### Batch-overlap checklist
+
+- [x] Add default exclusive eligibility and opt-in bounded builder configuration.
+- [x] Add nonblocking shared-budget admission with a serial fallback for existing budget implementations.
+- [x] Implement a lazy bounded scheduler, exclusive barriers, provider-order result assembly and serial observers.
+- [x] Make asynchronous journal updates atomic and serialize progress delivery.
+- [x] Cancel all active handles and drain observed outcomes while retaining unsafe claims.
+- [x] Finish focused scheduler/engine/fake-HTTP regression verification and packaged/API compatibility checks.
+- [x] Review, preserve unrelated edits, update validation evidence and commit this stage.
+
+### Enabling and testing batch overlap
+
+```java
+ToolExecutionBudget shared = ToolExecutionBudget.bounded(4);
+ClaudeApi.Builder claude = ClaudeApi.builder()
+        .toolExecutionBudget(shared).maximumParallelTools(2);
+DeepSeekApi.Builder deepseek = DeepSeekApi.builder()
+        .toolExecutionBudget(shared).maximumParallelTools(2);
+```
+
+Configured typed tools also override `parallelSafe()` to return true. Existing implementations inherit
+false. The [controlled async lookup fixture](../../shifting-codej/src/test/java/io/github/shiftinglabs/codej/sdk/testing/ParallelLookupTools.java)
+shows installation through both facade tests; it deliberately withholds one fake result to verify
+reverse completion. The standalone [artifact consumer](../../scripts/compatibility/ToolSpiConsumer.java)
+uses a two-call batch with explicit eligibility and a shared budget, while validating typed result
+order, history and observer delivery from the shaded artifact.
+
+Validation passed **255 focused cases**, with zero failures, errors or skips:
+
+- 190 CLI cases: `TestParallelToolDispatcher` (9), `TestApiToolProviders` (24),
+  `TestToolExecutionBudget` (7), `TestToolDispatcher` (17), `TestApiAgentDriver` (62),
+  `TestApiCheckpointCodec` (33), `TestApiSessionStore` (6), `TestApiCheckpointMigrations` (25),
+  `TestEngineExtensionSpi` (3), `TestPromptSpiValues` (4).
+- 65 SDK cases: `TestClaudeApi` and `TestDeepSeekApi` (13 each), `TestApiConnector` (9),
+  `TestClaudeApiConnector` and `TestDeepSeekApiConnector` (13 each),
+  `TestSessionReferenceCompatibility` (4).
+- New coverage verifies genuine overlapping handles and reverse settlement, per-batch windows,
+  smaller shared budgets, old-budget serial fallback, all exclusive barriers, policy/approval/static
+  denials, prefix draining on request-limit/stop/persistence/acknowledgement/startup failure,
+  cancellation during approval, bounded stop-proof interruption, retained leases and writer claims,
+  concurrent durable resource callbacks, serialized progress, ordered fake-HTTP results and restart
+  reconciliation without re-execution of either completed or unstarted receipts.
+- Checkstyle, license checks, strict Javadocs and shaded `-Ppublish` packaging passed.
+- The published `0.164.0-1` packaged checker passed unchanged baseline-compiled consumer bytecode,
+  legacy public/driver descriptors and shapes, checksum/shading checks, API fake-HTTP/coding fixtures
+  and the updated configured SPI consumer.
+- Comparison against the preceding `6fcf432` artifact verified all 116 existing engine, SPI, resource
+  and facade types. Five builder methods, two default SPI methods and the package-private budget's
+  nonblocking override are additive; existing descriptors, record components, enum order and sealed
+  shapes match. No existing implementation gains a mandatory method.
+
+Verification used the same isolated snapshot, unrelated-file hash checks and bounded offline Maven
+settings described above. No agents, new production worker pools, live inference, provider CLIs,
+broad/Bytequay suites, Xcode builds or simulators were started. The tests use deterministic futures
+and at most two controlled resource-callback threads; this is not a throughput benchmark.
+The final shaded candidate SHA-256 is
+`c9fe4fcb4089fee9cd0718757bfd6b9c87471d8eee72559c9f545143d0de06e7`.

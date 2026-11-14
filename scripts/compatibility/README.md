@@ -158,5 +158,6 @@ and `EngineObserver` ports. It checks prepared requirements, passes admission th
 approval path, receives typed metadata notifications, and verifies scope cleanup. No raw model
 arguments, prompt text or result content is supplied to the observer.
 
-That engine also borrows `ToolExecutionBudget.bounded(1)`. The packaged consumer exercises admission
-and lease release through the public builder and existing tool lifecycle, without another executor.
+That engine also borrows `ToolExecutionBudget.bounded(2)` and opts into `maximumParallelTools(2)`.
+Its pure greeting handler declares `parallelSafe()`. A two-call batch exercises admission, ordered
+typed results/history, observer delivery and lease release from the shaded jar, without another executor.

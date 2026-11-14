@@ -70,6 +70,7 @@ public final class ClaudeApi
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
+        private int maximumParallelTools = 1;
 
         private Builder() {}
 
@@ -227,7 +228,7 @@ public final class ClaudeApi
 
         /**
          * Borrows a tool admission budget; share one instance across drivers for an aggregate limit.
-         * No additional tool workers or within-batch overlap are enabled.
+         * No additional tool workers are created; batch overlap requires a separate explicit opt-in.
          *
          * @param budget thread-safe host service; failed acquisition must release its capacity
          * @return this builder
@@ -235,6 +236,22 @@ public final class ClaudeApi
         public Builder toolExecutionBudget(ToolExecutionBudget budget)
         {
             toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
+            return this;
+        }
+
+        /**
+         * Enables a bounded batch window for explicitly eligible asynchronous tools. Defaults to one.
+         * Writes, opaque effects, legacy tools and built-ins remain exclusive.
+         *
+         * @param value maximum active tools per batch, from 1 to 64; greater than one requires a shared budget
+         * @return this builder
+         */
+        public Builder maximumParallelTools(int value)
+        {
+            if (value < 1 || value > 64) {
+                throw new IllegalArgumentException("parallel tool window must be between 1 and 64");
+            }
+            maximumParallelTools = value;
             return this;
         }
 
@@ -255,6 +272,7 @@ public final class ClaudeApi
             promptProviders.forEach(settings::promptProvider);
             extensions.forEach(settings::extension);
             toolExecutionBudget.ifPresent(settings::toolExecutionBudget);
+            settings.maximumParallelTools(maximumParallelTools);
             return DriverAgent.claudeApi(settings.build(), state, profile);
         }
     }

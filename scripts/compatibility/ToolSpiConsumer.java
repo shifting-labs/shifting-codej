@@ -161,12 +161,14 @@ public final class ToolSpiConsumer
                     require(history.complete() && history.exchanges().size() == (tool ? 0 : 1), "Engine lost canonical history");
                     history.validateNext(request.input());
                     if (!tool) {
-                        require(request.input().equals(new ModelInput.ToolResults(List.of(new ModelInput.ToolResult("call", "hello", false)))), "Engine lost typed result");
+                        require(request.input().equals(new ModelInput.ToolResults(List.of(new ModelInput.ToolResult("call", "hello", false),
+                                new ModelInput.ToolResult("call2", "hello", false)))), "Engine lost ordered typed results");
                         var exchange = history.exchanges().getFirst();
                         require(exchange.providerId().equals("fixture") && exchange.model().equals("model"), "History lost model provenance");
                         require(exchange.text().isEmpty() && exchange.toolCalls().getFirst().id().equals("call"), "History lost the assistant tool call");
                     }
-                    ModelResponse response = new ModelResponse(tool ? "" : "done", tool ? List.of(new ModelResponse.ToolCall("call", "greet", "{}")) : List.of(),
+                    ModelResponse response = new ModelResponse(tool ? "" : "done", tool ? List.of(new ModelResponse.ToolCall("call", "greet", "{}"),
+                            new ModelResponse.ToolCall("call2", "greet", "{}")) : List.of(),
                             tool ? ModelResponse.StopReason.TOOL_CALLS : ModelResponse.StopReason.COMPLETED, new ModelReplayState("fixture", 1, "replay"), Optional.empty());
                     return new ModelCall()
                     {
@@ -228,7 +230,7 @@ public final class ToolSpiConsumer
             };
             var configurationBuilder = ApiEngineConfig.builder(new ConnectorIdentity("fixture", "tools"), new AgentLaneId("fixture-tools"), "model", () -> model)
                     .maximumSessions(1).toolProvider(provider, configuration).promptProvider(prompts, "project").extension(extensions, "configuration")
-                    .toolExecutionBudget(ToolExecutionBudget.bounded(1));
+                    .toolExecutionBudget(ToolExecutionBudget.bounded(2)).maximumParallelTools(2);
             var context = new AgentSessionContext("fixture", root, root.resolve("runtime"), root.resolve("runtime/provider"), AgentPermissionPolicy.AUTO,
                     Optional.empty(), (request, timeout) -> CompletableFuture.completedStage(ProviderApprovalDecision.allow(Optional.empty())),
                     Optional.empty(), Optional.empty(), SessionAccess.TOOLS_ONLY, "", List.of());
@@ -237,8 +239,8 @@ public final class ToolSpiConsumer
                 var result = session.start(new AgentTurnCommand("turn", "hello", List.of(), Duration.ZERO)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
                 require(result.state() == AgentTurnResult.State.COMPLETED, "Configured provider engine turn failed");
             }
-            require(evaluated.get() == 1 && closed.get() == 1, "Scoped extension lifecycle failed");
-            require(observed.size() == 6 && observed.getFirst() instanceof EngineObservation.TurnStarted
+            require(evaluated.get() == 2 && closed.get() == 1, "Scoped extension lifecycle failed");
+            require(observed.size() == 8 && observed.getFirst() instanceof EngineObservation.TurnStarted
                     && observed.getLast() instanceof EngineObservation.TurnFinished, "Engine observations changed");
         }
         finally {
@@ -340,6 +342,9 @@ public final class ToolSpiConsumer
 
         @Override
         public ToolDefinition<Input, Result> definition() { return definition; }
+
+        @Override
+        public boolean parallelSafe() { return true; }
 
         @Override
         public ToolRequirements requirements(Input parameters, ToolPreparationContext context) { return ToolRequirements.none(); }

@@ -29,6 +29,14 @@ public interface AgentTool<P, R>
 
     ToolRequirements requirements(P parameters, ToolPreparationContext context);
 
+    /**
+     * Pure stable opt-in: the implementation and its borrowed services support independent concurrent
+     * invocations. The engine still keeps workspace writes and opaque capabilities exclusive.
+     * Defaults keep existing tools, legacy facades and built-ins exclusive. Execute should return an
+     * asynchronous handle promptly; this flag creates no worker threads.
+     */
+    default boolean parallelSafe() { return false; }
+
     /** Starts only after the caller has durably recorded intent and satisfied policy/approval. */
     ToolExecution<R> execute(P parameters, ToolExecutionContext context);
 }

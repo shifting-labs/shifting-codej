@@ -28,9 +28,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import static java.util.Objects.requireNonNull;
 
@@ -142,7 +147,7 @@ final class ToolDispatcher
         active.remove(execution, ownership);
     }
 
-    private Optional<ToolExecutionBudget.Lease> reserve(Call call, Context context)
+    private Optional<ToolExecutionBudget.Lease> reserve(Call call, Context context, boolean nonblocking)
     {
         if (budget.isEmpty()) {
             return Optional.empty();
@@ -150,7 +155,7 @@ final class ToolDispatcher
         try {
             context.interruptible(true);
             context.checkStop();
-            return Optional.of(requireNonNull(budget.orElseThrow().acquire(new ToolExecutionBudget.Context()
+            ToolExecutionBudget.Context admission = new ToolExecutionBudget.Context()
             {
                 @Override
                 public String invocationId() { return call.eventId(); }
@@ -160,9 +165,11 @@ final class ToolDispatcher
 
                 @Override
                 public boolean cancellationRequested() { return context.cancelled(); }
-            }), "tool budget returned no lease"));
+            };
+            return nonblocking ? requireNonNull(budget.orElseThrow().tryAcquire(admission), "tool budget returned null")
+                    : Optional.of(requireNonNull(budget.orElseThrow().acquire(admission), "tool budget returned no lease"));
         }
-        catch (InterruptedException | java.util.concurrent.CancellationException failure) {
+        catch (InterruptedException | CancellationException failure) {
             context.checkStop();
             throw new Limit("Tool budget admission interrupted, cancelled or deadline exceeded");
         }
@@ -172,35 +179,100 @@ final class ToolDispatcher
         }
     }
 
-    private void verify(ToolRegistration.Active execution)
+    private void verify(ToolRegistration.Active execution) { verify(execution, false); }
+
+    private void verify(ToolRegistration.Active execution, boolean draining)
     {
         try {
-            ToolStopResult stopped = execution.stopAndVerify().toCompletableFuture().get(stopTimeout.toMillis(), TimeUnit.MILLISECONDS);
-            if (!stopped.stopped()) {
-                throw new Uncertain("Tool termination could not be verified");
+            long began = System.nanoTime();
+            CompletableFuture<ToolStopResult> proof = execution.stopAndVerify().toCompletableFuture();
+            while (true) {
+                long remaining = Math.max(0, stopTimeout.toNanos() - (System.nanoTime() - began));
+                try {
+                    ToolStopResult stopped = proof.get(remaining, TimeUnit.NANOSECONDS);
+                    if (!stopped.stopped()) {
+                        throw new Uncertain("Tool termination could not be verified");
+                    }
+                    return;
+                }
+                catch (InterruptedException failure) {
+                    if (!draining || remaining == 0) {
+                        Thread.currentThread().interrupt();
+                        throw new Uncertain("Tool termination could not be verified");
+                    }
+                    // Keep the observed outcome while waiting on the same bounded quiescence proof.
+                }
             }
         }
         catch (Uncertain failure) {
             throw failure;
-        }
-        catch (InterruptedException failure) {
-            Thread.currentThread().interrupt();
-            throw new Uncertain("Tool termination could not be verified");
         }
         catch (Exception failure) {
             throw new Uncertain("Tool termination could not be verified");
         }
     }
 
+    record Invocation(Call call, Context context)
+    {
+        Invocation
+        {
+            requireNonNull(call, "call is null");
+            requireNonNull(context, "context is null");
+        }
+    }
+
+    record PreparedInvocation(Invocation invocation, ToolRegistration registration, ToolRegistration.Prepared prepared)
+    {
+        ToolRequirements requirements() { return prepared.requirements(); }
+    }
+
+    record Pending(PreparedInvocation prepared, ToolRegistration.Active execution, CompletableFuture<?> completion) {}
+
     final class Turn
     {
         private final int maximumCalls;
+        private final AtomicBoolean aborting = new AtomicBoolean();
+        private final Set<ToolRegistration.Active> cancelled = ConcurrentHashMap.newKeySet();
         private int calls;
 
         Turn(int maximumCalls) { this.maximumCalls = maximumCalls; }
 
+        void cancel()
+        {
+            aborting.set(true);
+            for (var execution : active.keySet()) {
+                if (cancelled.add(execution)) {
+                    try {
+                        execution.cancel();
+                    }
+                    catch (RuntimeException failure) {
+                        // Cancellation is best effort; completion and stop verification still fence ownership.
+                    }
+                }
+            }
+        }
+
         void dispatch(Call call, Context context)
         {
+            Optional<PreparedInvocation> prepared = prepare(new Invocation(call, context));
+            if (prepared.isPresent() && admit(prepared.orElseThrow())) {
+                finish(start(prepared.orElseThrow(), false).orElseThrow());
+            }
+        }
+
+        void dispatchBatch(Iterable<Invocation> invocations, int maximumParallel)
+        {
+            if (maximumParallel < 2 || budget.isEmpty()) {
+                throw new IllegalArgumentException("Parallel batches require a shared budget and a window greater than one");
+            }
+            new ToolBatchScheduler(this, maximumParallel).run(invocations);
+        }
+
+        Optional<PreparedInvocation> prepare(Invocation invocation)
+        {
+            Call call = invocation.call();
+            Context context = invocation.context();
+            context.checkStop();
             if (++calls > maximumCalls) {
                 throw new Limit("API turn tool budget exhausted");
             }
@@ -212,7 +284,7 @@ final class ToolDispatcher
             catch (IllegalArgumentException failure) {
                 context.recordResult(new ToolRegistration.Result(context.rejection("INVALID_ARGUMENTS", failure.getMessage()), true));
                 context.decided(call, Admission.INVALID_ARGUMENTS);
-                return;
+                return Optional.empty();
             }
             try {
                 prepared = registration.prepare(call.arguments(), context);
@@ -220,27 +292,44 @@ final class ToolDispatcher
             catch (IllegalArgumentException failure) {
                 context.recordResult(new ToolRegistration.Result(registration.rejection(context, "INVALID_ARGUMENTS", failure.getMessage()), true));
                 context.decided(call, Admission.INVALID_ARGUMENTS);
-                return;
+                return Optional.empty();
             }
             if (!context.grants().permits(prepared.requirements())) {
                 context.recordResult(new ToolRegistration.Result(registration.rejection(context, "PERMISSION_DENIED", "Tool requirements are not permitted"), true));
                 context.decided(call, Admission.PERMISSION_DENIED);
-                return;
+                return Optional.empty();
             }
+            return Optional.of(new PreparedInvocation(invocation, registration, prepared));
+        }
+
+        boolean admit(PreparedInvocation prepared)
+        {
+            Call call = prepared.invocation().call();
+            Context context = prepared.invocation().context();
             Optional<Admission> rejection = context.policyRejection(call, prepared.requirements());
             if (rejection.isPresent()) {
                 Admission admission = rejection.orElseThrow();
-                context.recordResult(new ToolRegistration.Result(registration.rejection(context, admission.name(), "Tool invocation rejected by policy"), true));
+                context.recordResult(new ToolRegistration.Result(prepared.registration().rejection(context, admission.name(), "Tool invocation rejected by policy"), true));
                 context.decided(call, admission);
-                return;
+                return false;
             }
             context.checkStop();
-            if (registration.approval && !context.allowed(call)) {
-                context.recordResult(new ToolRegistration.Result(registration.rejection(context, "APPROVAL_DENIED", "Tool invocation denied"), true));
+            if (prepared.registration().approval && !context.allowed(call)) {
+                context.recordResult(new ToolRegistration.Result(prepared.registration().rejection(context, "APPROVAL_DENIED", "Tool invocation denied"), true));
                 context.decided(call, Admission.APPROVAL_DENIED);
-                return;
+                return false;
             }
-            Optional<ToolExecutionBudget.Lease> lease = reserve(call, context);
+            return true;
+        }
+
+        Optional<Pending> start(PreparedInvocation prepared, boolean nonblocking)
+        {
+            Call call = prepared.invocation().call();
+            Context context = prepared.invocation().context();
+            Optional<ToolExecutionBudget.Lease> lease = reserve(call, context, nonblocking);
+            if (nonblocking && lease.isEmpty()) {
+                return Optional.empty();
+            }
             lease.ifPresent(startupClaims::add);
             boolean invoked = false;
             try {
@@ -255,45 +344,26 @@ final class ToolDispatcher
                     context.checkStop();
                 }
                 ToolRegistration.Active execution;
-                ToolRegistration.Result result;
                 try {
                     context.interruptible(true);
                     try {
                         invoked = true;
-                        execution = prepared.start(executionContext(call, context, prepared.requirements()));
+                        execution = prepared.prepared().start(executionContext(call, context, prepared.requirements(), aborting::get));
                     }
                     catch (Exception failure) {
                         throw new Uncertain("Tool execution ended without an outcome");
                     }
                     active.put(execution, new Ownership(false, lease));
                     lease.ifPresent(startupClaims::remove);
-                    if (context.cancelled()) {
-                        execution.cancel();
+                    if (context.cancelled() || aborting.get()) {
+                        cancel();
                     }
-                    while (true) {
-                        try {
-                            result = execution.await();
-                            break;
-                        }
-                        catch (InterruptedException failure) {
-                            execution.cancel();
-                        }
-                        catch (ExecutionException | java.util.concurrent.CancellationException failure) {
-                            throw new Uncertain("Tool execution ended without an outcome");
-                        }
-                    }
-                    Thread.interrupted();
-                    verify(execution);
                 }
                 finally {
                     context.interruptible(false);
                     Thread.interrupted();
                 }
-                context.recordResult(result);
-                active.computeIfPresent(execution, (key, ownership) -> new Ownership(true, ownership.lease()));
-                execution.committed();
-                release(execution);
-                context.completed(call, result);
+                return Optional.of(new Pending(prepared, execution, execution.completion().toCompletableFuture()));
             }
             finally {
                 if (!invoked && lease.isPresent()) {
@@ -302,9 +372,44 @@ final class ToolDispatcher
                 }
             }
         }
+
+        void finish(Pending pending)
+        {
+            Context context = pending.prepared().invocation().context();
+            ToolRegistration.Active execution = pending.execution();
+            ToolRegistration.Result result;
+            try {
+                context.interruptible(true);
+                while (true) {
+                    try {
+                        result = execution.await();
+                        break;
+                    }
+                    catch (InterruptedException failure) {
+                        cancel();
+                    }
+                    catch (ExecutionException | CancellationException failure) {
+                        throw new Uncertain("Tool execution ended without an outcome");
+                    }
+                }
+                Thread.interrupted();
+                verify(execution, true);
+            }
+            finally {
+                context.interruptible(false);
+                Thread.interrupted();
+            }
+            context.recordResult(result);
+            active.computeIfPresent(execution, (key, ownership) -> new Ownership(true, ownership.lease()));
+            execution.committed();
+            release(execution);
+            context.completed(pending.prepared().invocation().call(), result);
+        }
+
+        void verifyFailed(Pending pending) { verify(pending.execution(), true); }
     }
 
-    private ToolExecutionContext executionContext(Call call, Context context, ToolRequirements grants)
+    private ToolExecutionContext executionContext(Call call, Context context, ToolRequirements grants, BooleanSupplier aborting)
     {
         return new ToolExecutionContext()
         {
@@ -318,7 +423,7 @@ final class ToolDispatcher
             public ToolRequirements grants() { return grants; }
 
             @Override
-            public boolean cancellationRequested() { return context.cancelled(); }
+            public boolean cancellationRequested() { return context.cancelled() || aborting.getAsBoolean(); }
 
             @Override
             public void recordPrepared(ToolResource resource) { context.recordPrepared(resource); }

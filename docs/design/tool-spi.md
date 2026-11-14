@@ -106,6 +106,11 @@ Execution receives the same immutable parameter snapshot. The dispatcher binds t
 implementation, requirements, and captured policy together before approval. Backends recheck
 filesystem identities and granted access at use; a preflight path check alone is insufficient.
 
+The additive default `AgentTool.parallelSafe()` is false. With an explicit host batch window and a
+shared execution budget, typed implementations may opt into asynchronous pure/scoped-read overlap;
+writes, opaque capabilities, legacy tools and built-ins remain exclusive within a batch. See the
+[scheduling contracts and validation](tool-scheduling.md). No additional worker pool is created.
+
 `ToolExecution` separates the logical outcome from proof that work stopped. Cancellation only
 requests a stop. `stopAndVerify()` is bounded and retryable, and cannot report stopped while a
 callback, command, descendant, or external operation is still active. Uncertain outcomes are

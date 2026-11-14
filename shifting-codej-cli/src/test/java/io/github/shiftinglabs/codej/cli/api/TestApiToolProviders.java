@@ -293,6 +293,8 @@ class TestApiToolProviders
         String tool = "sample";
         String arguments = "{\"count\":2}";
         boolean respondWithTool = true;
+        boolean batch;
+        int batchSize = 2;
         boolean supported = true;
 
         @Override
@@ -309,7 +311,13 @@ class TestApiToolProviders
         {
             requests.add(request);
             boolean tools = respondWithTool && requests.size() == 1 && request.input() instanceof ModelInput.UserMessage;
-            var response = new ModelResponse(tools ? "" : "answer", tools ? List.of(new ModelResponse.ToolCall("call", tool, arguments)) : List.of(),
+            List<ModelResponse.ToolCall> calls = List.of();
+            if (tools) {
+                calls = batch ? java.util.stream.IntStream.rangeClosed(1, batchSize)
+                        .mapToObj(index -> new ModelResponse.ToolCall("call" + index, tool, "{\"count\":" + index + "}")).toList()
+                        : List.of(new ModelResponse.ToolCall("call", tool, arguments));
+            }
+            var response = new ModelResponse(tools ? "" : "answer", calls,
                     tools ? ModelResponse.StopReason.TOOL_CALLS : ModelResponse.StopReason.COMPLETED, new ModelReplayState("sample-api", 1, "replay"), Optional.empty());
             return new ModelCall()
             {
@@ -373,6 +381,231 @@ class TestApiToolProviders
     private Path checkpoint(AgentSessionRef reference) { return directory.resolve("profile/api-sessions").resolve(reference.providerValue()).resolve("checkpoint.json"); }
 
     private static ModelInput.ToolResult result(Client client) { return ((ModelInput.ToolResults) client.requests.getLast().input()).results().getFirst(); }
+
+    @Test
+    void parallelBatchesReturnProviderOrderDespiteReverseCompletionAndPreserveNeutralHistory()
+            throws Exception
+    {
+        ParallelProvider provider = new ParallelProvider();
+        provider.reverse = true;
+        Client client = new Client();
+        client.batch = true;
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).toolProvider(provider, true)
+                .toolExecutionBudget(ToolExecutionBudget.bounded(2)).maximumParallelTools(2).build(), host());
+                AgentSession session = driver.open(tools(), event -> {})) {
+            assertThat(run(session).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(provider.completionOrder).containsExactly(2, 1);
+            ModelInput.ToolResults results = (ModelInput.ToolResults) client.requests.getLast().input();
+            assertThat(results.results()).containsExactly(new ModelInput.ToolResult("call1", "value1", false), new ModelInput.ToolResult("call2", "value2", false));
+            assertThat(client.requests.getLast().history().orElseThrow().exchanges().getFirst().toolCalls())
+                    .extracting(ModelResponse.ToolCall::id).containsExactly("call1", "call2");
+        }
+        assertThat(provider.closed).hasValue(1);
+    }
+
+    @Test
+    void concurrentPreparedResourceCallbacksAreAtomicAndFrontendProgressIsSerialized()
+            throws Exception
+    {
+        ParallelProvider provider = new ParallelProvider();
+        Client client = new Client();
+        client.batch = true;
+        AtomicInteger emitting = new AtomicInteger();
+        AtomicInteger maximumEmitting = new AtomicInteger();
+        var config = config(client).toolProvider(provider, true).toolExecutionBudget(ToolExecutionBudget.bounded(2)).maximumParallelTools(2).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config, host());
+                AgentSession session = driver.open(tools(), event -> {
+                    int current = emitting.incrementAndGet();
+                    maximumEmitting.accumulateAndGet(current, Math::max);
+                    Thread.yield();
+                    emitting.decrementAndGet();
+                })) {
+            var turn = session.start(command());
+            assertThat(provider.entered.await(1, TimeUnit.SECONDS)).isTrue();
+            CountDownLatch ready = new CountDownLatch(2);
+            CountDownLatch go = new CountDownLatch(1);
+            List<Thread> writers = new ArrayList<>();
+            try {
+                for (int index = 0; index < 2; index++) {
+                    int slot = index;
+                    writers.add(Thread.ofPlatform().daemon().name("resource-fixture-" + index).start(() -> {
+                        ready.countDown();
+                        try {
+                            go.await();
+                            for (int resource = 0; resource < 4; resource++) {
+                                provider.contexts.get(slot).recordPrepared(new ToolResource("parallel.resource", "r-" + slot + "-" + resource));
+                                provider.contexts.get(slot).progress("progress");
+                            }
+                            provider.outcomes.get(slot).complete(ToolOutcome.completed("value" + (slot + 1)));
+                        }
+                        catch (Throwable failure) {
+                            provider.outcomes.get(slot).completeExceptionally(failure);
+                        }
+                    }));
+                }
+                assertThat(ready.await(1, TimeUnit.SECONDS)).isTrue();
+                go.countDown();
+                assertThat(turn.completion().toCompletableFuture().get(5, TimeUnit.SECONDS).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            }
+            finally {
+                go.countDown();
+                writers.forEach(Thread::interrupt);
+                for (Thread writer : writers) {
+                    writer.join(1000);
+                    assertThat(writer.isAlive()).isFalse();
+                }
+            }
+            ApiCheckpoint saved = ApiCheckpointCodec.decode(Files.readAllBytes(checkpoint(session.reference())));
+            assertThat(saved.journal().stream().filter(ApiJournal.PreparedResource.class::isInstance)).hasSize(8);
+            assertThat(maximumEmitting).hasValue(1);
+        }
+    }
+
+    @Test
+    void cancellingAParallelBatchRetainsEveryLeaseUntilQuiescenceAndRecoveryDoesNotReexecute()
+            throws Exception
+    {
+        ParallelProvider provider = new ParallelProvider();
+        Client client = new Client();
+        client.batch = true;
+        client.batchSize = 3;
+        ToolExecutionBudget budget = ToolExecutionBudget.bounded(2);
+        var config = config(client).toolProvider(provider, true).toolExecutionBudget(budget).maximumParallelTools(2).build();
+        AgentSessionRef reference;
+        ApiAgentDriver driver = new ApiAgentDriver(config, host());
+        AgentSession session = driver.open(tools(), event -> {});
+        reference = session.reference();
+        var turn = session.start(command());
+        try {
+            assertThat(provider.entered.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThat(provider.cancellation.await(1, TimeUnit.SECONDS)).isTrue();
+            assertThat(provider.cancelled).hasValue(2);
+            assertThatThrownBy(driver::close).isInstanceOf(AgentUnavailableException.class);
+            assertThat(turn.completion().toCompletableFuture()).isNotDone();
+            assertThat(budget.tryAcquire(budgetContext())).isEmpty();
+            assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, config))
+                    .isInstanceOf(AgentUnavailableException.class);
+        }
+        finally {
+            provider.outcomes.get(0).complete(ToolOutcome.completed("first survived"));
+            provider.outcomes.get(1).complete(ToolOutcome.completed("second survived"));
+            assertThat(turn.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            session.close();
+            driver.close();
+        }
+        try (var first = budget.tryAcquire(budgetContext()).orElseThrow(); var second = budget.tryAcquire(budgetContext()).orElseThrow()) {
+            assertThat(budget.tryAcquire(budgetContext())).isEmpty();
+        }
+        Client resumed = new Client();
+        resumed.respondWithTool = false;
+        try (ApiAgentDriver next = new ApiAgentDriver(config(resumed).toolProvider(provider, true).toolExecutionBudget(budget).maximumParallelTools(2).build(), host());
+                AgentSession restored = next.open(context(SessionAccess.TOOLS_ONLY, Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(run(restored).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(((ModelInput.ToolResults) resumed.requests.getFirst().input()).results()).containsExactly(
+                    new ModelInput.ToolResult("call1", "first survived", false), new ModelInput.ToolResult("call2", "second survived", false),
+                    new ModelInput.ToolResult("call3", "Not executed: previous turn was interrupted", true));
+            assertThat(provider.contexts).hasSize(2);
+        }
+    }
+
+    private static ToolExecutionBudget.Context budgetContext()
+    {
+        return new ToolExecutionBudget.Context()
+        {
+            @Override
+            public String invocationId() { return "budget-check"; }
+
+            @Override
+            public Optional<java.time.Instant> deadline() { return Optional.empty(); }
+
+            @Override
+            public boolean cancellationRequested() { return false; }
+        };
+    }
+
+    private static final class ParallelProvider
+            implements ToolProvider<Boolean>
+    {
+        final List<CompletableFuture<ToolOutcome<String>>> outcomes = List.of(new CompletableFuture<>(), new CompletableFuture<>());
+        final List<ToolExecutionContext> contexts = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<Integer> completionOrder = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final CountDownLatch entered = new CountDownLatch(2);
+        final AtomicInteger cancelled = new AtomicInteger();
+        final CountDownLatch cancellation = new CountDownLatch(2);
+        final AtomicInteger closed = new AtomicInteger();
+        boolean reverse;
+        final ToolDefinition<Input, String> definition = ToolDefinitions.of(ToolDescriptor.builder("sample", "Parallel sample").build(),
+                RecordToolParameters.of(Input.class), ToolOutput::text);
+
+        @Override
+        public String id() { return "parallel"; }
+
+        @Override
+        public List<ToolDefinition<?, ?>> definitions(Boolean configuration) { return List.of(definition); }
+
+        @Override
+        public ToolSet open(Boolean configuration, ToolSetContext context)
+        {
+            AgentTool<Input, String> tool = new AgentTool<>()
+            {
+                @Override
+                public ToolDefinition<Input, String> definition() { return definition; }
+
+                @Override
+                public boolean parallelSafe() { return configuration; }
+
+                @Override
+                public ToolRequirements requirements(Input input, ToolPreparationContext preparation) { return ToolRequirements.none(); }
+
+                @Override
+                public ToolExecution<String> execute(Input input, ToolExecutionContext execution)
+                {
+                    contexts.add(execution);
+                    entered.countDown();
+                    var outcome = outcomes.get(input.count() - 1);
+                    if (reverse && input.count() == 2) {
+                        outcome.complete(ToolOutcome.completed("value2"));
+                    }
+                    return new ToolExecution<>()
+                    {
+                        @Override
+                        public CompletionStage<ToolOutcome<String>> completion() { return outcome.minimalCompletionStage(); }
+
+                        @Override
+                        public void cancel()
+                        {
+                            cancelled.incrementAndGet();
+                            cancellation.countDown();
+                        }
+
+                        @Override
+                        public CompletionStage<ToolStopResult> stopAndVerify()
+                        {
+                            return CompletableFuture.completedStage(outcome.isDone() ? ToolStopResult.verifiedStopped() : ToolStopResult.unverified("callbacks active"));
+                        }
+
+                        @Override
+                        public void committed()
+                        {
+                            completionOrder.add(input.count());
+                            if (reverse && input.count() == 2) {
+                                outcomes.getFirst().complete(ToolOutcome.completed("value1"));
+                            }
+                        }
+                    };
+                }
+            };
+            return new ToolSet()
+            {
+                @Override
+                public List<AgentTool<?, ?>> tools() { return List.of(tool); }
+
+                @Override
+                public void close() { closed.incrementAndGet(); }
+            };
+        }
+    }
 
     @Test
     void startupFailureKeepsItsBudgetLeaseUntilTheToolSetConfirmsCleanup()

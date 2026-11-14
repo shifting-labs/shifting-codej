@@ -19,6 +19,7 @@ import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredExtensions;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredPrompts;
+import io.github.shiftinglabs.codej.sdk.testing.ParallelLookupTools;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,6 +67,27 @@ class TestClaudeApi
     private SessionOptions options()
     {
         return SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+    }
+
+    @Test
+    void optInParallelBatchesPreserveProviderResultOrderAcrossFakeHttp()
+            throws Exception
+    {
+        var provider = new ParallelLookupTools();
+        try (Agent agent = builder().toolProvider(provider, true).toolExecutionBudget(ToolExecutionBudget.bounded(2)).maximumParallelTools(2).build();
+                Session session = agent.startSession(SessionOptions.in(directory).access(Access.TOOLS_ONLY)
+                        .approvals(request -> java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE)).build())) {
+            http.reply(200, AnthropicHttpFixture.parallelToolStream());
+            Turn turn = session.start(Input.text("Parallel lookup"), TurnOptions.defaults().withTimeLimit(Duration.ofSeconds(2)), event -> {});
+            assertThat(turn.result().toCompletableFuture().get(5, TimeUnit.SECONDS)).isInstanceOf(TurnResult.Completed.class);
+            assertThat(provider.settled).containsExactly("second", "first");
+            String body = http.requests().getLast().body().toString();
+            assertThat(body).contains("first value", "second value");
+            assertThat(body.indexOf("\"tool_use_id\":\"call-1\"")).isLessThan(body.indexOf("\"tool_use_id\":\"call-2\""));
+        }
+        assertThatThrownBy(() -> builder().maximumParallelTools(2).build()).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> builder().maximumParallelTools(0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> builder().maximumParallelTools(65)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

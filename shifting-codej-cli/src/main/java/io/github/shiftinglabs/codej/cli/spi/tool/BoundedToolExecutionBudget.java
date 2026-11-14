@@ -44,20 +44,34 @@ final class BoundedToolExecutionBudget
         requireNonNull(context, "context is null");
         while (true) {
             if (slots.tryAcquire(waitNanos(context), TimeUnit.NANOSECONDS)) {
-                try {
-                    waitNanos(context);
-                    var released = new AtomicBoolean();
-                    return () -> {
-                        if (released.compareAndSet(false, true)) {
-                            slots.release();
-                        }
-                    };
-                }
-                catch (RuntimeException | Error failure) {
-                    slots.release();
-                    throw failure;
-                }
+                return acquired(context);
             }
+        }
+    }
+
+    @Override
+    public Optional<Lease> tryAcquire(Context context)
+            throws InterruptedException
+    {
+        requireNonNull(context, "context is null");
+        waitNanos(context);
+        return slots.tryAcquire(0, TimeUnit.NANOSECONDS) ? Optional.of(acquired(context)) : Optional.empty();
+    }
+
+    private Lease acquired(Context context)
+    {
+        try {
+            waitNanos(context);
+            var released = new AtomicBoolean();
+            return () -> {
+                if (released.compareAndSet(false, true)) {
+                    slots.release();
+                }
+            };
+        }
+        catch (RuntimeException | Error failure) {
+            slots.release();
+            throw failure;
         }
     }
 

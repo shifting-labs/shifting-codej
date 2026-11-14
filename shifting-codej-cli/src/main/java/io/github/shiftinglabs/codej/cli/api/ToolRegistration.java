@@ -33,6 +33,7 @@ import io.github.shiftinglabs.codej.tool.ToolResultCodec;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Function;
 
@@ -69,12 +70,14 @@ final class ToolRegistration
 
     interface Active
     {
+        CompletionStage<?> completion();
+
         Result await()
                 throws InterruptedException, ExecutionException;
 
         void cancel();
 
-        java.util.concurrent.CompletionStage<ToolStopResult> stopAndVerify();
+        CompletionStage<ToolStopResult> stopAndVerify();
 
         void committed();
     }
@@ -89,18 +92,20 @@ final class ToolRegistration
     final Contract contract;
     final boolean legacy;
     final boolean approval;
+    final boolean parallelSafe;
     final Optional<Tool> original;
     private final Preparation preparation;
     private final Function<ToolFailure, String> failures;
 
     private ToolRegistration(ModelRequest.ToolDefinition definition, Contract contract, boolean legacy, boolean approval,
-            Optional<Tool> original, Preparation preparation, Function<ToolFailure, String> failures)
+            Optional<Tool> original, boolean parallelSafe, Preparation preparation, Function<ToolFailure, String> failures)
     {
         this.definition = definition;
         this.contract = contract;
         this.legacy = legacy;
         this.approval = approval;
         this.original = original;
+        this.parallelSafe = parallelSafe;
         this.preparation = preparation;
         this.failures = requireNonNull(failures, "failures is null");
     }
@@ -116,7 +121,7 @@ final class ToolRegistration
         ToolParameters<P> parameters = legacy ? declared : JsonSchemaParameters.of(schema.json(), declared::decode);
         ToolResultCodec<R> results = requireNonNull(definition.results(), "result codec is null");
         return new ToolRegistration(new ModelRequest.ToolDefinition(descriptor.name(), descriptor.description(), schema.json()),
-                new Contract(descriptor.name(), descriptor.contractVersion(), schema.fingerprint()), legacy, approval, original,
+                new Contract(descriptor.name(), descriptor.contractVersion(), schema.fingerprint()), legacy, approval, original, !legacy && tool.parallelSafe(),
                 (arguments, context) -> {
                     P input = requireNonNull(parameters.decode(arguments), "parameter codec returned null");
                     ToolRequirements requirements = requireNonNull(tool.requirements(input, context), "requirements are null");
@@ -130,8 +135,12 @@ final class ToolRegistration
                         {
                             ToolExecution<R> execution = requireNonNull(tool.execute(input, executionContext), "tool returned no execution");
                             CompletableFuture<ToolOutcome<R>> completion = execution.completion().toCompletableFuture();
+                            var settled = completion.minimalCompletionStage();
                             return new Active()
                             {
+                                @Override
+                                public CompletionStage<?> completion() { return settled; }
+
                                 @Override
                                 public Result await()
                                         throws InterruptedException, ExecutionException
@@ -160,7 +169,7 @@ final class ToolRegistration
                                 public void cancel() { execution.cancel(); }
 
                                 @Override
-                                public java.util.concurrent.CompletionStage<ToolStopResult> stopAndVerify() { return execution.stopAndVerify(); }
+                                public CompletionStage<ToolStopResult> stopAndVerify() { return execution.stopAndVerify(); }
 
                                 @Override
                                 public void committed() { execution.committed(); }

@@ -53,6 +53,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
+import java.util.stream.IntStream;
 
 import static io.github.shiftinglabs.codej.cli.api.ApiEngine.CALLBACK;
 import static java.util.Objects.requireNonNull;
@@ -105,6 +107,7 @@ final class ApiTurn
         if (result.isDone() || !stopping.compareAndSet(null, reason)) {
             return;
         }
+        toolTurn.cancel();
         ModelCall active = call;
         if (active != null) {
             try {
@@ -137,7 +140,7 @@ final class ApiTurn
                 Optional.of(command.turnId()), Optional.of(item));
     }
 
-    private void emit(ProviderAgentEvent event)
+    private synchronized void emit(ProviderAgentEvent event)
     {
         ApiSession previous = CALLBACK.get();
         CALLBACK.set(session);
@@ -391,6 +394,19 @@ final class ApiTurn
 
     private ModelInput.ToolResults results(boolean recovering)
     {
+        if (!recovering && config.maximumParallelTools > 1) {
+            List<ApiToolReceipt> receipts = session.store.state().receipts();
+            Iterable<ToolDispatcher.Invocation> batch = () -> IntStream.range(0, receipts.size())
+                    .filter(index -> receipts.get(index).result().isEmpty())
+                    .mapToObj(index -> {
+                        ApiToolReceipt receipt = receipts.get(index);
+                        if (receipt.started()) {
+                            throw new Stopped("Tool outcome is uncertain; reconciliation is required");
+                        }
+                        return invocation(index, receipt);
+                    }).iterator();
+            dispatch(() -> toolTurn.dispatchBatch(batch, config.maximumParallelTools));
+        }
         List<ModelInput.ToolResult> results = new ArrayList<>();
         int count = session.store.state().receipts().size();
         for (int index = 0; index < count; index++) {
@@ -416,98 +432,109 @@ final class ApiTurn
 
     private void execute(int index, ApiToolReceipt receipt)
     {
+        ToolDispatcher.Invocation invocation = invocation(index, receipt);
+        dispatch(() -> toolTurn.dispatch(invocation.call(), invocation.context()));
+    }
+
+    private ToolDispatcher.Invocation invocation(int index, ApiToolReceipt receipt)
+    {
         ToolDispatcher.Call invocation = receipt.invocation();
-        try {
-            toolTurn.dispatch(invocation, new ToolDispatcher.Context()
+        return new ToolDispatcher.Invocation(invocation, new ToolDispatcher.Context()
+        {
+            @Override
+            public String invocationId() { return invocation.eventId(); }
+
+            @Override
+            public Optional<Instant> deadline()
             {
-                @Override
-                public String invocationId() { return invocation.eventId(); }
+                return command.maximumRuntime().isZero() ? Optional.empty() : Optional.of(started.plus(command.maximumRuntime()));
+            }
 
-                @Override
-                public Optional<Instant> deadline()
-                {
-                    return command.maximumRuntime().isZero() ? Optional.empty() : Optional.of(started.plus(command.maximumRuntime()));
-                }
+            @Override
+            public void checkStop() { ApiTurn.this.checkStop(); }
 
-                @Override
-                public void checkStop() { ApiTurn.this.checkStop(); }
+            @Override
+            public boolean cancelled() { return stopping.get() != null; }
 
-                @Override
-                public boolean cancelled() { return stopping.get() != null; }
+            @Override
+            public ToolRequirements grants()
+            {
+                return session.grants;
+            }
 
-                @Override
-                public ToolRequirements grants()
-                {
-                    return session.grants;
-                }
+            @Override
+            public boolean allowed(ToolDispatcher.Call call) { return ApiTurn.this.allowed(call); }
 
-                @Override
-                public boolean allowed(ToolDispatcher.Call call) { return ApiTurn.this.allowed(call); }
+            @Override
+            public Optional<EngineObservation.Admission> policyRejection(ToolDispatcher.Call call, ToolRequirements requirements)
+            {
+                return ApiTurn.this.policyRejection(call, requirements);
+            }
 
-                @Override
-                public Optional<EngineObservation.Admission> policyRejection(ToolDispatcher.Call call, ToolRequirements requirements)
-                {
-                    return ApiTurn.this.policyRejection(call, requirements);
-                }
+            @Override
+            public void decided(ToolDispatcher.Call call, EngineObservation.Admission admission)
+            {
+                observe(() -> new EngineObservation.ToolDecision(observedTurnId(), config.redactor().redact(call.eventId()),
+                        config.redactor().redact(call.name()), admission));
+            }
 
-                @Override
-                public void decided(ToolDispatcher.Call call, EngineObservation.Admission admission)
-                {
-                    observe(() -> new EngineObservation.ToolDecision(observedTurnId(), config.redactor().redact(call.eventId()),
-                            config.redactor().redact(call.name()), admission));
-                }
+            @Override
+            public String rejection(String code, String legacyMessage)
+            {
+                return session.builtins.isPresent() ? BuiltinTools.failure(code, code.equals("INVALID_ARGUMENTS")
+                        ? "Unknown tool or invalid tool arguments" : legacyMessage) : legacyMessage;
+            }
 
-                @Override
-                public String rejection(String code, String legacyMessage)
-                {
-                    return session.builtins.isPresent() ? BuiltinTools.failure(code, code.equals("INVALID_ARGUMENTS")
-                            ? "Unknown tool or invalid tool arguments" : legacyMessage) : legacyMessage;
-                }
+            @Override
+            public void started(ToolDispatcher.Call call)
+            {
+                emit(new ProviderAgentEvent.Tool(Optional.empty(), call.name(), ProviderAgentEvent.ActivityState.STARTED,
+                        "Host tool started", source(call.eventId())));
+            }
 
-                @Override
-                public void started(ToolDispatcher.Call call)
-                {
-                    emit(new ProviderAgentEvent.Tool(Optional.empty(), call.name(), ProviderAgentEvent.ActivityState.STARTED,
-                            "Host tool started", source(call.eventId())));
-                }
+            @Override
+            public void recordStarted(ToolDispatcher.Call call)
+            {
+                update(state -> state.started(index));
+            }
 
-                @Override
-                public void recordStarted(ToolDispatcher.Call call)
-                {
-                    save(session.store.state().started(index));
-                }
+            @Override
+            public void recordResult(ToolRegistration.Result outcome) { ApiTurn.this.recordResult(index, outcome.text(), outcome.error()); }
 
-                @Override
-                public void recordResult(ToolRegistration.Result outcome) { ApiTurn.this.recordResult(index, outcome.text(), outcome.error()); }
+            @Override
+            public void completed(ToolDispatcher.Call call, ToolRegistration.Result outcome)
+            {
+                observe(() -> new EngineObservation.ToolCompleted(observedTurnId(), config.redactor().redact(call.eventId()),
+                        config.redactor().redact(call.name()), outcome.error()));
+                emit(new ProviderAgentEvent.Tool(Optional.empty(), call.name(),
+                        outcome.error() ? ProviderAgentEvent.ActivityState.FAILED : ProviderAgentEvent.ActivityState.COMPLETED,
+                        outcome.error() ? "Host tool failed" : "Host tool completed", source(call.eventId()), Optional.empty(), Optional.empty(),
+                        !outcome.error() && outcome.text().length() <= config.maximumToolOutputChars
+                                ? Optional.of(new ProviderAgentEvent.ToolOutput(call.name(), config.redactor().redact(outcome.text()))) : Optional.empty()));
+            }
 
-                @Override
-                public void completed(ToolDispatcher.Call call, ToolRegistration.Result outcome)
-                {
-                    observe(() -> new EngineObservation.ToolCompleted(observedTurnId(), config.redactor().redact(call.eventId()),
-                            config.redactor().redact(call.name()), outcome.error()));
-                    emit(new ProviderAgentEvent.Tool(Optional.empty(), call.name(),
-                            outcome.error() ? ProviderAgentEvent.ActivityState.FAILED : ProviderAgentEvent.ActivityState.COMPLETED,
-                            outcome.error() ? "Host tool failed" : "Host tool completed", source(call.eventId()), Optional.empty(), Optional.empty(),
-                            !outcome.error() && outcome.text().length() <= config.maximumToolOutputChars
-                                    ? Optional.of(new ProviderAgentEvent.ToolOutput(call.name(), config.redactor().redact(outcome.text()))) : Optional.empty()));
-                }
+            @Override
+            public void recordPrepared(ToolResource resource)
+            {
+                update(state -> state.append(new ApiJournal.PreparedResource(invocation.id(), resource)));
+            }
 
-                @Override
-                public void recordPrepared(ToolResource resource)
-                {
-                    save(session.store.state().append(new ApiJournal.PreparedResource(invocation.id(), resource)));
-                }
+            @Override
+            public void progress(String message)
+            {
+                emit(new ProviderAgentEvent.Tool(Optional.empty(), invocation.name(), ProviderAgentEvent.ActivityState.STARTED,
+                        config.redactor().redact(message), source(invocation.eventId())));
+            }
 
-                @Override
-                public void progress(String message)
-                {
-                    emit(new ProviderAgentEvent.Tool(Optional.empty(), invocation.name(), ProviderAgentEvent.ActivityState.STARTED,
-                            config.redactor().redact(message), source(invocation.eventId())));
-                }
+            @Override
+            public void interruptible(boolean value) { interruptible = value; }
+        });
+    }
 
-                @Override
-                public void interruptible(boolean value) { interruptible = value; }
-            });
+    private void dispatch(Runnable action)
+    {
+        try {
+            action.run();
         }
         catch (ToolDispatcher.Limit failure) {
             throw new Stopped(failure.getMessage());
@@ -607,17 +634,27 @@ final class ApiTurn
             bounded = bounded.substring(0, Math.max(0, config.maximumToolOutputChars - marker.length()))
                     + marker.substring(0, Math.min(marker.length(), config.maximumToolOutputChars));
         }
-        save(session.store.state().completed(index, bounded, error));
+        String captured = bounded;
+        update(state -> state.completed(index, captured, error));
+    }
+
+    private void update(UnaryOperator<ApiCheckpoint> transition)
+    {
+        synchronized (session.store) {
+            save(transition.apply(session.store.state()));
+        }
     }
 
     private void save(ApiCheckpoint state)
     {
-        try {
-            session.store.save(state);
-        }
-        catch (RuntimeException failure) {
-            session.damaged = true;
-            throw failure;
+        synchronized (session.store) {
+            try {
+                session.store.save(state);
+            }
+            catch (RuntimeException failure) {
+                session.damaged = true;
+                throw failure;
+            }
         }
     }
 

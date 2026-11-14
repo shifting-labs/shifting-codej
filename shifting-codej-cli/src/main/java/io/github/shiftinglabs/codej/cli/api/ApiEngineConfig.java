@@ -66,6 +66,7 @@ public final class ApiEngineConfig
     final List<PromptProviderBinding> promptProviders;
     final List<EngineExtensionBinding> extensions;
     final Optional<ToolExecutionBudget> toolExecutionBudget;
+    final int maximumParallelTools;
 
     private ApiEngineConfig(Builder b)
     {
@@ -93,6 +94,8 @@ public final class ApiEngineConfig
         promptProviders = PromptProviderBinding.snapshot(b.promptProviders);
         extensions = EngineExtensionBinding.snapshot(b.extensions);
         toolExecutionBudget = b.toolExecutionBudget;
+        maximumParallelTools = b.maximumParallelTools;
+        checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
     SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
@@ -127,6 +130,7 @@ public final class ApiEngineConfig
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
         private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
+        private int maximumParallelTools = 1;
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -285,6 +289,14 @@ public final class ApiEngineConfig
         public Builder toolExecutionBudget(ToolExecutionBudget budget)
         {
             toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
+            return this;
+        }
+
+        /** Opts into a bounded asynchronous batch window; values greater than one require a shared budget. */
+        public Builder maximumParallelTools(int value)
+        {
+            checkArgument(value >= 1 && value <= 64, "parallel tool window must be between 1 and 64");
+            maximumParallelTools = value;
             return this;
         }
 

@@ -75,6 +75,7 @@ class TestToolDispatcher
             context.trace.add("effect");
             return execution(ToolOutcome.completed("result"), context);
         });
+        assertThat(tool.parallelSafe()).isFalse();
         dispatcher(tool).turn(2).dispatch(CALL, context);
         assertThat(context.trace).containsExactly("approval", "started", "intent", "prepared", "progress", "effect", "stop", "result", "commit", "completed");
         assertThat(context.results).containsExactly(new ToolRegistration.Result("result", false));

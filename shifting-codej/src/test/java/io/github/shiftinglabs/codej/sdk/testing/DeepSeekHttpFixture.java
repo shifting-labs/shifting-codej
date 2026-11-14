@@ -159,6 +159,20 @@ public final class DeepSeekHttpFixture
         return stream.append(chunk(second, null, false)).append(chunk(JSON.createObjectNode(), "tool_calls", true)).append("data: [DONE]\n\n").toString();
     }
 
+    private record ParallelFunction(String name, String arguments) {}
+
+    private record ParallelCall(int index, String id, String type, ParallelFunction function) {}
+
+    private record ParallelDelta(List<ParallelCall> tool_calls) {}
+
+    public static String parallelToolStream()
+    {
+        var delta = new ParallelDelta(List.of(
+                new ParallelCall(0, "call-1", "function", new ParallelFunction("contract_lookup", "{\"key\":\"first\"}")),
+                new ParallelCall(1, "call-2", "function", new ParallelFunction("contract_lookup", "{\"key\":\"second\"}"))));
+        return chunk(JSON.valueToTree(delta), null, false) + chunk(JSON.createObjectNode(), "tool_calls", true) + "data: [DONE]\n\n";
+    }
+
     @Override
     public void close()
     {
