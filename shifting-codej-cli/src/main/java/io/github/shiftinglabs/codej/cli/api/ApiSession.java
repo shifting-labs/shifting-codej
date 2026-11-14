@@ -27,6 +27,7 @@ import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
@@ -64,6 +65,7 @@ final class ApiSession
     Optional<BuiltinTools> builtins = Optional.empty();
     private final SessionToolSets toolSets = new SessionToolSets();
     final SessionPromptSources prompts = new SessionPromptSources();
+    final SessionExtensions extensions = new SessionExtensions();
     final ToolRequirements grants;
     private ApiTurn running;
     private boolean closing;
@@ -122,7 +124,7 @@ final class ApiSession
     {
         try {
             ApiCheckpoint before = store.state();
-            boolean resources = engine.coding(context) || !plan.families().isEmpty() || !config.promptProviders.isEmpty();
+            boolean resources = engine.coding(context) || !plan.families().isEmpty() || !config.promptProviders.isEmpty() || !config.extensions.isEmpty();
             if (resources) {
                 store.save(before.withPhase(ApiCheckpoint.Phase.BLOCKED));
             }
@@ -139,7 +141,9 @@ final class ApiSession
             registrations.addAll(toolSets.open(plan, assembly()));
             tools = ApiToolRegistry.registered(registrations);
             dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
-            prompts.open(config.promptProviders, promptContext());
+            ExtensionScope scope = new ExtensionScope();
+            prompts.open(config.promptProviders, scope);
+            extensions.open(config.extensions, scope);
             engine.requireOpen();
             if (builtins.isPresent() && before.recoverable()) {
                 builtins.orElseThrow().initialize();
@@ -159,25 +163,23 @@ final class ApiSession
         }
     }
 
-    private PromptSessionContext promptContext()
+    private final class ExtensionScope
+            implements PromptSessionContext, EngineExtensionContext
     {
-        return new PromptSessionContext()
-        {
-            @Override
-            public AgentSessionRef reference() { return reference; }
+        @Override
+        public AgentSessionRef reference() { return reference; }
 
-            @Override
-            public ConnectorIdentity identity() { return engine.identity(); }
+        @Override
+        public ConnectorIdentity identity() { return engine.identity(); }
 
-            @Override
-            public Path worktree() { return context.worktree(); }
+        @Override
+        public Path worktree() { return context.worktree(); }
 
-            @Override
-            public SessionAccess access() { return context.access(); }
+        @Override
+        public SessionAccess access() { return context.access(); }
 
-            @Override
-            public Duration shutdownTimeout() { return config.shutdownTimeout; }
-        };
+        @Override
+        public Duration shutdownTimeout() { return config.shutdownTimeout; }
     }
 
     private ToolSetContext assembly()
@@ -269,6 +271,7 @@ final class ApiSession
             releasing = true;
             try {
                 dispatcher.verifyStopped();
+                extensions.close();
                 prompts.close();
                 toolSets.close();
                 if (builtins.isPresent()) {

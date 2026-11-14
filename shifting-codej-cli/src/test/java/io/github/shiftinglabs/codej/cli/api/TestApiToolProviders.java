@@ -36,6 +36,10 @@ import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtension;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionContext;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
+import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicyContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
@@ -579,11 +583,33 @@ class TestApiToolProviders
                 case "network" -> ToolRequirements.builder().require(ToolCapability.NETWORK_ACCESS).build();
                 default -> ToolRequirements.builder().require(new ToolCapability("custom.unknown")).build();
             };
-            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).toolProvider(provider, SETTINGS).build(), host());
+            AtomicInteger evaluated = new AtomicInteger();
+            var extension = new EngineExtensionProvider<String>()
+            {
+                @Override
+                public String id() { return "policy"; }
+
+                @Override
+                public EngineExtension open(String configuration, EngineExtensionContext scope)
+                {
+                    return new EngineExtension()
+                    {
+                        @Override
+                        public Decision evaluate(ToolPolicyContext context)
+                        {
+                            evaluated.incrementAndGet();
+                            assertThat(context.requirements()).isSameAs(provider.requirements);
+                            return Decision.CONTINUE;
+                        }
+                    };
+                }
+            };
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).toolProvider(provider, SETTINGS).extension(extension, "setting").build(), host());
                     AgentSession session = driver.open(context(access, Optional.empty(), List.of(), allow()), event -> {})) {
                 assertThat(run(session).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
                 boolean permitted = mode.equals("read") || mode.equals("write");
                 assertThat(provider.executed).isEqualTo(permitted ? 1 : 0);
+                assertThat(evaluated).hasValue(permitted ? 1 : 0);
                 assertThat(result(client).error()).isEqualTo(!permitted);
                 if (!permitted) {
                     assertThat(result(client).text()).contains("PERMISSION_DENIED");

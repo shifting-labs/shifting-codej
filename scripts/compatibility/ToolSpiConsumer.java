@@ -35,6 +35,11 @@ import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtension;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionContext;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
+import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicyContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
@@ -188,8 +193,40 @@ public final class ToolSpiConsumer
                             List.of(new PromptSection("facts", setting + " facts")));
                 }
             };
+            var observed = new java.util.concurrent.CopyOnWriteArrayList<EngineObservation>();
+            var evaluated = new java.util.concurrent.atomic.AtomicInteger();
+            var closed = new java.util.concurrent.atomic.AtomicInteger();
+            EngineExtensionProvider<String> extensions = new EngineExtensionProvider<>()
+            {
+                @Override
+                public String id() { return "policy-metrics"; }
+
+                @Override
+                public EngineExtension open(String setting, EngineExtensionContext scope)
+                {
+                    require(scope.worktree().equals(root), "Extension scope changed");
+                    return new EngineExtension()
+                    {
+                        @Override
+                        public Decision evaluate(ToolPolicyContext request)
+                        {
+                            require(request.toolName().equals("greet"), "Policy lost tool identity");
+                            require(request.requirements().capabilities().isEmpty() && request.requirements().reads().isEmpty()
+                                    && request.requirements().writes().isEmpty(), "Policy lost the pure tool requirements");
+                            evaluated.incrementAndGet();
+                            return Decision.CONTINUE;
+                        }
+
+                        @Override
+                        public void observe(EngineObservation event) { observed.add(event); }
+
+                        @Override
+                        public void close() { closed.incrementAndGet(); }
+                    };
+                }
+            };
             var configurationBuilder = ApiEngineConfig.builder(new ConnectorIdentity("fixture", "tools"), new AgentLaneId("fixture-tools"), "model", () -> model)
-                    .maximumSessions(1).toolProvider(provider, configuration).promptProvider(prompts, "project");
+                    .maximumSessions(1).toolProvider(provider, configuration).promptProvider(prompts, "project").extension(extensions, "configuration");
             var context = new AgentSessionContext("fixture", root, root.resolve("runtime"), root.resolve("runtime/provider"), AgentPermissionPolicy.AUTO,
                     Optional.empty(), (request, timeout) -> CompletableFuture.completedStage(ProviderApprovalDecision.allow(Optional.empty())),
                     Optional.empty(), Optional.empty(), SessionAccess.TOOLS_ONLY, "", List.of());
@@ -198,6 +235,9 @@ public final class ToolSpiConsumer
                 var result = session.start(new AgentTurnCommand("turn", "hello", List.of(), Duration.ZERO)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
                 require(result.state() == AgentTurnResult.State.COMPLETED, "Configured provider engine turn failed");
             }
+            require(evaluated.get() == 1 && closed.get() == 1, "Scoped extension lifecycle failed");
+            require(observed.size() == 6 && observed.getFirst() instanceof EngineObservation.TurnStarted
+                    && observed.getLast() instanceof EngineObservation.TurnFinished, "Engine observations changed");
         }
         finally {
             try (var paths = Files.walk(root)) {

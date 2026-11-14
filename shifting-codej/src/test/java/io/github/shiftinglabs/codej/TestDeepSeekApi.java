@@ -13,6 +13,8 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredExtensions;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredPrompts;
 import io.github.shiftinglabs.codej.sdk.testing.DeepSeekHttpFixture;
@@ -63,6 +65,48 @@ class TestDeepSeekApi
     private SessionOptions options()
     {
         return SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+    }
+
+    @Test
+    void extensionsFlowThroughTheFacadeAndDenyBeforeApprovalsOrExecution()
+            throws Exception
+    {
+        var provider = new ConfiguredExtensions("project-policy");
+        AtomicInteger asked = new AtomicInteger();
+        AtomicInteger executed = new AtomicInteger();
+        Tool tool = Tool.of("contract_lookup", "Lookup", Lookup.class, args -> {
+            executed.incrementAndGet();
+            return args.key();
+        });
+        var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).tool(tool).approvals(request -> {
+            asked.incrementAndGet();
+            return java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE);
+        }).build();
+        SessionRef saved;
+        try (Agent agent = builder().extension(provider, true).build()) {
+            assertThat(provider.opened).hasValue(0);
+            try (Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("Lookup"))).isInstanceOf(TurnResult.Completed.class);
+                saved = session.ref().orElseThrow();
+            }
+        }
+        assertThat(provider.evaluated).hasValue(1);
+        assertThat(asked).hasValue(0);
+        assertThat(executed).hasValue(0);
+        assertThat(provider.observations.stream().filter(EngineObservation.ToolDecision.class::isInstance).map(EngineObservation.ToolDecision.class::cast))
+                .extracting(EngineObservation.ToolDecision::admission).containsExactly(EngineObservation.Admission.POLICY_DENIED);
+        try (Agent agent = builder().extension(provider, false).build(); Session session = agent.resumeSession(saved, options)) {
+            assertThat(session.run(Input.text("Lookup again"))).isInstanceOf(TurnResult.Completed.class);
+        }
+        assertThat(provider.opened).hasValue(2);
+        assertThat(provider.closed).hasValue(2);
+        assertThat(provider.evaluated).hasValue(2);
+        assertThat(asked).hasValue(1);
+        assertThat(executed).hasValue(1);
+        assertThat(provider.observations.stream().filter(EngineObservation.TurnFinished.class::isInstance)).hasSize(2);
+        assertThatThrownBy(() -> builder().extension(null, true)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().extension(provider, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().extension(provider, true).extension(provider, false).build()).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

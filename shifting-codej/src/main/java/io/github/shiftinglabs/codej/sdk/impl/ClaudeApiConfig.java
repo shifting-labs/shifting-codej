@@ -14,6 +14,8 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.CodingTools;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
@@ -43,6 +45,7 @@ public final class ClaudeApiConfig
     final Optional<CodingTools> codingTools;
     final List<ToolProviderBinding> toolProviders;
     final List<PromptProviderBinding> promptProviders;
+    final List<EngineExtensionBinding> extensions;
 
     private ClaudeApiConfig(Builder builder)
     {
@@ -55,6 +58,7 @@ public final class ClaudeApiConfig
         codingTools = builder.codingTools;
         toolProviders = List.copyOf(builder.toolProviders);
         promptProviders = PromptProviderBinding.snapshot(builder.promptProviders);
+        extensions = EngineExtensionBinding.snapshot(builder.extensions);
     }
 
     public static Builder builder(String model, Supplier<String> key) { return new Builder(model, key); }
@@ -70,6 +74,7 @@ public final class ClaudeApiConfig
         private Optional<CodingTools> codingTools = Optional.empty();
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
+        private final List<EngineExtensionBinding> extensions = new ArrayList<>();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -131,6 +136,18 @@ public final class ClaudeApiConfig
         public Builder promptProvider(PromptProviderBinding binding)
         {
             promptProviders.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Installs a fresh session-owned restrictive policy and/or metadata observer. */
+        public <C> Builder extension(EngineExtensionProvider<C> provider, C configuration)
+        {
+            return extension(EngineExtensionBinding.of(provider, configuration));
+        }
+
+        public Builder extension(EngineExtensionBinding binding)
+        {
+            extensions.add(requireNonNull(binding, "binding is null"));
             return this;
         }
 

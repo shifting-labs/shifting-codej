@@ -22,6 +22,11 @@ installation through engine and API facade builders. Each underlying driver sess
 new public turns capture ordered instructions and user-role context without changing permissions,
 tool definitions, pending-batch setup, checkpoint version or native replay ownership.
 
+The [scoped policy/observer plan](policy-extensions.md) adds `EngineExtensionProvider` installation
+through those same builders. `ToolPolicy` restricts fresh tool admission after validation and static
+permissions, while `EngineObserver` receives metadata-only lifecycle notifications. Policies cannot
+grant authority or bypass approval; observers cannot rewrite requests, results or checkpoint state.
+
 ## Boundaries
 
 Keep the existing `Agent`, `Session`, `Turn`, `AgentConnector`, `ConnectorDriver`, `AgentDriver`,

@@ -25,6 +25,8 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderTurnRef;
 import io.github.shiftinglabs.codej.cli.driver.ProviderUsageSample;
 import io.github.shiftinglabs.codej.cli.driver.RunningTurn;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
+import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicyContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
@@ -50,6 +52,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static io.github.shiftinglabs.codej.cli.api.ApiEngine.CALLBACK;
 import static java.util.Objects.requireNonNull;
@@ -157,6 +160,8 @@ final class ApiTurn
         AgentTurnResult terminal;
         try {
             checkStop();
+            observe(() -> new EngineObservation.TurnStarted(observedTurnId()));
+            checkStop();
             emit(new ProviderAgentEvent.Lifecycle(Optional.empty(), ProviderAgentEvent.LifecyclePhase.TURN_STARTED, "API turn started", source("turn")));
             ApiCheckpoint saved = session.store.state();
             if (saved.phase() == ApiCheckpoint.Phase.TOOLS) {
@@ -188,15 +193,20 @@ final class ApiTurn
         finally {
             interruptible = false;
             Thread.interrupted();
-            if (timeout != null) {
-                timeout.cancel(false);
-            }
         }
+        AgentTurnResult executionOutcome = terminal;
         try {
+            observe(() -> new EngineObservation.TurnFinished(observedTurnId(), executionOutcome.state(), executionOutcome.elapsed()));
             session.finished();
         }
         catch (RuntimeException failure) {
             terminal = terminal(AgentTurnResult.State.FAILED, Optional.empty(), Optional.of("API session writer could not be released"), Optional.empty(), false);
+        }
+        finally {
+            if (timeout != null) {
+                timeout.cancel(false);
+            }
+            Thread.interrupted();
         }
         result.complete(terminal);
     }
@@ -205,6 +215,26 @@ final class ApiTurn
             Optional<AgentTurnFailureKind> kind, boolean transientFailure)
     {
         return new AgentTurnResult(state, answer, reason, Duration.ofNanos(System.nanoTime() - startedNanos), true, kind, transientFailure);
+    }
+
+    private String observedTurnId() { return config.redactor().redact(command.turnId()); }
+
+    private void observe(Supplier<EngineObservation> observation)
+    {
+        if (session.extensions.isEmpty()) {
+            return;
+        }
+        try {
+            interruptible = true;
+            if (stopping.get() != null) {
+                Thread.currentThread().interrupt();
+            }
+            session.extensions.observe(observation.get());
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
     }
 
     private ApiRequestSetup requestSetup(String instructions)
@@ -303,6 +333,8 @@ final class ApiTurn
                 throw new Stopped("API response exceeded its size budget");
             }
             save(session.store.state().observed(requestId, response));
+            observe(() -> new EngineObservation.ModelCompleted(observedTurnId(), requestId, response.stopReason(), response.usage().map(sample ->
+                    new ProviderUsageSample(Optional.of(requestId), sample.semantics(), sample.inputTokens(), sample.cachedInputTokens(), sample.outputTokens(), sample.cost()))));
             response.usage().ifPresent(sample -> {
                 tokens = Math.addExact(tokens, Math.addExact(sample.inputTokens(), sample.outputTokens()));
                 emit(new ProviderAgentEvent.Usage(new ProviderUsageSample(Optional.of(requestId), ProviderUsageSample.Semantics.DELTA,
@@ -413,6 +445,19 @@ final class ApiTurn
                 public boolean allowed(ToolDispatcher.Call call) { return ApiTurn.this.allowed(call); }
 
                 @Override
+                public Optional<EngineObservation.Admission> policyRejection(ToolDispatcher.Call call, ToolRequirements requirements)
+                {
+                    return ApiTurn.this.policyRejection(call, requirements);
+                }
+
+                @Override
+                public void decided(ToolDispatcher.Call call, EngineObservation.Admission admission)
+                {
+                    observe(() -> new EngineObservation.ToolDecision(observedTurnId(), config.redactor().redact(call.eventId()),
+                            config.redactor().redact(call.name()), admission));
+                }
+
+                @Override
                 public String rejection(String code, String legacyMessage)
                 {
                     return session.builtins.isPresent() ? BuiltinTools.failure(code, code.equals("INVALID_ARGUMENTS")
@@ -438,6 +483,8 @@ final class ApiTurn
                 @Override
                 public void completed(ToolDispatcher.Call call, ToolRegistration.Result outcome)
                 {
+                    observe(() -> new EngineObservation.ToolCompleted(observedTurnId(), config.redactor().redact(call.eventId()),
+                            config.redactor().redact(call.name()), outcome.error()));
                     emit(new ProviderAgentEvent.Tool(Optional.empty(), call.name(),
                             outcome.error() ? ProviderAgentEvent.ActivityState.FAILED : ProviderAgentEvent.ActivityState.COMPLETED,
                             outcome.error() ? "Host tool failed" : "Host tool completed", source(call.eventId()), Optional.empty(), Optional.empty(),
@@ -510,6 +557,45 @@ final class ApiTurn
                 pending.cancel(false);
             }
             approval = null;
+        }
+    }
+
+    private Optional<EngineObservation.Admission> policyRejection(ToolDispatcher.Call call, ToolRequirements requirements)
+    {
+        if (session.extensions.isEmpty()) {
+            return Optional.empty();
+        }
+        ToolPolicyContext context = new ToolPolicyContext()
+        {
+            @Override
+            public String turnId() { return command.turnId(); }
+
+            @Override
+            public String invocationId() { return call.eventId(); }
+
+            @Override
+            public String toolName() { return call.name(); }
+
+            @Override
+            public ToolRequirements requirements() { return requirements; }
+
+            @Override
+            public Optional<Instant> deadline()
+            {
+                return command.maximumRuntime().isZero() ? Optional.empty() : Optional.of(started.plus(command.maximumRuntime()));
+            }
+
+            @Override
+            public boolean cancelled() { return stopping.get() != null; }
+        };
+        try {
+            interruptible = true;
+            checkStop();
+            return session.extensions.rejection(context, this::checkStop);
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
         }
     }
 

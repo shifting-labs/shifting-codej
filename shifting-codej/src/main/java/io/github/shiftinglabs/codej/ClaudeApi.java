@@ -13,6 +13,8 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
@@ -65,6 +67,7 @@ public final class ClaudeApi
         private Optional<CodingTools> codingTools = Optional.empty();
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
+        private final List<EngineExtensionBinding> extensions = new ArrayList<>();
 
         private Builder() {}
 
@@ -207,6 +210,20 @@ public final class ClaudeApi
         }
 
         /**
+         * Installs a session-owned restrictive tool policy and/or metadata observer.
+         *
+         * @param <C> provider configuration type
+         * @param provider thread-safe factory; each session owns its returned extension
+         * @param configuration immutable provider configuration
+         * @return this builder
+         */
+        public <C> Builder extension(EngineExtensionProvider<C> provider, C configuration)
+        {
+            extensions.add(EngineExtensionBinding.of(provider, configuration));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -221,6 +238,7 @@ public final class ClaudeApi
             codingTools.ifPresent(settings::codingTools);
             toolProviders.forEach(settings::toolProvider);
             promptProviders.forEach(settings::promptProvider);
+            extensions.forEach(settings::extension);
             return DriverAgent.claudeApi(settings.build(), state, profile);
         }
     }

@@ -47,6 +47,12 @@ import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtension;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionContext;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
+import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicy;
+import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicyContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
@@ -63,6 +69,7 @@ import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSection;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -97,6 +104,445 @@ class TestApiAgentDriver
 {
     @TempDir
     Path directory;
+
+    @Test
+    void scopedExtensionsApplyPoliciesAndObserveDurableOutcomesInOrder()
+            throws Exception
+    {
+        List<String> trace = new CopyOnWriteArrayList<>();
+        List<EngineObservation> observations = new CopyOnWriteArrayList<>();
+        AtomicInteger opened = new AtomicInteger();
+        AtomicInteger executions = new AtomicInteger();
+        AtomicInteger approvals = new AtomicInteger();
+        var provider = extensionProvider("rules", (setting, scope) -> {
+            opened.incrementAndGet();
+            assertThat(setting).isEqualTo("configuration");
+            assertThat(scope.identity()).isEqualTo(new ConnectorIdentity("fake-api", "work"));
+            assertThat(scope.worktree()).isEqualTo(directory);
+            assertThat(scope.access()).isEqualTo(SessionAccess.TOOLS_ONLY);
+            assertThat(scope.shutdownTimeout()).isEqualTo(Duration.ofSeconds(2));
+            return extension(request -> {
+                assertThat(request.turnId()).isEqualTo("turn");
+                assertThat(request.invocationId()).isNotBlank();
+                assertThat(request.toolName()).isEqualTo("lookup");
+                assertThat(request.requirements().capabilities()).contains(ToolCapability.HOST_INVOKE);
+                assertThat(request.deadline()).isEmpty();
+                assertThat(request.cancelled()).isFalse();
+                trace.add("policy");
+                return ToolPolicy.Decision.CONTINUE;
+            }, event -> {
+                observations.add(event);
+                if (event instanceof EngineObservation.ToolCompleted) {
+                    assertThat(executions).hasValue(1);
+                    assertThat(readCheckpoint(scope.reference()).receipts().getFirst().result()).isPresent();
+                }
+            }, () -> trace.add("close"));
+        });
+        Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> {
+            trace.add("execute");
+            executions.incrementAndGet();
+            return "private tool output";
+        });
+        FakeClient client = new FakeClient();
+        client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        ApiEngineConfig settings = config(client).extension(provider, "configuration").build();
+        assertThat(opened).hasValue(0);
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(tool), (request, timeout) -> {
+                    trace.add("approval");
+                    approvals.incrementAndGet();
+                    return CompletableFuture.completedFuture(ProviderApprovalDecision.allow(Optional.empty()));
+                }), event -> {})) {
+            assertThat(done(session.start(command("private user input"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(observations).extracting(Object::getClass).containsExactly(EngineObservation.TurnStarted.class, EngineObservation.ModelCompleted.class,
+                    EngineObservation.ToolDecision.class, EngineObservation.ToolCompleted.class, EngineObservation.ModelCompleted.class, EngineObservation.TurnFinished.class);
+            assertThat(observations).allMatch(event -> event.turnId().equals("turn"));
+            assertThat(observations.toString()).doesNotContain("private user input", "private tool output", "after-call", "Host instructions");
+        }
+        assertThat(opened).hasValue(1);
+        assertThat(approvals).hasValue(1);
+        assertThat(trace).containsExactly("policy", "approval", "execute", "close");
+    }
+
+    @Test
+    void denyingNullAndThrowingPoliciesFailClosedBeforeApprovalAndAdmission()
+            throws Exception
+    {
+        for (String mode : List.of("deny", "null", "throw")) {
+            FakeClient client = new FakeClient();
+            client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+            List<String> trace = new CopyOnWriteArrayList<>();
+            List<EngineObservation> observations = new CopyOnWriteArrayList<>();
+            var first = extensionProvider("first", (setting, scope) -> extension(request -> {
+                trace.add("first");
+                return ToolPolicy.Decision.CONTINUE;
+            }, observations::add, () -> {}));
+            var second = extensionProvider("second", (setting, scope) -> extension(request -> {
+                trace.add("second");
+                return switch (mode) {
+                    case "deny" -> ToolPolicy.Decision.DENY;
+                    case "null" -> null;
+                    default -> throw new IllegalStateException("private policy diagnostic");
+                };
+            }, event -> {}, () -> {}));
+            var third = extensionProvider("third", (setting, scope) -> extension(request -> {
+                throw new AssertionError("Policies after denial must not run");
+            }, event -> {}, () -> {}));
+            Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> { throw new AssertionError("Denied tool must not run"); });
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(first, "one").extension(second, "two").extension(third, "three").build(), connectorContext());
+                    AgentSession session = driver.open(context(Optional.empty(), List.of(tool), (request, timeout) -> {
+                        throw new AssertionError("Denied invocation must not prompt");
+                    }), event -> {})) {
+                assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                var outcome = ((ModelInput.ToolResults) client.requests.getLast().input()).results().getFirst();
+                assertThat(outcome.error()).isTrue();
+                assertThat(outcome.text()).contains("rejected by policy").doesNotContain("private policy diagnostic");
+                assertThat(trace).containsExactly("first", "second");
+                assertThat(observations.stream().filter(EngineObservation.ToolDecision.class::isInstance).map(EngineObservation.ToolDecision.class::cast))
+                        .extracting(EngineObservation.ToolDecision::admission).containsExactly(mode.equals("deny")
+                                ? EngineObservation.Admission.POLICY_DENIED : EngineObservation.Admission.POLICY_UNAVAILABLE);
+            }
+        }
+    }
+
+    @Test
+    void continueDoesNotBypassApprovalsAndInvalidArgumentsDoNotReachPolicy()
+            throws Exception
+    {
+        for (boolean invalid : List.of(true, false)) {
+            AtomicInteger evaluated = new AtomicInteger();
+            AtomicInteger asked = new AtomicInteger();
+            var provider = extensionProvider("rules", (setting, scope) -> extension(request -> {
+                evaluated.incrementAndGet();
+                return ToolPolicy.Decision.CONTINUE;
+            }, event -> {}, () -> {}));
+            FakeClient client = new FakeClient();
+            client.script.add((request, events) -> completed(toolResponse("lookup", invalid ? "{}" : "{\"key\":\"value\"}")));
+            Tool tool = Tool.of("lookup", "Lookup", Issue.class, args -> { throw new AssertionError("Denied tool must not run"); });
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(provider, "value").build(), connectorContext());
+                    AgentSession session = driver.open(context(Optional.empty(), List.of(tool), (request, timeout) -> {
+                        asked.incrementAndGet();
+                        return CompletableFuture.completedFuture(ProviderApprovalDecision.deny());
+                    }), event -> {})) {
+                assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(evaluated).hasValue(invalid ? 0 : 1);
+                assertThat(asked).hasValue(invalid ? 0 : 1);
+            }
+        }
+    }
+
+    @Test
+    void observerFailureIsDisabledWithoutDisablingPolicyOrOtherObservers()
+            throws Exception
+    {
+        AtomicInteger broken = new AtomicInteger();
+        AtomicInteger evaluated = new AtomicInteger();
+        List<EngineObservation> seen = new CopyOnWriteArrayList<>();
+        var one = extensionProvider("broken", (setting, scope) -> extension(request -> {
+            evaluated.incrementAndGet();
+            return ToolPolicy.Decision.DENY;
+        }, event -> {
+            broken.incrementAndGet();
+            throw new IllegalStateException("observer private diagnostic");
+        }, () -> {}));
+        var two = extensionProvider("healthy", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, seen::add, () -> {}));
+        FakeClient client = new FakeClient();
+        client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> { throw new AssertionError("Policy remains active"); });
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(one, "one").extension(two, "two").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
+            assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(session.start(command("Again"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(broken).hasValue(1);
+            assertThat(evaluated).hasValue(1);
+            assertThat(seen.stream().filter(EngineObservation.TurnFinished.class::isInstance)).hasSize(2);
+        }
+    }
+
+    @Test
+    void observersReceiveFailedAndCancelledExecutionOutcomesAndSanitizedMetadata()
+            throws Exception
+    {
+        List<EngineObservation> seen = new CopyOnWriteArrayList<>();
+        var provider = extensionProvider("metrics", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, seen::add, () -> {}));
+        FakeClient client = new FakeClient();
+        client.script.add((request, events) -> failed(new ModelClientException(ModelClientException.Kind.INVALID_REQUEST, "private diagnostic", false)));
+        PendingCall pending = new PendingCall(true);
+        CountDownLatch entered = new CountDownLatch(1);
+        client.script.add((request, events) -> {
+            entered.countDown();
+            return pending;
+        });
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).redactor(SecretRedactor.fromEnvironment(Map.of("API_KEY", "secret-key")))
+                .extension(provider, "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(new AgentTurnCommand("secret-key", "private input", List.of(), Duration.ZERO))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            RunningTurn turn = session.start(command("Again"));
+            assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            assertThat(seen.stream().filter(EngineObservation.TurnFinished.class::isInstance).map(EngineObservation.TurnFinished.class::cast))
+                    .extracting(EngineObservation.TurnFinished::state).containsExactly(AgentTurnResult.State.FAILED, AgentTurnResult.State.CANCELLED);
+            assertThat(seen.toString()).doesNotContain("secret-key", "private diagnostic", "private input").contains("[REDACTED]");
+        }
+    }
+
+    @Test
+    void extensionOpenFailureClosesAcquiredResourcesInReverseOrder()
+    {
+        List<String> trace = new ArrayList<>();
+        AtomicReference<AgentSessionRef> reference = new AtomicReference<>();
+        var first = extensionProvider("first", (setting, scope) -> {
+            reference.set(scope.reference());
+            return extension(request -> ToolPolicy.Decision.CONTINUE, event -> {}, () -> trace.add("first"));
+        });
+        var second = extensionProvider("second", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, event -> {}, () -> trace.add("second")));
+        var bad = extensionProvider("bad", (setting, scope) -> { throw new IllegalStateException("private open diagnostic"); });
+        FakeClient client = new FakeClient();
+        var settings = config(client).extension(first, "one").extension(second, "two").extension(bad, "three").build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext())) {
+            assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {}))
+                    .isInstanceOf(AgentUnavailableException.class).hasMessageNotContaining("private open diagnostic");
+            assertThat(trace).containsExactly("second", "first");
+            try (ApiSessionStore ignored = ApiSessionStore.open(directory.resolve("profile"), reference.get().providerValue(), true, settings)) {
+                assertThat(ignored.state().phase()).isEqualTo(ApiCheckpoint.Phase.BLOCKED);
+            }
+        }
+    }
+
+    @Test
+    void extensionCleanupFailureRetainsOwnershipAndRetriesOnlyUnclosedScopes()
+    {
+        List<String> trace = new ArrayList<>();
+        AtomicInteger attempts = new AtomicInteger();
+        var first = extensionProvider("first", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, event -> {}, () -> trace.add("first")));
+        var second = extensionProvider("second", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, event -> {}, () -> {
+            if (attempts.getAndIncrement() == 0) {
+                throw new IllegalStateException("not stopped");
+            }
+            trace.add("second");
+        }));
+        var third = extensionProvider("third", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, event -> {}, () -> trace.add("third")));
+        FakeClient client = new FakeClient();
+        var settings = config(client).maximumSessions(1).extension(first, "one").extension(second, "two").extension(third, "three").build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext())) {
+            AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {});
+            try {
+                assertThatThrownBy(session::close).isInstanceOf(AgentUnavailableException.class);
+                assertThat(trace).containsExactly("third");
+                assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {})).hasMessageContaining("capacity");
+                assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), session.reference().providerValue(), true, settings))
+                        .isInstanceOf(AgentUnavailableException.class);
+            }
+            finally {
+                session.close();
+            }
+            assertThat(trace).containsExactly("third", "second", "first");
+        }
+    }
+
+    @Test
+    void blockedPolicyAndObserverRetainOwnershipUntilCallbacksReallyReturn()
+            throws Exception
+    {
+        for (boolean policy : List.of(true, false)) {
+            CountDownLatch entered = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            AtomicInteger closed = new AtomicInteger();
+            Runnable block = () -> {
+                entered.countDown();
+                boolean stopped = false;
+                while (!stopped) {
+                    try {
+                        release.await();
+                        stopped = true;
+                    }
+                    catch (InterruptedException ignored) {
+                    }
+                }
+            };
+            var provider = extensionProvider("blocked", (setting, scope) -> extension(request -> {
+                if (policy) {
+                    block.run();
+                    assertThat(request.cancelled()).isTrue();
+                }
+                return ToolPolicy.Decision.CONTINUE;
+            }, event -> {
+                if (!policy && event instanceof EngineObservation.TurnStarted) {
+                    block.run();
+                }
+            }, closed::incrementAndGet));
+            FakeClient client = new FakeClient();
+            client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+            Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> { throw new AssertionError("Cancelled tool must not run"); });
+            var settings = config(client).shutdownTimeout(Duration.ofMillis(30)).extension(provider, "value").build();
+            ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+            AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {});
+            RunningTurn turn = session.start(command("Hello"));
+            try {
+                assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+                turn.cancel();
+                assertThatThrownBy(driver::close).isInstanceOf(AgentUnavailableException.class);
+                assertThat(turn.completion().toCompletableFuture()).isNotDone();
+                assertThat(closed).hasValue(0);
+                assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), session.reference().providerValue(), true, settings))
+                        .isInstanceOf(AgentUnavailableException.class);
+            }
+            finally {
+                release.countDown();
+                assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+                session.close();
+                driver.close();
+            }
+            assertThat(closed).hasValue(1);
+        }
+    }
+
+    @Test
+    void nullExtensionAndDuplicateIdsFailBeforeInference()
+    {
+        AtomicInteger opened = new AtomicInteger();
+        var provider = extensionProvider("null-source", (setting, scope) -> {
+            opened.incrementAndGet();
+            return null;
+        });
+        FakeClient client = new FakeClient();
+        assertThatThrownBy(() -> config(client).extension(provider, "one").extension(provider, "two").build()).isInstanceOf(IllegalArgumentException.class);
+        assertThat(opened).hasValue(0);
+        assertThat(directory.resolve("profile")).doesNotExist();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(provider, "value").build(), connectorContext())) {
+            assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {})).isInstanceOf(AgentUnavailableException.class);
+            assertThat(client.requests).isEmpty();
+        }
+        assertThat(opened).hasValue(1);
+    }
+
+    @Test
+    void observerStateAndCleanupAreIndependentAcrossSessions()
+            throws Exception
+    {
+        AtomicInteger opened = new AtomicInteger();
+        AtomicInteger closed = new AtomicInteger();
+        AtomicInteger notified = new AtomicInteger();
+        var provider = extensionProvider("per-session", (setting, scope) -> {
+            opened.incrementAndGet();
+            return extension(request -> ToolPolicy.Decision.CONTINUE, event -> {
+                notified.incrementAndGet();
+                throw new IllegalStateException("disable only this session");
+            }, closed::incrementAndGet);
+        });
+        FakeClient client = new FakeClient();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(provider, "value").build(), connectorContext());
+                AgentSession first = driver.open(context(Optional.empty(), List.of(), allow()), event -> {});
+                AgentSession second = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(first.reference()).isNotEqualTo(second.reference());
+            assertThat(done(first.start(command("First"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(first.start(command("Again"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(second.start(command("Second"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+        }
+        assertThat(opened).hasValue(2);
+        assertThat(notified).hasValue(2);
+        assertThat(closed).hasValue(2);
+    }
+
+    @Test
+    void reentrantExtensionOpenCannotReleaseInitializingResources()
+    {
+        AtomicReference<ApiAgentDriver> holder = new AtomicReference<>();
+        AtomicInteger closed = new AtomicInteger();
+        var provider = extensionProvider("reentrant", (setting, scope) -> {
+            assertThatThrownBy(holder.get()::close).isInstanceOf(AgentUnavailableException.class);
+            return extension(request -> ToolPolicy.Decision.CONTINUE, event -> {}, closed::incrementAndGet);
+        });
+        FakeClient client = new FakeClient();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(provider, "value").build(), connectorContext())) {
+            holder.set(driver);
+            assertThatThrownBy(() -> driver.open(context(Optional.empty(), List.of(), allow()), event -> {})).isInstanceOf(AgentUnavailableException.class);
+            assertThat(closed).hasValue(1);
+        }
+    }
+
+    @Test
+    void terminalObserverErrorsDoNotPreventCompletionOrRelease()
+            throws Exception
+    {
+        AtomicInteger closed = new AtomicInteger();
+        var provider = extensionProvider("broken-terminal", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, event -> {
+            if (event instanceof EngineObservation.TurnFinished) {
+                throw new AssertionError("private observer failure");
+            }
+        }, closed::incrementAndGet));
+        FakeClient client = new FakeClient();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(provider, "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(done(session.start(command("Again"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(session.resumable()).isTrue();
+        }
+        assertThat(closed).hasValue(1);
+    }
+
+    @Test
+    void deadlineRemainsActiveThroughTheTerminalObserverCallback()
+            throws Exception
+    {
+        AtomicInteger interrupted = new AtomicInteger();
+        CountDownLatch blocked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        var provider = extensionProvider("terminal-deadline", (setting, scope) -> extension(request -> ToolPolicy.Decision.CONTINUE, event -> {
+            if (event instanceof EngineObservation.TurnFinished) {
+                blocked.countDown();
+                try {
+                    release.await();
+                }
+                catch (InterruptedException failure) {
+                    interrupted.incrementAndGet();
+                }
+            }
+        }, () -> {}));
+        FakeClient client = new FakeClient();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(provider, "value").build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            RunningTurn turn = session.start(new AgentTurnCommand("turn", "Hello", List.of(), Duration.ofMillis(500)));
+            try {
+                assertThat(blocked.await(1, TimeUnit.SECONDS)).isTrue();
+                // The execution outcome is already selected; the callback must still receive the deadline interrupt.
+                assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(interrupted).hasValue(1);
+            }
+            finally {
+                release.countDown();
+            }
+        }
+    }
+
+    private static EngineExtensionProvider<String> extensionProvider(String id, BiFunction<String, EngineExtensionContext, EngineExtension> open)
+    {
+        return new EngineExtensionProvider<>()
+        {
+            @Override
+            public String id() { return id; }
+
+            @Override
+            public EngineExtension open(String setting, EngineExtensionContext context) { return open.apply(setting, context); }
+        };
+    }
+
+    private static EngineExtension extension(java.util.function.Function<ToolPolicyContext, ToolPolicy.Decision> policy,
+            java.util.function.Consumer<EngineObservation> observer, Runnable close)
+    {
+        return new EngineExtension()
+        {
+            @Override
+            public Decision evaluate(ToolPolicyContext context) { return policy.apply(context); }
+
+            @Override
+            public void observe(EngineObservation observation) { observer.accept(observation); }
+
+            @Override
+            public void close() { close.run(); }
+        };
+    }
 
     @Test
     void promptSourcesAreSessionOwnedAndCaptureOncePerTurnAcrossToolContinuation()
@@ -248,7 +694,7 @@ class TestApiAgentDriver
     }
 
     @Test
-    void promptRecoveryUsesSavedInstructionsBeforeCapturingFreshContext()
+    void promptAndPolicyRecoveryUseSavedSetupWithoutReadmittingInterruptedTools()
             throws Exception
     {
         var provider = promptProvider("project", (setting, scope) -> request -> contribution("Rules " + setting, "Facts " + setting));
@@ -281,10 +727,16 @@ class TestApiAgentDriver
             assertThat(((ModelInput.UserMessage) request.history().orElseThrow().exchanges().getFirst().input()).text()).contains("Facts old");
             return answer(request, events);
         });
-        try (ApiAgentDriver driver = new ApiAgentDriver(config(next).promptProvider(provider, "new").build(), connectorContext());
+        List<EngineObservation> observations = new CopyOnWriteArrayList<>();
+        var observer = extensionProvider("recovery", (setting, scope) -> extension(request -> {
+            throw new AssertionError("Interrupted tools must not be readmitted by a new policy");
+        }, observations::add, () -> {}));
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(next).promptProvider(provider, "new").extension(observer, "value").build(), connectorContext());
                 AgentSession session = driver.open(context(Optional.of(reference), List.of(tool), allow()), event -> {})) {
             assertThat(done(session.start(command("Continue"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
             assertThat(next.requests).hasSize(2);
+            assertThat(observations.stream().filter(EngineObservation.ModelCompleted.class::isInstance)).hasSize(2);
+            assertThat(observations).noneMatch(event -> event instanceof EngineObservation.ToolDecision || event instanceof EngineObservation.ToolCompleted);
         }
     }
 
@@ -1417,6 +1869,16 @@ class TestApiAgentDriver
     {
         return new AgentSessionContext("task", directory, directory.resolve("runtime"), directory.resolve("runtime/provider"), AgentPermissionPolicy.AUTO,
                 reference, approvals, Optional.empty(), Optional.empty(), tools.isEmpty() ? SessionAccess.TEXT_ONLY : SessionAccess.TOOLS_ONLY, "Host instructions", tools);
+    }
+
+    private ApiCheckpoint readCheckpoint(AgentSessionRef reference)
+    {
+        try {
+            return ApiCheckpointCodec.decode(Files.readAllBytes(checkpoint(reference)));
+        }
+        catch (java.io.IOException failure) {
+            throw new java.io.UncheckedIOException(failure);
+        }
     }
 
     private Path checkpoint(AgentSessionRef reference) { return directory.resolve("profile/api-sessions").resolve(reference.providerValue()).resolve("checkpoint.json"); }

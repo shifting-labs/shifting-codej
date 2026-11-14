@@ -17,6 +17,8 @@ import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
@@ -61,6 +63,7 @@ public final class ApiEngineConfig
     final Optional<CodingTools> codingTools;
     final List<ToolProviderBinding> toolProviders;
     final List<PromptProviderBinding> promptProviders;
+    final List<EngineExtensionBinding> extensions;
 
     private ApiEngineConfig(Builder b)
     {
@@ -86,6 +89,7 @@ public final class ApiEngineConfig
         codingTools = b.codingTools;
         toolProviders = List.copyOf(b.toolProviders);
         promptProviders = PromptProviderBinding.snapshot(b.promptProviders);
+        extensions = EngineExtensionBinding.snapshot(b.extensions);
     }
 
     SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
@@ -118,6 +122,7 @@ public final class ApiEngineConfig
         private Optional<CodingTools> codingTools = Optional.empty();
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
+        private final List<EngineExtensionBinding> extensions = new ArrayList<>();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -257,6 +262,18 @@ public final class ApiEngineConfig
         public Builder promptProvider(PromptProviderBinding binding)
         {
             promptProviders.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Installs a fresh session-owned restrictive policy and/or metadata observer. */
+        public <C> Builder extension(EngineExtensionProvider<C> provider, C configuration)
+        {
+            return extension(EngineExtensionBinding.of(provider, configuration));
+        }
+
+        public Builder extension(EngineExtensionBinding binding)
+        {
+            extensions.add(requireNonNull(binding, "binding is null"));
             return this;
         }
 

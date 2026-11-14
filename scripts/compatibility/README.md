@@ -152,3 +152,8 @@ provider-neutral prefix. This example runs from the shaded artifact with only th
 The configured engine example also installs a session-owned `PromptProvider`. The model client
 checks that its instruction section reaches the prompt and its contextual section reaches user
 input, while tool continuation remains a typed result batch. The example starts no extra executor.
+
+The same engine example installs an `EngineExtensionProvider` implementing separate `ToolPolicy`
+and `EngineObserver` ports. It checks prepared requirements, passes admission through the existing
+approval path, receives typed metadata notifications, and verifies scope cleanup. No raw model
+arguments, prompt text or result content is supplied to the observer.

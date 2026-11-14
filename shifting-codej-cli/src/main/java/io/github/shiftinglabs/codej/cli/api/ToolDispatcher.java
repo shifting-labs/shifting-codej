@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej.cli.api;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation.Admission;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolPreparationContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolRequirements;
@@ -58,6 +59,10 @@ final class ToolDispatcher
         ToolRequirements grants();
 
         boolean allowed(Call call);
+
+        default Optional<Admission> policyRejection(Call call, ToolRequirements requirements) { return Optional.empty(); }
+
+        default void decided(Call call, Admission admission) {}
 
         String rejection(String code, String legacyMessage);
 
@@ -147,6 +152,7 @@ final class ToolDispatcher
             }
             catch (IllegalArgumentException failure) {
                 context.recordResult(new ToolRegistration.Result(context.rejection("INVALID_ARGUMENTS", failure.getMessage()), true));
+                context.decided(call, Admission.INVALID_ARGUMENTS);
                 return;
             }
             try {
@@ -154,16 +160,29 @@ final class ToolDispatcher
             }
             catch (IllegalArgumentException failure) {
                 context.recordResult(new ToolRegistration.Result(registration.rejection(context, "INVALID_ARGUMENTS", failure.getMessage()), true));
+                context.decided(call, Admission.INVALID_ARGUMENTS);
                 return;
             }
             if (!context.grants().permits(prepared.requirements())) {
                 context.recordResult(new ToolRegistration.Result(registration.rejection(context, "PERMISSION_DENIED", "Tool requirements are not permitted"), true));
+                context.decided(call, Admission.PERMISSION_DENIED);
                 return;
             }
+            Optional<Admission> rejection = context.policyRejection(call, prepared.requirements());
+            if (rejection.isPresent()) {
+                Admission admission = rejection.orElseThrow();
+                context.recordResult(new ToolRegistration.Result(registration.rejection(context, admission.name(), "Tool invocation rejected by policy"), true));
+                context.decided(call, admission);
+                return;
+            }
+            context.checkStop();
             if (registration.approval && !context.allowed(call)) {
                 context.recordResult(new ToolRegistration.Result(registration.rejection(context, "APPROVAL_DENIED", "Tool invocation denied"), true));
+                context.decided(call, Admission.APPROVAL_DENIED);
                 return;
             }
+            context.checkStop();
+            context.decided(call, Admission.ADMITTED);
             context.checkStop();
             context.started(call);
             context.checkStop();

@@ -14,9 +14,11 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.testing.AbstractTestApiConnector;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredExtensions;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredPrompts;
 import io.github.shiftinglabs.codej.sdk.testing.DeepSeekHttpFixture;
@@ -31,6 +33,22 @@ class TestDeepSeekApiConnector
         extends AbstractTestApiConnector<DeepSeekApiConfig>
 {
     private DeepSeekHttpFixture http;
+
+    @Test
+    void extensionBindingsAreTypedImmutableAndRejectDuplicateIds()
+    {
+        var provider = new ConfiguredExtensions("policy");
+        var binding = EngineExtensionBinding.of(provider, true);
+        var builder = DeepSeekApiConfig.builder("model", () -> "key").extension(binding);
+        var first = builder.build();
+        builder.extension(new ConfiguredExtensions("other"), false);
+        assertThat(first.extensions).containsExactly(binding);
+        assertThat(builder.build().extensions).hasSize(2);
+        assertThat(provider.opened).hasValue(0);
+        assertThatThrownBy(() -> builder.extension((EngineExtensionBinding) null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder.extension(provider, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder.extension(provider, false).build()).isInstanceOf(IllegalArgumentException.class);
+    }
 
     @Test
     void promptBindingsAreTypedSnapshotBuilderStateAndRejectDuplicateIds()
