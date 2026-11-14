@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.type.LogicalType;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
+import java.util.function.Function;
 import java.util.function.ToIntFunction;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -45,6 +47,7 @@ import static java.util.Objects.requireNonNull;
 /** Strict typed envelope; native message blocks remain opaque and are copied without semantic rewriting. */
 final class ContextReplay
 {
+    static final String SUMMARY_PREFIX = "[Conversation summary: context data]\n";
     private static final int MAX_CHARACTERS = 8 * 1024 * 1024;
     private static final ObjectMapper JSON = mapper();
 
@@ -93,6 +96,28 @@ final class ContextReplay
                 checkArgument(node.isObject(), "native message must be an object");
                 return node.<JsonNode>deepCopy();
             }).toList();
+        }
+    }
+
+    static Optional<ModelCompactionMemory> memory(ModelReplayState state, String provider, Function<JsonNode, String> decode)
+    {
+        requireNonNull(state, "state is null");
+        if (!state.providerId().equals(provider) || (state.formatVersion() != 1 && state.formatVersion() != 2)) {
+            throw invalid("Foreign or incompatible summary memory");
+        }
+        if (state.formatVersion() == 1) {
+            return Optional.empty();
+        }
+        try {
+            Envelope envelope = envelope(state);
+            Messages nativeMessages = JSON.readValue(envelope.nativeReplay().payload(), Messages.class);
+            checkArgument(!nativeMessages.messages().isEmpty(), "summary message is absent");
+            String text = requireNonNull(decode.apply(nativeMessages.messages().getFirst()), "summary text is null");
+            checkArgument(text.startsWith(SUMMARY_PREFIX), "invalid summary marker");
+            return Optional.of(new ModelCompactionMemory(envelope.through(), text.substring(SUMMARY_PREFIX.length())));
+        }
+        catch (IOException | IllegalArgumentException | NullPointerException failure) {
+            throw invalid("Invalid committed summary memory");
         }
     }
 

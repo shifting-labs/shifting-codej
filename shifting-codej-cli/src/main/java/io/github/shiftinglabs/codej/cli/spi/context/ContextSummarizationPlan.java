@@ -15,7 +15,7 @@ package io.github.shiftinglabs.codej.cli.spi.context;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Keep a complete suffix and summarize the preceding canonical prefix with one isolated model call. */
+/** Keep a complete suffix and summarize the preceding prefix with bounded, engine-budgeted model calls. */
 public record ContextSummarizationPlan(int retainExchanges, int maximumOutputTokens)
 {
     public ContextSummarizationPlan

@@ -97,6 +97,7 @@ public final class ContextCompactionConsumer
         final String model;
         final HttpServer server;
         final AtomicInteger requests = new AtomicInteger();
+        final java.util.List<String> requestBodies = new java.util.concurrent.CopyOnWriteArrayList<>();
         final AtomicReference<String> lastBody = new AtomicReference<>();
         final AtomicReference<Throwable> failure = new AtomicReference<>();
 
@@ -145,6 +146,7 @@ public final class ContextCompactionConsumer
                         requests.incrementAndGet();
                         require(!request.contains("sk-context-packaged"), "Credential entered request body");
                         lastBody.set(request);
+                        requestBodies.add(request);
                         body = claude ? event("message_start", "\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"" + model
                                 + "\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}")
                                 + event("content_block_start", "\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Answer\"}")

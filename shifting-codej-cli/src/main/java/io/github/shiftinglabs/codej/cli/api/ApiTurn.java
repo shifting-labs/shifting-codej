@@ -32,6 +32,7 @@ import io.github.shiftinglabs.codej.cli.spi.extension.ToolPolicyContext;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
@@ -283,37 +284,42 @@ final class ApiTurn
             @Override
             public boolean cancelled() { return stopping.get() != null; }
         };
-        ModelCompaction proposal;
-        ModelReplayState replacement;
         try {
             interruptible = true;
             checkStop();
-            Optional<ModelCompaction> offered;
             if (config.contextSummarization.isPresent()) {
                 var plan = requireNonNull(config.contextSummarization.orElseThrow().plan(context), "summary policy returned null");
                 checkStop();
-                offered = plan.map(value -> summarize(before, value, context.deadline()));
+                plan.ifPresent(value -> summarize(before, value, context.deadline()));
             }
             else {
-                offered = requireNonNull(config.contextCompactor.orElseThrow().propose(context), "compactor returned null");
+                var offered = requireNonNull(config.contextCompactor.orElseThrow().propose(context), "compactor returned null");
+                checkStop();
+                offered.ifPresent(proposal -> rewrite(before, proposal, context.deadline()));
             }
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
+    }
+
+    private boolean rewrite(ApiCheckpoint before, ModelCompaction proposal, Optional<Instant> deadline)
+    {
+        if (proposal.summary().length() > config.maximumTextChars) {
+            throw new IllegalArgumentException("Compaction summary exceeds its text budget");
+        }
+        ModelReplayState original = before.replay().orElseThrow();
+        ModelCompactionRequest request = new ModelCompactionRequest(model, before.history(), original, proposal, deadline);
+        try {
             checkStop();
-            if (offered.isEmpty()) {
-                return;
-            }
-            proposal = offered.orElseThrow();
-            if (proposal.summary().length() > config.maximumTextChars) {
-                throw new IllegalArgumentException("Compaction summary exceeds its text budget");
-            }
-            ModelReplayState original = before.replay().orElseThrow();
-            ModelCompactionRequest request = new ModelCompactionRequest(model, before.history(), original, proposal, context.deadline());
             interruptible = true;
-            replacement = requireNonNull(session.engine.client.compact(request), "adapter returned null").orElseThrow(() ->
+            ModelReplayState replacement = requireNonNull(session.engine.client.compact(request), "adapter returned null").orElseThrow(() ->
                     new IllegalArgumentException("Model adapter does not support context compaction"));
             checkStop();
             if (replacement.providerId().equals(original.providerId()) && replacement.formatVersion() == original.formatVersion()
                     && replacement.payload().equals(original.payload())) {
-                return;
+                return false;
             }
             if (!replacement.providerId().equals(original.providerId()) || replacement.payload().length() >= original.payload().length()
                     || replacement.payload().length() > config.maximumCheckpointBytes) {
@@ -327,18 +333,59 @@ final class ApiTurn
         }
         observe(() -> new EngineObservation.ContextCompacted(observedTurnId(), before.history().exchanges().size() - proposal.retainExchanges(), proposal.retainExchanges()));
         checkStop();
+        return true;
     }
 
-    private ModelCompaction summarize(ApiCheckpoint before, ContextSummarizationPlan plan, Optional<Instant> deadline)
+    private void summarize(ApiCheckpoint before, ContextSummarizationPlan plan, Optional<Instant> deadline)
     {
         if (!session.engine.client.supportsContextCompaction()) {
             throw new IllegalArgumentException("Model adapter does not support engine context summarization");
         }
-        // Validate complete canonical/tool boundaries before spending any inference budget.
-        ModelCompactionRequest.validateBoundary(before.history(), before.replay().orElseThrow(), plan.retainExchanges());
-        String transcript = config.redactor().redact(ApiSummaryPrompt.encode(before.history(),
-                before.history().exchanges().size() - plan.retainExchanges(), config.maximumTextChars));
-        int outputTokens = reserveRequest(plan.maximumOutputTokens(), true);
+        ModelReplayState replay = before.replay().orElseThrow();
+        ModelHistory history = before.history();
+        ModelCompactionRequest.validateBoundary(history, replay, plan.retainExchanges());
+        Optional<ModelCompactionMemory> memory;
+        try {
+            interruptible = true;
+            checkStop();
+            memory = requireNonNull(session.engine.client.compactionMemory(replay), "adapter returned null memory");
+            checkStop();
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
+        int from = memory.map(value -> IntStream.range(0, history.exchanges().size())
+                .filter(index -> history.exchanges().get(index).requestId().equals(value.throughRequestId())).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Summary boundary is absent from history")) + 1).orElse(0);
+        int target = history.exchanges().size() - plan.retainExchanges();
+        if (from > target) {
+            throw new IllegalArgumentException("Summary cannot restore removed context");
+        }
+        if (from > 0) {
+            ModelCompactionRequest.validateBoundary(history, replay, history.exchanges().size() - from);
+        }
+        String summary = memory.map(ModelCompactionMemory::summary).orElse("");
+        int limit = Math.min(config.maximumSummaryInputCharacters, config.maximumTextChars);
+        while (from < target) {
+            checkStop();
+            ApiSummaryPrompt.Chunk chunk = ApiSummaryPrompt.chunk(history, from, target, summary, limit);
+            String transcript = config.redactor().redact(chunk.text());
+            if (transcript.length() > limit) {
+                throw new IllegalArgumentException("Redacted summary input exceeds its budget");
+            }
+            summary = summaryCall(transcript, plan.maximumOutputTokens(), deadline);
+            var proposal = new ModelCompaction(summary, history.exchanges().size() - chunk.throughExchanges());
+            if (!rewrite(session.store.state(), proposal, deadline)) {
+                throw new IllegalArgumentException("Incremental compaction made no progress");
+            }
+            from = chunk.throughExchanges();
+        }
+    }
+
+    private String summaryCall(String transcript, int maximumOutputTokens, Optional<Instant> deadline)
+    {
+        int outputTokens = reserveRequest(maximumOutputTokens, true);
         String id = UUID.randomUUID().toString();
         var builder = ModelRequest.builder(id, model, new ModelInput.UserMessage(transcript, List.of()), outputTokens)
                 .instructions(ApiSummaryPrompt.INSTRUCTIONS).history(new ModelHistory(true, List.of()));
@@ -365,7 +412,7 @@ final class ApiTurn
         if (!config.redactor().redact(response.text()).equals(response.text())) {
             throw new IllegalArgumentException("Context summary contains a known credential");
         }
-        return new ModelCompaction(response.text(), plan.retainExchanges());
+        return response.text();
     }
 
     private int reserveRequest(int requestedOutputTokens, boolean continuation)

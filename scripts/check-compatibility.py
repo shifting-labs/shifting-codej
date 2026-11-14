@@ -198,6 +198,16 @@ def verify(args, report):
             (output / "context-summarization-consumer.txt").write_text(result)
             report["passed"].append("LLM summarization: budgeted Claude/DeepSeek summary calls and durable replay; JDK + jar only")
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_incremental = PREFIX + "cli/spi/model/ModelCompactionMemory.class" in artifact.namelist()
+        if has_incremental:
+            fixture = Path(__file__).parent / "compatibility" / "IncrementalSummaryConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "IncrementalSummaryConsumer", str(Path(folder) / "incremental-api")])
+            (output / "incremental-summary-consumer.txt").write_text(result)
+            report["passed"].append("Incremental summaries: bounded Claude/DeepSeek chunks and durable memory; JDK + jar only")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

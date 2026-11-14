@@ -60,6 +60,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
@@ -112,6 +113,123 @@ class TestApiAgentDriver
 {
     @TempDir
     Path directory;
+
+    @Test
+    void incrementalSummariesCommitBoundedChunksAndResumeAfterBudgetExhaustion()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        Map<String, ModelCompactionMemory> memories = new java.util.concurrent.ConcurrentHashMap<>();
+        java.util.function.Function<ModelCompactionRequest, Optional<ModelReplayState>> rewrite = request -> {
+            var next = new ModelReplayState("fake-api", 2, "c".repeat(request.replay().payload().length() - 1000));
+            int boundary = request.history().exchanges().size() - request.compaction().retainExchanges();
+            memories.put(next.payload(), new ModelCompactionMemory(request.history().exchanges().get(boundary - 1).requestId(), request.compaction().summary()));
+            return Optional.of(next);
+        };
+        FakeClient first = new FakeClient();
+        first.summarySupport = true;
+        first.memoryReader = state -> Optional.ofNullable(memories.get(state.payload()));
+        first.compactor = rewrite;
+        first.script.add((request, sink) -> {
+            assertThat(((ModelInput.UserMessage) request.input()).text()).contains("block-0").doesNotContain("block-1", "block-2");
+            return completed(response("memory-one", "discarded", List.of(), ModelResponse.StopReason.COMPLETED));
+        });
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(first).maximumRequests(2).maximumSummaryInputCharacters(500)
+                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(0, 32))).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("not yet submitted"))).state()).isEqualTo(AgentTurnResult.State.INTERRUPTED);
+            assertThat(first.requests).hasSize(1);
+            assertThat(first.compactions).hasSize(1);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+            assertThat(readCheckpoint(reference).replay().orElseThrow().payload()).hasSize(11000);
+            assertThat(session.resumable()).isTrue();
+        }
+        FakeClient next = new FakeClient();
+        next.summarySupport = true;
+        next.memoryReader = state -> Optional.ofNullable(memories.get(state.payload()));
+        next.compactor = rewrite;
+        for (int index = 1; index < 3; index++) {
+            int block = index;
+            next.script.add((request, sink) -> {
+                String text = ((ModelInput.UserMessage) request.input()).text();
+                assertThat(text).hasSizeLessThanOrEqualTo(500).contains(block == 1 ? "memory-one" : "memory-two", "block-" + block)
+                        .doesNotContain("block-0", "not yet submitted");
+                if (block == 2) {
+                    assertThat(text).doesNotContain("block-1");
+                }
+                return completed(response(block == 1 ? "memory-two" : "memory-three", "discarded", List.of(), ModelResponse.StopReason.COMPLETED));
+            });
+        }
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(next).maximumRequests(3).maximumSummaryInputCharacters(500)
+                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(0, 32))).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("finally submitted"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(next.requests).hasSize(3);
+            assertThat(next.compactions).hasSize(2);
+            assertThat(next.requests.getLast().replayState().orElseThrow().payload()).hasSize(9000);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(4);
+            assertThat(readCheckpoint(reference).history().exchanges().getLast().input()).isEqualTo(new ModelInput.UserMessage("finally submitted", List.of()));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "absent", "backwards", "covered"})
+    void incrementalMemoryIsValidatedAndAlreadyCoveredPrefixesDoNotSpendSummaryBudget(String mode)
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        var old = readCheckpoint(reference);
+        FakeClient client = new FakeClient();
+        client.summarySupport = true;
+        client.memoryReader = replay -> mode.equals("null") ? null : Optional.of(new ModelCompactionMemory(
+                mode.equals("absent") ? "unknown" : old.history().exchanges().getLast().requestId(), "existing memory"));
+        int retain = mode.equals("backwards") ? 2 : 0;
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).maximumRequests(1)
+                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(retain, 32))).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            var result = done(session.start(command("fresh")));
+            assertThat(result.state()).isEqualTo(mode.equals("covered") ? AgentTurnResult.State.COMPLETED : AgentTurnResult.State.FAILED);
+            assertThat(client.compactions).isEmpty();
+            assertThat(client.requests).hasSize(mode.equals("covered") ? 1 : 0);
+        }
+    }
+
+    @Test
+    void failedLaterChunkPreservesEarlierCommittedMemory()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        FakeClient client = new FakeClient();
+        client.summarySupport = true;
+        client.script.add((request, sink) -> completed(response("first memory", "discarded", List.of(), ModelResponse.StopReason.COMPLETED)));
+        client.script.add((request, sink) -> failed(new ModelClientException(ModelClientException.Kind.TEMPORARILY_UNAVAILABLE, "Unknown summary delivery", true)));
+        client.compactor = request -> Optional.of(new ModelReplayState("fake-api", 2, "c".repeat(11000)));
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).maximumSummaryInputCharacters(500)
+                .contextSummarization(context -> Optional.of(new ContextSummarizationPlan(0, 32))).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(client.compactions).hasSize(1);
+            assertThat(client.requests).hasSize(2);
+            assertThat(readCheckpoint(reference).replay().orElseThrow().payload()).hasSize(11000);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+            assertThat(session.resumable()).isTrue();
+        }
+    }
+
+    private AgentSessionRef seedSummaryHistory()
+            throws Exception
+    {
+        FakeClient seed = new FakeClient();
+        for (int index = 0; index < 3; index++) {
+            seed.script.add((request, sink) -> completed(response("answer", "x".repeat(12000), List.of(), ModelResponse.StopReason.COMPLETED)));
+        }
+        try (ApiAgentDriver driver = driver(seed); AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            for (int index = 0; index < 3; index++) {
+                assertThat(done(session.start(command("block-" + index + " " + "x".repeat(250)))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            }
+            return session.reference();
+        }
+    }
 
     @Test
     void engineSummarySharesBudgetsAndKeepsPrivateInferenceOutsideConversationAndAnswerEvents()
@@ -2572,6 +2690,7 @@ class TestApiAgentDriver
         boolean summarySupport;
         final List<ModelCompactionRequest> compactions = new CopyOnWriteArrayList<>();
         java.util.function.Function<ModelCompactionRequest, Optional<ModelReplayState>> compactor;
+        java.util.function.Function<ModelReplayState, Optional<ModelCompactionMemory>> memoryReader;
 
         @Override
         public ModelCapabilities capabilities(String model) { return new ModelCapabilities(true, Set.of("image/png"), Set.of("low", "high"), Set.of("standard")); }
@@ -2591,6 +2710,12 @@ class TestApiAgentDriver
 
         @Override
         public boolean supportsContextCompaction() { return summarySupport; }
+
+        @Override
+        public Optional<ModelCompactionMemory> compactionMemory(ModelReplayState replay)
+        {
+            return memoryReader == null ? ModelClient.super.compactionMemory(replay) : memoryReader.apply(replay);
+        }
 
         @Override
         public Optional<ModelReplayState> compact(ModelCompactionRequest request)

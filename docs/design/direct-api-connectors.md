@@ -36,8 +36,10 @@ results. Defaults remain serial, and the scheduler introduces no additional work
 The [context compaction plan](context-compaction.md) adds an optional borrowed `ContextCompactor`
 and provider-owned local replay rewrites. Full canonical history, execution receipts and journal
 remain durable; summaries cannot change instructions, tools, approvals or permissions.
-Its optional `ContextSummarizationPolicy` selects one isolated LLM summary using the same engine
+Its optional `ContextSummarizationPolicy` selects isolated LLM summaries using the same engine
 request/token/text/deadline budgets. The default local compactor still performs no inference.
+Growing histories use bounded complete-group chunks and provider-recovered summary memory;
+`maximumSummaryInputCharacters` bounds each encoded input without removing canonical history.
 
 ## Boundaries
 
@@ -356,6 +358,7 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 - [x] Add opt-in shared file/search/patch and contained single-process shell tools with permission tests.
 - [x] Add opt-in local [context compaction](context-compaction.md) with full durable history preserved.
 - [x] Add explicitly selected engine-budgeted LLM summaries, isolated from tools and conversation history.
+- [x] Bound incremental summary inputs and recover committed memory across sessions.
 - [ ] Evaluate provider-hosted tools and separate connector artifacts as needed.
 
 ## Second direct provider: DeepSeek

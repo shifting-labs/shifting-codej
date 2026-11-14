@@ -174,3 +174,9 @@ It reuses that loopback fixture to opt both public facades into engine-owned LLM
 conversation inferences plus two selected summary inferences are counted per provider, with repeated
 compaction, full audit-prefix visibility and durable resume after disabling the policy. Summary
 generation uses the existing model client; no live provider or separate summary backend is used.
+
+`IncrementalSummaryConsumer` is guarded separately by `ModelCompactionMemory`. It configures both
+public API builders with a 2,000-character input bound, summarizes a growing prefix in two chunks,
+then restarts and reuses committed memory for the next new group. Request counts and outgoing bodies
+check that earlier raw prefixes are not repeated. It uses only the JDK, shaded jar and loopback HTTP;
+older candidates continue to skip this additive fixture.

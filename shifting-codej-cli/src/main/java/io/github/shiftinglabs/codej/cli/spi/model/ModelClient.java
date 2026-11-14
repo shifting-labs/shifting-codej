@@ -60,6 +60,17 @@ public interface ModelClient
     default boolean supportsContextCompaction() { return false; }
 
     /**
+     * Recover committed summary memory locally for incremental generation. Empty means no known
+     * memory; existing clients retain full-prefix behavior. Validate replay ownership/version and
+     * reject malformed summaries without exposing native data or performing inference.
+     */
+    default Optional<ModelCompactionMemory> compactionMemory(ModelReplayState replay)
+    {
+        requireNonNull(replay, "replay is null");
+        return Optional.empty();
+    }
+
+    /**
      * Optional bounded local replay compaction, without inference or tool execution. Preserve retained
      * native blocks/signatures exactly and reject unsupported/unsafe boundaries. Empty means unsupported;
      * the default preserves existing adapters. Return the exact original state for an already-covered

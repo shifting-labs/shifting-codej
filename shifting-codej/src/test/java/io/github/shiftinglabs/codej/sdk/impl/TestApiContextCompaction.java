@@ -31,6 +31,7 @@ import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
@@ -77,6 +78,44 @@ class TestApiContextCompaction
     }
 
     private record Thinking(String reasoning_content) {}
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void growingHistoriesUseBoundedNewChunksAndRecoverPriorMemoryAcrossAgents(boolean claude)
+            throws Exception
+    {
+        try (Fixture f = new Fixture(claude)) {
+            var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+            SessionRef saved;
+            try (Agent agent = f.agent(Optional.empty()); Session session = agent.startSession(options)) {
+                for (String prefix : List.of("old-one", "old-two", "kept")) {
+                    assertThat(session.run(Input.text(prefix + " " + "x".repeat(1200)))).isInstanceOf(TurnResult.Completed.class);
+                }
+                saved = session.ref().orElseThrow();
+            }
+            ContextSummarizationPolicy policy = context -> Optional.of(new ContextSummarizationPlan(1, 64));
+            try (Agent agent = f.summaryAgent(policy, 2000); Session session = agent.resumeSession(saved, options)) {
+                f.textReply("memory-one");
+                f.textReply("memory-two");
+                int before = f.requests();
+                assertThat(session.run(Input.text("fresh input"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.requests()).isEqualTo(before + 3);
+                var bodies = f.bodies();
+                assertThat(bodies.get(bodies.size() - 3)).contains("old-one").doesNotContain("old-two", "kept", "fresh input");
+                assertThat(bodies.get(bodies.size() - 2)).contains("memory-one", "old-two").doesNotContain("old-one", "kept", "fresh input");
+                assertThat(f.lastBody()).contains("memory-two", "kept", "fresh input").doesNotContain("old-one", "old-two");
+            }
+            try (Agent agent = f.summaryAgent(policy, 2000); Session session = agent.resumeSession(saved, options)) {
+                f.textReply("memory-three");
+                int before = f.requests();
+                assertThat(session.run(Input.text("after restart"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.requests()).isEqualTo(before + 2);
+                String summary = f.bodies().get(f.bodies().size() - 2);
+                assertThat(summary).contains("memory-two", "kept").doesNotContain("old-one", "old-two", "fresh input");
+                assertThat(f.lastBody()).contains("memory-three", "fresh input", "after restart").doesNotContain("kept", "old-one", "old-two");
+            }
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
@@ -164,6 +203,8 @@ class TestApiContextCompaction
             var compacted = f.client.compact(new ModelCompactionRequest(f.model, history, c.replayState(), new ModelCompaction("old summary", 2), Optional.empty())).orElseThrow();
             assertThat(f.requests()).isEqualTo(before);
             assertThat(compacted.formatVersion()).isEqualTo(2);
+            assertThat(f.client.compactionMemory(a.replayState())).isEmpty();
+            assertThat(f.client.compactionMemory(compacted)).contains(new ModelCompactionMemory("one", "old summary"));
             assertThat(compacted.payload().length()).isLessThan(c.replayState().payload().length());
             assertThat(ContextReplay.nativeReplay(compacted).payload()).contains("kept lookup", "found call-1", "private thought").doesNotContain("old prefix");
             if (claude) {
@@ -175,6 +216,7 @@ class TestApiContextCompaction
             ModelRequest next = f.request("four", new ModelInput.UserMessage("next input", List.of()), history, Optional.of(compacted));
             ModelResponse after = f.generate(next);
             assertThat(after.replayState().formatVersion()).isEqualTo(2);
+            assertThat(f.client.compactionMemory(after.replayState())).contains(new ModelCompactionMemory("one", "old summary"));
             BodyView sent = JSON.readValue(f.lastBody(), BodyView.class);
             MessageView summary = sent.messages().stream().filter(message -> message.role().equals("user")).findFirst().orElseThrow();
             assertThat(summary.content().toString()).contains("old summary");
@@ -244,8 +286,13 @@ class TestApiContextCompaction
             assertThatThrownBy(() -> f.client.compact(new ModelCompactionRequest(f.model, saved, response.replayState(),
                     new ModelCompaction("summary", 0), Optional.of(Instant.MIN)))).isInstanceOf(java.util.concurrent.CancellationException.class);
             assertThatThrownBy(() -> f.client.compact(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> f.client.compactionMemory(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> f.client.compactionMemory(new ModelReplayState("foreign", 1, "{}"))).isInstanceOf(ModelClientException.class);
+            assertThatThrownBy(() -> f.client.compactionMemory(new ModelReplayState(response.replayState().providerId(), 3, "{}"))).isInstanceOf(ModelClientException.class);
+            assertThatThrownBy(() -> f.client.compactionMemory(new ModelReplayState(response.replayState().providerId(), 2, "{}"))).isInstanceOf(ModelClientException.class);
             assertThat(f.requests()).isEqualTo(before);
             f.client.close();
+            assertThatThrownBy(() -> f.client.compactionMemory(response.replayState())).isInstanceOf(RuntimeException.class);
             assertThatThrownBy(() -> f.client.compact(new ModelCompactionRequest(f.model, saved, response.replayState(),
                     new ModelCompaction("summary", 0), Optional.empty()))).isInstanceOf(RuntimeException.class);
         }
@@ -326,23 +373,27 @@ class TestApiContextCompaction
             }
         }
 
-        Agent summaryAgent(ContextSummarizationPolicy policy) { return agent(Optional.empty(), Optional.of(policy)); }
+        Agent summaryAgent(ContextSummarizationPolicy policy) { return summaryAgent(policy, 65536); }
 
-        Agent agent(Optional<ContextCompactor> policy) { return agent(policy, Optional.empty()); }
+        Agent summaryAgent(ContextSummarizationPolicy policy, int maximumInput) { return agent(Optional.empty(), Optional.of(policy), maximumInput); }
 
-        private Agent agent(Optional<ContextCompactor> policy, Optional<ContextSummarizationPolicy> summarization)
+        Agent agent(Optional<ContextCompactor> policy) { return agent(policy, Optional.empty(), 65536); }
+
+        private Agent agent(Optional<ContextCompactor> policy, Optional<ContextSummarizationPolicy> summarization, int maximumInput)
         {
             if (anthropic != null) {
                 var builder = ClaudeApi.builder().model(model).apiKey(() -> "sk-context-test").baseUrl(anthropic.baseUrl())
                         .stateDirectory(directory.resolve("state")).profileDirectory(directory.resolve("profile"));
                 policy.ifPresent(builder::contextCompactor);
                 summarization.ifPresent(builder::contextSummarization);
+                builder.maximumSummaryInputCharacters(maximumInput);
                 return builder.build();
             }
             var builder = DeepSeekApi.builder().model(model).apiKey(() -> "sk-context-test").baseUrl(deepseek.baseUrl())
                     .stateDirectory(directory.resolve("state")).profileDirectory(directory.resolve("profile"));
             policy.ifPresent(builder::contextCompactor);
             summarization.ifPresent(builder::contextSummarization);
+            builder.maximumSummaryInputCharacters(maximumInput);
             return builder.build();
         }
 

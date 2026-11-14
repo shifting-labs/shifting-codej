@@ -70,8 +70,9 @@ the JDK-only [packaged consumer](../../scripts/compatibility/ContextCompactionCo
 
 `contextSummarization(ContextSummarizationPolicy)` is additive on the engine, both adapter configs
 and both public API facade builders. The borrowed policy receives the same immutable context as a
-local compactor and returns `Optional<ContextSummarizationPlan>`. A plan selects `retainExchanges`
-and `maximumOutputTokens`; an empty result declines. Installing both modes is rejected at build time.
+local compactor and returns `Optional<ContextSummarizationPlan>`. Its unchanged two-component record
+selects `retainExchanges` and `maximumOutputTokens`; an empty result declines. Installing both modes
+is rejected at build time. Growing prefixes use the bounded incremental path below.
 
 For example, a host may use its own character threshold (not a token estimate):
 
@@ -95,13 +96,13 @@ canonical prefix as typed JSON data. No private reasoning, native replay, fresh 
 instructions enter this transcript. Attachment names/media types are metadata; paths and bytes are
 excluded, and no files are opened. A bounded writer rejects oversized escaped JSON before submission.
 
-Exactly one isolated `ModelClient.generate` call uses the current model, effort, service tier and
+Each isolated `ModelClient.generate` call uses the current model, effort, service tier and
 remaining turn deadline, fixed summary instructions, empty history, no replay and no tools. The
 transcript is untrusted context data. The engine counts this call against `maximumRequests` and
 caps its output by the plan, engine output limit and remaining observed token budget. Admission
 reserves a further request slot and at least one output token for continuation. Observed input usage
 can still exhaust the turn; missing usage stays unknown. There is no pre-submission input-token or
-billing guarantee, automatic retry, recursive summarization, new client, executor or worker pool.
+billing guarantee, automatic retry, new client, executor or worker pool.
 
 Summary deltas count against the turn's text budget without emitting message events. Final usage
 is charged once and emitted through the existing usage event. The additive metadata-only
@@ -112,16 +113,58 @@ tool-bearing or budget-exhausting responses do not reach the replay rewrite. The
 becomes a regular `ModelCompaction` and follows the same validation and synchronous commit path.
 
 The synthetic request/response is not a conversation exchange, native continuation or tool receipt.
-Its transient replay is discarded. Failure or uncertain delivery leaves the original checkpoint
+Its transient replay is discarded. Failure or uncertain delivery leaves the last committed checkpoint
 usable, since this call has no tool effects or conversation continuation to reconcile; a later
 explicit turn may pay for another summary. Cancellation retains the session writer until the
-adapter's completion fence confirms it stopped. Only the final replay replacement is committed.
+adapter's completion fence confirms it stopped. Only validated replay replacements are committed.
 There is no new checkpoint format or persistence migration.
 
-This first step summarizes the selected full canonical prefix, including earlier compacted audit
-content. It does not silently truncate or chunk an oversized prefix, restore removed native blocks,
-guarantee summary fidelity, or reduce full audit storage. Native-boundary and reduction checks still
-apply after generation, so a provider rejection can consume summary budget without changing replay.
+Summary generation does not restore removed native blocks, guarantee summary fidelity, or reduce full
+audit storage. Native-boundary and reduction checks still apply after generation, so a provider
+rejection can consume summary budget without changing replay.
+
+## Bounded incremental summaries
+
+`maximumSummaryInputCharacters(int)` is additive on the same five builders. Its positive default
+is **65,536 UTF-16 characters**, capped further by the engine's existing text limit. It bounds the
+encoded JSON transcript, including previous summary memory, JSON escaping and the selected new
+exchanges. It is not a token estimate or a limit on the entire provider request envelope.
+
+The additive `ModelClient.compactionMemory(ModelReplayState)` default returns empty. Claude and
+DeepSeek recover a validated `ModelCompactionMemory(throughRequestId, summary)` from their existing
+format-2 native summary message and boundary envelope. The engine never reads provider JSON.
+No private format or checkpoint version changes, duplicate summary field or new persisted engine
+state is needed. Local host summaries can become incremental memory too. Custom adapters may retain
+full-prefix fallback through the default; they must implement memory recovery to reuse their own
+committed summary across sessions.
+
+The engine validates the recovered request ID against full canonical history and rejects backward
+or unsafe tool boundaries before inference. An already-covered target needs no summary call. The
+target is the full history prefix preceding the policy's retained suffix. For each step, the engine:
+
+1. Encodes prior memory and the largest fitting prefix of previously unsummarized exchanges. A lazy
+   immutable view and bounded writer limit failed size probes; binary search finds the character
+   boundary without materializing the entire growing prefix.
+2. Moves the cut back to a settled user boundary, keeping every tool-call/result chain together.
+   If prior memory and the next indivisible group cannot fit, it fails before inference rather
+   than trimming content, dropping a tool result or sending an oversized input.
+3. Runs one isolated summary inference using the existing shared turn budgets, then validates and
+   synchronously commits a reducing provider replay rewrite. The new summary becomes the next
+   chunk's memory; already summarized raw history is not sent again.
+4. Repeats until the requested boundary is reached, then captures the fresh prompt and continues
+   the user conversation. Every call reserves a request slot for continuation. The existing
+   request/token/text/deadline limits bound the loop; no extra workers or automatic retries exist.
+
+A later failure, cancellation or exhausted budget preserves earlier committed chunks. The public
+turn reports that outcome and does not submit fresh input until the requested boundary is reached.
+After reopening, provider memory resumes at the last committed boundary. Full canonical history,
+journal and tool receipts remain untouched. A repeated proposal covering that same boundary is a
+no-op, so retrying after a definitive fresh-inference rejection does not regenerate that summary.
+
+An individual oversized message/tool chain or a prior summary consuming the entire input allowance
+requires a larger configured limit or a different host plan; this step does not split or truncate
+individual records. Full audit storage still has its independent checkpoint bound. Repeated lossy
+summaries can lose facts; neither this algorithm nor fake-client tests establish LLM fidelity.
 
 ## Checkbox plan
 
@@ -137,7 +180,11 @@ apply after generation, so a provider rejection can consume summary budget witho
 - [x] Isolate summary transcripts and outputs from tools, answers and canonical history.
 - [x] Wire both API providers and add fake-client, fake-HTTP and packaged consumer coverage.
 - [x] Verify the focused summary tests and compatibility checks, record results, and commit.
-- [ ] Evaluate independent audit/storage retention and bounded incremental summary inputs later.
+- [x] Add typed provider memory recovery without changing replay/checkpoint formats or record shapes.
+- [x] Add configurable encoded input bounds and complete-group incremental chunk selection.
+- [x] Commit each bounded chunk and resume after budget exhaustion without repeating raw history.
+- [x] Verify incremental engine, provider, packaged consumer and compatibility tests; record results and commit.
+- [ ] Evaluate independent audit/storage retention later.
 
 ## Local-compaction validation (preceding stage)
 
@@ -213,3 +260,43 @@ license, Javadocs and shaded packaging passed. The tested source excludes the sa
 Claude CLI edits, preserved byte-for-byte and excluded from this commit. No agents, broad suites,
 Bytequay tests, live providers, provider CLIs, native builds or simulators ran. These checks establish
 the exercised contracts; LLM summary fidelity and live billing remain unverified.
+
+## Incremental-summary validation
+
+The isolated snapshot based on `c8a0878` passed **286 focused Java cases**, zero failures, errors
+or skips:
+
+- **157 CLI cases**: engine (94), bounded summary encoding (4), checkpoint codec (33), compaction
+  values/boundaries (4), summary memory (1), model SPI values (17) and extension SPI (4).
+- **129 SDK cases**: each public API facade (13 each), Anthropic/DeepSeek clients (21/20), shared
+  connector contract (9), context compaction/summarization (12), each API connector (16 each), native
+  replay/memory codec (5) and session-reference compatibility (4).
+- **Five Python compatibility-checker controls** passed.
+
+New cases cover bounded escaped input with prior memory, complete tool groups, indivisible oversized
+groups, null/absent/backward memory boundaries, already-covered targets, per-chunk durable progress,
+request-budget exhaustion, later uncertain delivery and resume from the committed boundary. Both
+real provider adapters recover old format-2 summaries and preserve native tool data. Fake HTTP
+exercises a two-chunk prefix, another incremental summary after restart, and omission of earlier
+raw history from subsequent summary requests. Existing failure, cancellation and local-compaction
+tests remain passing.
+
+The published `0.164.0-1` compatibility check and all packaged consumers passed. The new JDK-only
+`IncrementalSummaryConsumer` sets a 2,000-character bound through both public builders. Each provider
+performs six conversation requests and three summary requests across growing history and restart;
+request bodies verify that raw prefixes are not repeated. A comparison with the preceding artifact
+checked **126 existing types**, preserving every old descriptor, record component, enum order and
+sealed shape. Only the five input-limit builder methods, default memory reader and its two provider
+overrides were added to existing types; `ContextSummarizationPlan` keeps its two original components.
+
+Final candidate shaded artifact SHA-256:
+`00ea4085d319e1250acb475ff177d2421243d7930cb7bb81c812a0e4044cb888`.
+
+Maven ran offline with `-T1`, one Surefire fork, disabled JUnit parallel execution, low process
+priority and `JAVA_TOOL_OPTIONS='-XX:ActiveProcessorCount=1 -Xmx512m -XX:+UseSerialGC'`. One new
+value test was corrected to match the existing null-ID exception convention, then rerun with the
+focused SDK cases; all other passing CLI results were reused. Strict style, license, Javadocs and
+shaded packaging passed. The snapshot and commit exclude the same four unrelated Claude CLI edits,
+preserved byte-for-byte. No agents, broad suites, Bytequay tests, live providers, provider CLIs,
+native builds or simulators ran. These are contract and recovery checks, not a performance benchmark
+or a guarantee of LLM summary fidelity; independent audit/storage retention remains deferred.

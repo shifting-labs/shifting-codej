@@ -40,6 +40,19 @@ class TestDeepSeekApiConnector
     private DeepSeekHttpFixture http;
 
     @Test
+    void summaryInputBoundsAreValidatedAndSnapshotBuilderState()
+    {
+        var builder = DeepSeekApiConfig.builder("model", () -> "key");
+        assertThat(builder.build().maximumSummaryInputCharacters).isEqualTo(65536);
+        var first = builder.maximumSummaryInputCharacters(1024).build();
+        builder.maximumSummaryInputCharacters(2048);
+        assertThat(first.maximumSummaryInputCharacters).isEqualTo(1024);
+        assertThat(builder.build().maximumSummaryInputCharacters).isEqualTo(2048);
+        assertThatThrownBy(() -> builder.maximumSummaryInputCharacters(0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> builder.maximumSummaryInputCharacters(-1)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void summaryPoliciesAreOptionalBorrowedAndRejectConflictingCompactors()
     {
         ContextSummarizationPolicy firstPolicy = context -> { throw new AssertionError("No eager callback"); };

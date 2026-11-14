@@ -57,6 +57,7 @@ public final class DeepSeekApiConnector
             engine.maximumParallelTools(config.maximumParallelTools);
             config.contextCompactor.ifPresent(engine::contextCompactor);
             config.contextSummarization.ifPresent(engine::contextSummarization);
+            engine.maximumSummaryInputCharacters(config.maximumSummaryInputCharacters);
             return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {

@@ -75,6 +75,7 @@ public final class DeepSeekApi
         private int maximumParallelTools = 1;
         private Optional<ContextCompactor> contextCompactor = Optional.empty();
         private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
+        private int maximumSummaryInputCharacters = 65536;
 
         private Builder() {}
 
@@ -272,7 +273,7 @@ public final class DeepSeekApi
         }
 
         /**
-         * Borrows a policy enabling one tool-free summary inference charged to the current turn.
+         * Borrows a policy enabling bounded tool-free summary inferences charged to the current turn.
          * Cannot be combined with a local context compactor. Disabled by default.
          *
          * @param policy thread-safe selector; the engine performs inference with its existing budgets
@@ -281,6 +282,22 @@ public final class DeepSeekApi
         public Builder contextSummarization(ContextSummarizationPolicy policy)
         {
             contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
+            return this;
+        }
+
+        /**
+         * Bounds each encoded summary input, including prior memory and complete new tool groups.
+         * The engine text limit also applies; an indivisible oversized group fails without truncation.
+         *
+         * @param value positive maximum UTF-16 character count; defaults to 65,536, not a token estimate
+         * @return this builder
+         */
+        public Builder maximumSummaryInputCharacters(int value)
+        {
+            if (value <= 0) {
+                throw new IllegalArgumentException("summary input limit must be positive");
+            }
+            maximumSummaryInputCharacters = value;
             return this;
         }
 
@@ -304,6 +321,7 @@ public final class DeepSeekApi
             settings.maximumParallelTools(maximumParallelTools);
             contextCompactor.ifPresent(settings::contextCompactor);
             contextSummarization.ifPresent(settings::contextSummarization);
+            settings.maximumSummaryInputCharacters(maximumSummaryInputCharacters);
             return DriverAgent.deepSeekApi(settings.build(), state, profile);
         }
     }

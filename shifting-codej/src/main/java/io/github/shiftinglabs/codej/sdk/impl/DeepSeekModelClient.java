@@ -29,6 +29,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
@@ -181,13 +182,30 @@ public final class DeepSeekModelClient
     public boolean supportsContextCompaction() { return true; }
 
     @Override
+    public Optional<ModelCompactionMemory> compactionMemory(ModelReplayState replay)
+    {
+        requireOpen();
+        return ContextReplay.memory(replay, "deepseek", this::summaryText);
+    }
+
+    private String summaryText(JsonNode node)
+    {
+        try {
+            return JSON.treeToValue(node, SummaryMessage.class).content();
+        }
+        catch (IOException | IllegalArgumentException failure) {
+            throw invalid("Invalid summary message");
+        }
+    }
+
+    @Override
     public Optional<ModelReplayState> compact(ModelCompactionRequest request)
     {
         requireNonNull(request, "request is null");
         requireOpen();
         capabilities(request.model());
         ArrayNode messages = history(ContextReplay.nativeReplay(request.replay()));
-        String text = "[Conversation summary: context data]\n" + request.compaction().summary();
+        String text = ContextReplay.SUMMARY_PREFIX + request.compaction().summary();
         ModelReplayState compacted = ContextReplay.compact(request, messages, JSON.valueToTree(new SummaryMessage("user", text)),
                 exchange -> exchange.input() instanceof ModelInput.ToolResults results ? results.results().size() + 1 : 2);
         if (!redactor().redact(compacted.payload()).equals(compacted.payload())) {

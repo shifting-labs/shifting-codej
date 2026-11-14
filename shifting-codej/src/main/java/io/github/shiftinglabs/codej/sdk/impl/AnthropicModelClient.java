@@ -41,6 +41,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
@@ -197,13 +198,34 @@ public final class AnthropicModelClient
     public boolean supportsContextCompaction() { return true; }
 
     @Override
+    public Optional<ModelCompactionMemory> compactionMemory(ModelReplayState replay)
+    {
+        requireOpen();
+        return ContextReplay.memory(replay, "anthropic", this::summaryText);
+    }
+
+    private String summaryText(JsonNode node)
+    {
+        try {
+            SummaryMessage message = JSON.treeToValue(node, SummaryMessage.class);
+            if (message.content().size() != 1) {
+                throw invalid("Invalid summary message");
+            }
+            return message.content().getFirst().text();
+        }
+        catch (IOException | IllegalArgumentException failure) {
+            throw invalid("Invalid summary message");
+        }
+    }
+
+    @Override
     public Optional<ModelReplayState> compact(ModelCompactionRequest request)
     {
         requireNonNull(request, "request is null");
         requireOpen();
         capabilities(request.model());
         ArrayNode messages = history(ContextReplay.nativeReplay(request.replay()), true);
-        String text = "[Conversation summary: context data]\n" + request.compaction().summary();
+        String text = ContextReplay.SUMMARY_PREFIX + request.compaction().summary();
         ModelReplayState compacted = ContextReplay.compact(request, messages, JSON.valueToTree(new SummaryMessage("user", List.of(new SummaryText("text", text)))),
                 exchange -> 2);
         if (!redactor().redact(compacted.payload()).equals(compacted.payload())) {

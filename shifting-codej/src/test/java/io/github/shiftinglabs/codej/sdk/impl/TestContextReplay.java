@@ -43,6 +43,22 @@ class TestContextReplay
     private record Summary(String role, String content) {}
 
     @Test
+    void memoryReadersPreserveBoundaryAndRejectInvalidMarkersAndOwners()
+            throws Exception
+    {
+        var request = new ModelCompactionRequest("model", HISTORY, NATIVE, new ModelCompaction("summary", 1), Optional.empty());
+        var compacted = ContextReplay.compact(request, messages(OLD + "," + TAIL), JSON.valueToTree(new Summary("user", ContextReplay.SUMMARY_PREFIX + "summary")), exchange -> 2);
+        assertThat(ContextReplay.memory(NATIVE, "fixture", node -> "unused")).isEmpty();
+        var memory = ContextReplay.memory(compacted, "fixture", node -> ContextReplay.SUMMARY_PREFIX + "summary").orElseThrow();
+        assertThat(memory.throughRequestId()).isEqualTo("one");
+        assertThat(memory.summary()).isEqualTo("summary");
+        assertThatThrownBy(() -> ContextReplay.memory(compacted, "fixture", node -> "unmarked text")).isInstanceOf(ModelClientException.class);
+        assertThatThrownBy(() -> ContextReplay.memory(compacted, "fixture", node -> ContextReplay.SUMMARY_PREFIX)).isInstanceOf(ModelClientException.class);
+        assertThatThrownBy(() -> ContextReplay.memory(compacted, "fixture", node -> null)).isInstanceOf(ModelClientException.class);
+        assertThatThrownBy(() -> ContextReplay.memory(compacted, "foreign", node -> "unused")).isInstanceOf(ModelClientException.class);
+    }
+
+    @Test
     void compactionPreservesOpaqueNativeTailAndCarriesTheBoundaryAcrossResponses()
             throws Exception
     {

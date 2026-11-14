@@ -53,6 +53,7 @@ public final class DeepSeekApiConfig
     final int maximumParallelTools;
     final Optional<ContextCompactor> contextCompactor;
     final Optional<ContextSummarizationPolicy> contextSummarization;
+    final int maximumSummaryInputCharacters;
 
     private DeepSeekApiConfig(Builder builder)
     {
@@ -70,6 +71,7 @@ public final class DeepSeekApiConfig
         maximumParallelTools = builder.maximumParallelTools;
         contextCompactor = builder.contextCompactor;
         contextSummarization = builder.contextSummarization;
+        maximumSummaryInputCharacters = builder.maximumSummaryInputCharacters;
         checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
@@ -92,6 +94,7 @@ public final class DeepSeekApiConfig
         private int maximumParallelTools = 1;
         private Optional<ContextCompactor> contextCompactor = Optional.empty();
         private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
+        private int maximumSummaryInputCharacters = 65536;
 
         private Builder(String model, Supplier<String> key)
         {
@@ -191,7 +194,7 @@ public final class DeepSeekApiConfig
         }
 
         /**
-         * Borrows a policy enabling one tool-free summary inference charged to the current turn.
+         * Borrows a policy enabling bounded tool-free summary inferences charged to the current turn.
          * Cannot be combined with a local context compactor. Disabled by default.
          *
          * @param policy thread-safe selector; the engine performs inference with its existing budgets
@@ -200,6 +203,22 @@ public final class DeepSeekApiConfig
         public Builder contextSummarization(ContextSummarizationPolicy policy)
         {
             contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
+            return this;
+        }
+
+        /**
+         * Bounds each encoded summary input, including prior memory and complete new tool groups.
+         * The engine text limit also applies; an indivisible oversized group fails without truncation.
+         *
+         * @param value positive maximum UTF-16 character count; defaults to 65,536, not a token estimate
+         * @return this builder
+         */
+        public Builder maximumSummaryInputCharacters(int value)
+        {
+            if (value <= 0) {
+                throw new IllegalArgumentException("summary input limit must be positive");
+            }
+            maximumSummaryInputCharacters = value;
             return this;
         }
 
