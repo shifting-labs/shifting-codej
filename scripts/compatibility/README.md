@@ -132,3 +132,8 @@ wildcard registry entry, encodes the result, and verifies shutdown. It starts no
 network, or model request and depends only on the JDK and shaded candidate jar. It also uses
 `RecordToolParameters`, the additive `Tool.withParameters` factory and `LegacyToolAdapter` to
 run an existing facade tool through the SPI, with explicit host-invocation authority.
+
+The same consumer now injects an alternate WorkspaceReader into the production ReadFileTool.
+It binds the existing optional record parameters, supplies an explicit scoped read grant and
+encodes the typed FileContent result. This checks the exported handler/resource boundary from
+the shaded jar without filesystem access, provider execution or changes to the shared engine.

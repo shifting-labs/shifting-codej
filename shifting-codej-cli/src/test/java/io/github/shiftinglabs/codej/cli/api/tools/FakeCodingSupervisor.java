@@ -32,11 +32,16 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 
 public final class FakeCodingSupervisor
-        implements ProcessSupervisor
+        implements ProcessSupervisor, AutoCloseable
 {
     public final List<ProcessSpec> specs = new ArrayList<>();
     public final List<String> acknowledged = new ArrayList<>();
     public boolean verified = true;
+    public int started;
+    public boolean closed;
+    public final List<String> cancelled = new ArrayList<>();
+    public final List<String> stopped = new ArrayList<>();
+    public final List<String> closedLaunches = new ArrayList<>();
     public volatile CompletableFuture<ProcessExit> pendingExit;
     public final CountDownLatch waiting = new CountDownLatch(1);
     public Runnable beforeStart = () -> {};
@@ -54,6 +59,7 @@ public final class FakeCodingSupervisor
             @Override
             public ManagedProcess start(ProcessOutputSink sink)
             {
+                started++;
                 beforeStart.run();
                 return new ManagedProcess()
                 {
@@ -85,11 +91,12 @@ public final class FakeCodingSupervisor
                     }
 
                     @Override
-                    public void cancel() {}
+                    public void cancel() { cancelled.add(id); }
 
                     @Override
                     public CompletionStage<ProcessExit.TreeTermination> stopAndVerify()
                     {
+                        stopped.add(id);
                         return CompletableFuture.completedFuture(verified ? ProcessExit.TreeTermination.VERIFIED_STOPPED : ProcessExit.TreeTermination.UNVERIFIABLE);
                     }
 
@@ -97,7 +104,7 @@ public final class FakeCodingSupervisor
                     public CompletionStage<ProcessExit.TreeTermination> stopAfterWorkFinished() { return stopAndVerify(); }
 
                     @Override
-                    public void close() {}
+                    public void close() { closedLaunches.add(id); }
                 };
             }
         };
@@ -114,4 +121,7 @@ public final class FakeCodingSupervisor
 
     @Override
     public void acknowledge(String id) { acknowledged.add(id); }
+
+    @Override
+    public void close() { closed = true; }
 }

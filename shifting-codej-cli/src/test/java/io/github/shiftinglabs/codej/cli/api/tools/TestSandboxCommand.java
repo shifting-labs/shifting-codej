@@ -131,6 +131,28 @@ class TestSandboxCommand
         }
     }
 
+    @Test
+    void resourceInterfaceUsesTheNativeSandboxAndDefersAcknowledgement()
+            throws Exception
+    {
+        Path root = Files.createDirectory(directory.resolve("interface-work"));
+        Files.writeString(root.resolve("inside"), "workspace");
+        Recorder recorder = new Recorder();
+        var supervisor = new DefaultProcessSupervisor(directory.resolve("interface-launches"), recorder);
+        try (WorkspaceFiles files = new WorkspaceFiles(root, CodingTools.defaults(), false, List.of());
+                SandboxCommand owner = new SandboxCommand(files, CodingTools.defaults(), supervisor, "interface-test", id -> {})) {
+            CommandExecutor executor = owner;
+            var context = new ResourceTestContext(AbstractTestCommandExecutor.grants());
+            var execution = executor.start(new ShellCommand(List.of("/bin/cat", "inside"), ".", 1), context);
+            assertThat(execution.completion().toCompletableFuture().get().value().orElseThrow().stdout()).isEqualTo("workspace");
+            assertThat(execution.stopAndVerify().toCompletableFuture().get().stopped()).isTrue();
+            assertThat(context.prepared).hasSize(1);
+            assertThat(recorder.launches).containsKey(context.prepared.getFirst().id());
+            execution.committed();
+            assertThat(recorder.launches).isEmpty();
+        }
+    }
+
     private static CommandResult run(SandboxCommand command, List<String> argv)
             throws Exception
     {

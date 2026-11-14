@@ -15,6 +15,9 @@
 import io.github.shiftinglabs.codej.RecordToolParameters;
 import io.github.shiftinglabs.codej.Tool;
 import io.github.shiftinglabs.codej.cli.api.tools.LegacyToolAdapter;
+import io.github.shiftinglabs.codej.cli.api.tools.ReadFileTool;
+import io.github.shiftinglabs.codej.cli.api.tools.ToolMessages;
+import io.github.shiftinglabs.codej.cli.api.tools.WorkspaceReader;
 import io.github.shiftinglabs.codej.cli.driver.AgentSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
@@ -37,6 +40,7 @@ import io.github.shiftinglabs.codej.tool.ToolOutput;
 import io.github.shiftinglabs.codej.tool.ToolParameters;
 import io.github.shiftinglabs.codej.tool.ToolSchema;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -68,7 +72,33 @@ public final class ToolSpiConsumer
         require(run(adapter, ToolArguments.of("{\"count\":2}"), ToolRequirements.builder().require(ToolCapability.HOST_INVOKE).build()).equals("2"),
                 "Legacy adapter round trip failed");
         require(Tool.of("count", "Returns a count", Count.class, input -> "ok").inputSchema().equals(oldFacade.inputSchema()), "Record schema changed");
-        System.out.println("PASS: Class-free SPI, reflection codec, legacy adapter, typed output and verified shutdown; JDK + jar only");
+        verifyCodingHandler();
+        System.out.println("PASS: Class-free SPI, codecs, legacy facade and built-in handler with an alternate workspace resource; JDK + jar only");
+    }
+
+    private static void verifyCodingHandler()
+            throws Exception
+    {
+        WorkspaceReader reader = new WorkspaceReader()
+        {
+            @Override
+            public ToolMessages.FileContent read(ToolMessages.ReadFile request, ToolExecutionContext context)
+            {
+                require(request.path().equals("note"), "Request binding changed");
+                require(context.grants().permits(ToolRequirements.builder().read(Path.of("note")).build()), "Read authority missing");
+                return new ToolMessages.FileContent("note", "a".repeat(64), "alternate backend", 1, false);
+            }
+
+            @Override
+            public ToolMessages.FileListing list(ToolMessages.ListFiles request, ToolExecutionContext context) { throw new AssertionError("Unused operation"); }
+
+            @Override
+            public ToolMessages.SearchResult search(ToolMessages.SearchFiles request, ToolExecutionContext context) { throw new AssertionError("Unused operation"); }
+        };
+        var handler = new ReadFileTool(reader);
+        String result = run(handler, ToolArguments.of("{\"path\":\"note\"}"), ToolRequirements.builder().read(Path.of("note")).build());
+        require(result.contains("alternate backend"), "Handler/resource round trip failed");
+        require(handler.definition().descriptor().name().equals("read_file"), "Built-in name changed");
     }
 
     private static <P, R> String run(AgentTool<P, R> tool, ToolArguments arguments)

@@ -15,6 +15,7 @@ package io.github.shiftinglabs.codej.cli.api.tools;
 
 import com.google.common.hash.Hashing;
 import io.github.shiftinglabs.codej.CodingTools;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -60,7 +61,7 @@ import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 
 /** Descriptor-relative, no-follow file operations. One lease serializes SDK coding sessions per physical workspace. */
 final class WorkspaceFiles
-        implements AutoCloseable
+        implements WorkspaceReader, WorkspaceEditor, AutoCloseable
 {
     private static final Set<String> PROTECTED = Set.of(
             ".git", ".hg", ".svn", ".ssh", ".aws", ".config", ".codex", ".claude", ".gemini", ".pi", ".opencode", ".agents", ".netrc", ".git-credentials");
@@ -137,6 +138,38 @@ final class WorkspaceFiles
             lockChannel.close();
             throw failure;
         }
+    }
+
+    @Override
+    public FileContent read(ReadFile request, ToolExecutionContext context)
+            throws IOException
+    {
+        CodingToolSupport.check(CodingToolSupport.read(request.path()), context);
+        return read(request);
+    }
+
+    @Override
+    public FileListing list(ListFiles request, ToolExecutionContext context)
+            throws IOException
+    {
+        CodingToolSupport.check(CodingToolSupport.read(request.directory()), context);
+        return list(request);
+    }
+
+    @Override
+    public SearchResult search(SearchFiles request, ToolExecutionContext context)
+            throws IOException
+    {
+        CodingToolSupport.check(CodingToolSupport.read(request.directory()), context);
+        return search(request);
+    }
+
+    @Override
+    public PatchResult apply(ApplyPatch request, ToolExecutionContext context)
+            throws IOException
+    {
+        CodingToolSupport.check(CodingToolSupport.write(request.path()), context);
+        return patch(request);
     }
 
     private static Path physicalPath(Path path)

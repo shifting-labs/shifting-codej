@@ -1,7 +1,7 @@
 # Extensible tool framework proposal
 
-Status: the SPI, legacy adapters, baseline contracts and shared dispatcher migration are implemented.
-Existing public APIs and tool behavior are retained; handler/resource separation and provider assembly remain planned. It builds on [coding-tools.md](coding-tools.md) and the existing connector
+Status: the SPI, legacy adapters, shared dispatcher, built-in handlers and resource interfaces are implemented.
+Existing public APIs and tool behavior are retained; configured provider assembly remains planned. It builds on [coding-tools.md](coding-tools.md) and the existing connector
 SPI. Frequent tool additions, implementation replacements, typed parameters, and backward
 compatibility are primary requirements.
 
@@ -274,15 +274,18 @@ Implementation stages:
 - [x] Add the SPI, immutable supporting values, fake implementations, and baseline contract tests.
 - [x] Add legacy Tool and reflection codec adapters; prove existing public APIs and behavior unchanged.
 - [x] Extract ToolDispatcher from ApiAgentDriver; route current tools through registered definitions.
-- [ ] Split the current five registrations into handlers backed by the resource interfaces.
-- [ ] Bind existing secure filesystem and Seatbelt implementations; retain all current limits.
+- [x] Split the current five registrations into handlers backed by the resource interfaces.
+- [x] Bind existing secure filesystem and Seatbelt implementations; retain all current limits.
 - [x] Run focused adapter/dispatcher contracts, affected tool/facade tests, and artifact compatibility checks for this migration.
-- [ ] Add a new tool and an alternate fake backend as extension examples without editing the dispatcher.
+- [x] Run existing production handlers against alternate fake resources without editing the dispatcher or providers.
+- [ ] Install explicitly configured ToolProvider sets into ApiAgentDriver with session-owned ToolSet cleanup.
+- [ ] Add a new logical tool when its feature and behavioral contract are chosen.
 - [ ] Consider richer execution, directory/move tools, plans/questions, and optional integrations separately.
 
-Stage 2 routes existing host and built-in tools through the common dispatcher. ToolProvider
-assembly into ApiAgentDriver and the built-in handler/resource split remain follow-up work;
-the dispatcher already accepts typed registrations, exercised with fake implementations.
+Stage 3 routes built-in actions through typed handlers borrowing explicit resource interfaces.
+ToolProvider assembly into ApiAgentDriver remains follow-up work. Existing production sessions
+retain the legacy facade path for argument-binding compatibility; the dispatcher also accepts
+typed registrations, exercised with fake implementations.
 No dependency or artifact layout changed. New interfaces do not require Class tokens or Record type bounds.
 
 ## Stage 1 validation
@@ -375,3 +378,91 @@ process inspection enabled. No agents, broad/stress or Bytequay suites, live inf
 CLI, Xcode build or simulator ran. The compatibility fixtures used only temporary local HTTP and
 contained command probes. Handler/resource interfaces and configured provider installation are
 still the next stage, not part of this compatibility migration.
+
+
+## Stage 3: built-in handlers and resource interfaces
+
+The five production handlers now implement AgentTool directly:
+
+| Handler | Borrowed interface | Operations |
+| --- | --- | --- |
+| [ReadFileTool](../../shifting-codej-cli/src/main/java/io/github/shiftinglabs/codej/cli/api/tools/ReadFileTool.java) | WorkspaceReader | read |
+| [ListFilesTool](../../shifting-codej-cli/src/main/java/io/github/shiftinglabs/codej/cli/api/tools/ListFilesTool.java) | WorkspaceReader | list |
+| [SearchFilesTool](../../shifting-codej-cli/src/main/java/io/github/shiftinglabs/codej/cli/api/tools/SearchFilesTool.java) | WorkspaceReader | search |
+| [ApplyPatchTool](../../shifting-codej-cli/src/main/java/io/github/shiftinglabs/codej/cli/api/tools/ApplyPatchTool.java) | WorkspaceEditor | apply |
+| [ShellCommandTool](../../shifting-codej-cli/src/main/java/io/github/shiftinglabs/codej/cli/api/tools/ShellCommandTool.java) | CommandExecutor | start -> ToolExecution<CommandResult> |
+
+The three resource interfaces live beside the existing pure ToolMessages contracts in
+`io.github.shiftinglabs.codej.cli.api.tools`. This preserves all public request/result class names
+and record shapes without adding implementation dependencies to the generic tool/model SPI.
+Constructors take resource interfaces only. The optional reflection codec remains internal to
+definition construction and the compatibility facade; no resource or generic tool SPI requires a
+Class token. Domain handlers use typed records, not JSON-tree field lookups.
+
+WorkspaceFiles implements WorkspaceReader and WorkspaceEditor through scoped entry points that
+check invocation authority and cancellation/deadline before delegating to its established secure
+operations. Those operations still enforce descriptor-relative/no-follow access, workspace identity,
+protected paths, exclusions, link checks, bounded reads/search, preimages and atomic replacement.
+Write authority authorizes the patch operation and its internal preimage check; it does not grant
+a general read capability. A read-only backend still rejects edits even if a caller supplies write
+grants. The read handlers receive no editor capability.
+
+SandboxCommand implements CommandExecutor. A command requires PROCESS_EXECUTE and workspace-root
+read authority, since its contained argv can read beyond its working directory. The existing
+Seatbelt policy, private scratch, denied network/fork/link behavior, environment, output/time
+limits and supervised launch protocol are unchanged. Both the owner's durable launch callback and
+the invocation's recordPrepared hook complete before launch. A journal failure releases only the
+unstarted reservation and cannot start a payload.
+
+The command handle binds the specific ManagedProcess it owns. An old handle cannot cancel, stop
+or acknowledge a later launch. Its completion stage is isolated from observer mutation; verified
+shutdown is independent of the logical outcome. Unverified shutdown keeps ownership. A later
+stop proof does not turn an uncertain effect into a known result, and committed refuses to
+acknowledge such an effect automatically. The synchronous backend uses the caller's existing
+bounded worker; this refactor creates no additional worker or per-tool thread.
+
+BuiltinTools remains the sole owner of the shared workspace/command resources. Its existing
+constructor, tools/definitions/contains/failure/initialize/committed/close methods remain present.
+The additive agentTools accessor returns immutable borrowed handlers; callers keep the owner open
+and serialize invocations. Handlers never close the shared lease or borrowed supervisor.
+Shutdown still verifies command termination before releasing the workspace lease.
+
+Production compatibility callbacks retain Tool.of(Class, ...) and bind records inside Tool.call
+after approval. Each now invokes the corresponding typed handler and encodes through its result
+codec. Legacy invocation authority is derived from the already configured read-only/full owner
+and narrowed to the operation's requirements. Native launch journaling remains the constructor's
+existing durable callback. The public schemas, descriptions, names/order, readonly tool subset,
+approval settings, structured failures, configurable output bounds and resume manifests are
+unchanged. Schema-only definitions have no resource placeholders or I/O; executing a metadata
+entry is explicitly unsupported.
+
+Definitions/codecs are cached per handler class; installed handlers and facade lists are immutable
+per owner. Result encoding stays at the codec boundary. Its alternate JSON envelope preserves
+outputs above the default SPI factory's 64 KiB when the existing host limit permits them; the
+legacy facade still raises OUTPUT_LIMIT at its configured bound. No generic dispatcher, model
+adapter or provider-specific code changed.
+
+Validation: **143 focused cases passed** (83 CLI/resource/dispatcher/engine/native cases and 60
+upstream handler-base/Claude API/DeepSeek facade/connector cases). Each of the five production
+handlers runs AbstractTestAgentTool against fake resources. AbstractTestWorkspaceReader,
+AbstractTestWorkspaceEditor and AbstractTestCommandExecutor provide reusable resource contracts.
+The existing physical containment tests still run, plus a native start/verify/acknowledge round
+trip through CommandExecutor. A checked-in v1 metadata fixture was captured from the previously
+verified pre-refactor artifact and proves exact definition spelling. Legacy coercion, readonly
+installation, output-limit behavior, >64 KiB encoded results, durable acknowledgement, stale
+handles, journal failure, uncertain ownership and borrowed-service lifetime are covered.
+
+Checkstyle, licenses, strict public Javadocs and publish-profile shaded packaging passed. The
+published 0.164.0-1 compatibility gate and unchanged baseline-compiled consumer passed. An
+additional comparison against the immediately preceding verified artifact checked 21 existing
+built-in/adapter classes: all existing descriptors, record shapes, enum values/order and sealed
+metadata stayed unchanged; only BuiltinTools.agentTools was added. ToolSpiConsumer now also binds
+a production ReadFileTool to an alternate WorkspaceReader with only the JDK and shaded jar.
+
+Candidate SHA-256: `c260e01e52baf33f04c0778004e3da08c3657ba889c04084c57bb72b575561b3`.
+
+All validation used an isolated source snapshot excluding the four unrelated Claude CLI edits,
+one CPU, a 512 MiB heap, serial GC, low priority, one test fork and disabled JUnit parallelism.
+No agents, broad/stress or Bytequay suites, live model calls, provider CLI, native application
+build or simulator were started. Configured ToolProvider assembly and new logical tools remain
+separate follow-up stages.
