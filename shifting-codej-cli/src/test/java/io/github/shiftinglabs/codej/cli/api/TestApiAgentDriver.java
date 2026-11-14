@@ -90,6 +90,81 @@ class TestApiAgentDriver
     Path directory;
 
     @Test
+    void internalEngineUsesInjectedRepositoryAndPromptAssemblerWithoutChangingTheDriverContract()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        client.script.add((request, sink) -> completed(toolResponse("example", "{}")));
+        var snapshots = new CopyOnWriteArrayList<ApiCheckpoint>();
+        var opened = new AtomicInteger();
+        var closed = new AtomicInteger();
+        var assembled = new AtomicInteger();
+        ApiSessionRepository.Factory repositories = (profile, id, resume, config) -> {
+            opened.incrementAndGet();
+            assertThat(resume).isFalse();
+            return new ApiSessionRepository()
+            {
+                private ApiCheckpoint state = ApiCheckpoint.initial(id, config.identity, config.lane);
+
+                @Override
+                public ApiCheckpoint state() { return state; }
+
+                @Override
+                public void save(ApiCheckpoint next)
+                {
+                    state = next;
+                    snapshots.add(next);
+                }
+
+                @Override
+                public ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments) { return new ModelInput.UserMessage(text, attachments); }
+
+                @Override
+                public void close() { closed.incrementAndGet(); }
+            };
+        };
+        ApiPromptAssembler prompts = (context, command, model, effort, tools) -> {
+            assembled.incrementAndGet();
+            var original = ApiPromptAssembler.DEFAULT.assemble(context, command, model, effort, tools);
+            assertThat(original).contains("Host instructions");
+            return "Assembled instructions";
+        };
+        Tool tool = Tool.withSchema("example", "Example", "{}", input -> "Result");
+        try (var engine = new ApiEngine(config(client).build(), connectorContext(), repositories, prompts)) {
+            AgentSessionContext context = context(Optional.empty(), List.of(tool), allow());
+            engine.validate(context);
+            assertThat(opened).hasValue(0);
+            try (AgentSession session = engine.open(context, event -> {})) {
+                assertThat(done(session.start(command("Hello"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+                assertThat(client.requests).hasSize(2).allSatisfy(request -> assertThat(request.instructions()).isEqualTo("Assembled instructions"));
+                assertThat(((ModelInput.ToolResults) client.requests.get(1).input()).results())
+                        .containsExactly(new ModelInput.ToolResult("call-1", "Result", false));
+            }
+        }
+        assertThat(opened).hasValue(1);
+        assertThat(closed).hasValue(1);
+        assertThat(assembled).hasValue(1);
+        assertThat(snapshots).anySatisfy(state -> assertThat(state.receipts()).anyMatch(ApiToolReceipt::uncertain));
+        assertThat(snapshots.getLast().phase()).isEqualTo(ApiCheckpoint.Phase.READY);
+        assertThat(directory.resolve("profile")).doesNotExist();
+    }
+
+    @Test
+    void nullRepositoryDoesNotPublishASessionOrConsumeCapacity()
+    {
+        FakeClient client = new FakeClient();
+        try (var engine = new ApiEngine(config(client).maximumSessions(1).build(), connectorContext(),
+                (profile, id, resume, config) -> null, ApiPromptAssembler.DEFAULT)) {
+            for (int attempt = 0; attempt < 2; attempt++) {
+                assertThatThrownBy(() -> engine.open(context(Optional.empty(), List.of(), allow()), event -> {}))
+                        .isInstanceOf(NullPointerException.class).hasMessage("repository factory returned null");
+            }
+        }
+        assertThat(client.requests).isEmpty();
+        assertThat(directory.resolve("profile")).doesNotExist();
+    }
+
+    @Test
     void factoryAndMetadataStartNoInferenceOrProcesses()
     {
         FakeClient client = new FakeClient();
@@ -518,10 +593,12 @@ class TestApiAgentDriver
             assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
         }
         try (ApiSessionStore store = ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, config(new FakeClient()).build())) {
-            var legacy = store.state();
-            assertThat(legacy.withObject("setup").has("toolContracts")).isTrue();
-            legacy.withObject("setup").remove("toolContracts");
-            store.save(legacy);
+            ApiCheckpoint state = store.state();
+            ApiRequestSetup setup = state.setup().orElseThrow();
+            assertThat(setup.toolContracts()).isPresent();
+            var legacy = new ApiRequestSetup(setup.model(), setup.instructions(), setup.effort(), setup.tier(), setup.tools(), Optional.empty());
+            store.save(new ApiCheckpoint(state.version(), state.id(), state.identity(), state.lane(), state.phase(), state.journal(), state.receipts(),
+                    state.replay(), Optional.of(legacy), state.input()));
         }
         FakeClient second = new FakeClient();
         second.script.add((request, sink) -> {
@@ -547,9 +624,10 @@ class TestApiAgentDriver
         }
         FakeClient client = new FakeClient();
         try (ApiSessionStore store = ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, config(client).build())) {
-            var state = store.state().put("phase", "tools");
-            state.withArray("receipts").addObject().put("id", "call-1").put("name", "write_report").put("arguments", "{}").put("started", true);
-            store.save(state);
+            ApiCheckpoint state = store.state();
+            var receipt = new ApiToolReceipt("call-1", "write_report", "{}", Optional.empty(), true, Optional.empty());
+            store.save(new ApiCheckpoint(state.version(), state.id(), state.identity(), state.lane(), ApiCheckpoint.Phase.TOOLS,
+                    state.journal(), List.of(receipt), state.replay(), state.setup(), state.input()));
         }
         try (ApiAgentDriver driver = driver(client); AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
             assertThat(session.resumable()).isFalse();
@@ -573,7 +651,7 @@ class TestApiAgentDriver
             assertThat(result.terminalReason().orElseThrow()).contains("budget");
             assertThat(client.requests).hasSize(1);
             assertThat(executions).hasValue(1);
-            var state = ApiSessionStore.JSON.readTree(Files.readString(checkpoint(session.reference())));
+            var state = ApiCheckpointCodec.JSON.readTree(Files.readString(checkpoint(session.reference())));
             assertThat(state.path("receipts").get(0).path("result").path("text").asText()).hasSize(12);
         }
     }
@@ -680,7 +758,7 @@ class TestApiAgentDriver
             assertThat(done(session.start(command("Lookup"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
             assertThat(executions).hasValue(0);
             assertThat(session.resumable()).isTrue();
-            var state = ApiSessionStore.JSON.readTree(Files.readString(checkpoint(session.reference())));
+            var state = ApiCheckpointCodec.JSON.readTree(Files.readString(checkpoint(session.reference())));
             assertThat(state.path("receipts").get(0).path("started").asBoolean()).isFalse();
         }
     }
@@ -697,7 +775,7 @@ class TestApiAgentDriver
                 assertThat(result.state()).isEqualTo(reason == ModelResponse.StopReason.REFUSED ? AgentTurnResult.State.FAILED : AgentTurnResult.State.INTERRUPTED);
                 assertThat(result.transientFailure()).isFalse();
                 assertThat(session.resumable()).isTrue();
-                assertThat(ApiSessionStore.JSON.readTree(Files.readString(checkpoint(session.reference()))).path("replay").path("payload").asText())
+                assertThat(ApiCheckpointCodec.JSON.readTree(Files.readString(checkpoint(session.reference()))).path("replay").path("payload").asText())
                         .isEqualTo("observed-terminal");
             }
         }

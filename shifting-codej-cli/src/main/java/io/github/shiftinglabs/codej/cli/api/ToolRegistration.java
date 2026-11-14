@@ -202,7 +202,7 @@ final class ToolRegistration
     static String failureText(ToolFailure failure)
     {
         try {
-            return ApiSessionStore.JSON.writeValueAsString(failure);
+            return ApiCheckpointCodec.JSON.writeValueAsString(failure);
         }
         catch (JsonProcessingException impossible) {
             throw new IllegalStateException("Cannot encode tool failure", impossible);

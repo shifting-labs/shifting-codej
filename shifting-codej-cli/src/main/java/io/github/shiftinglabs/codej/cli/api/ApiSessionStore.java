@@ -13,15 +13,9 @@
  */
 package io.github.shiftinglabs.codej.cli.api;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.shiftinglabs.codej.cli.driver.AgentAttachment;
 import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
-import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -41,17 +35,14 @@ import java.util.UUID;
 
 /** One acquired writer. Checkpoints are private, size-bounded, atomically replaced and fsynced before acknowledgement. */
 final class ApiSessionStore
-        implements AutoCloseable
+        implements ApiSessionRepository
 {
-    static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
-
     private final Path directory;
     private final Path file;
     private final FileChannel channel;
     private final FileLock lock;
     private final ApiEngineConfig config;
-    private ObjectNode state;
+    private ApiCheckpoint state;
     private boolean closed;
 
     private ApiSessionStore(Path directory, FileChannel channel, FileLock lock, ApiEngineConfig config)
@@ -96,20 +87,11 @@ final class ApiSessionStore
                 if (bytes.length > config.maximumCheckpointBytes) {
                     throw new IOException("oversized checkpoint");
                 }
-                JsonNode parsed = JSON.readTree(bytes);
-                if (!(parsed instanceof ObjectNode node)) {
-                    throw new IOException("invalid checkpoint");
-                }
-                store.state = node;
-                store.validate(id);
+                store.state = ApiCheckpointCodec.decode(bytes);
+                store.validate(store.state, id);
             }
             else {
-                ObjectNode state = JSON.createObjectNode().put("version", 1).put("id", id)
-                        .put("connector", config.identity.connectorId()).put("profile", config.identity.profileId()).put("lane", config.lane.value())
-                        .put("phase", "ready");
-                state.putArray("journal");
-                state.putArray("receipts");
-                store.save(state);
+                store.save(ApiCheckpoint.initial(id, config.identity, config.lane));
             }
             return store;
         }
@@ -130,47 +112,27 @@ final class ApiSessionStore
         }
     }
 
-    private void validate(String id)
+    private void validate(ApiCheckpoint candidate, String id)
             throws IOException
     {
-        if (state.path("version").asInt() != 1 || !state.path("id").asText().equals(id)
-                || !state.path("connector").asText().equals(config.identity.connectorId())
-                || !state.path("profile").asText().equals(config.identity.profileId()) || !state.path("lane").asText().equals(config.lane.value())
-                || !Set.of("ready", "request", "tools", "blocked").contains(state.path("phase").asText())
-                || !state.path("journal").isArray() || !state.path("receipts").isArray()) {
+        if (!candidate.id().equals(id) || !candidate.identity().equals(config.identity) || !candidate.lane().equals(config.lane)) {
             throw new IOException("checkpoint ownership or version mismatch");
-        }
-        if (state.has("replay")) {
-            replay(state);
-        }
-        for (JsonNode receipt : state.path("receipts")) {
-            if (!receipt.path("id").isTextual() || !receipt.path("name").isTextual() || !receipt.path("arguments").isTextual()
-                    || !receipt.path("started").isBoolean()) {
-                throw new IOException("invalid tool receipt");
-            }
-            new io.github.shiftinglabs.codej.cli.spi.model.ModelResponse.ToolCall(
-                    receipt.path("id").textValue(), receipt.path("name").textValue(), receipt.path("arguments").textValue());
-            if (receipt.has("result") && (!receipt.path("result").path("text").isTextual() || !receipt.path("result").path("error").isBoolean())) {
-                throw new IOException("invalid tool result");
-            }
-        }
-        if (state.path("phase").asText().equals("tools") && (!state.has("replay") || state.path("receipts").isEmpty()
-                || !state.path("setup").path("model").isTextual() || !state.path("setup").path("instructions").isTextual()
-                || !state.path("setup").path("tools").isArray())) {
-            throw new IOException("incomplete tool checkpoint");
         }
     }
 
-    synchronized ObjectNode state() { return state.deepCopy(); }
+    @Override
+    public synchronized ApiCheckpoint state() { return state; }
 
-    synchronized void save(ObjectNode next)
+    @Override
+    public synchronized void save(ApiCheckpoint next)
     {
         if (closed) {
             throw new AgentUnavailableException("API session writer is closed");
         }
         Path temporary = directory.resolve("checkpoint-" + UUID.randomUUID() + ".tmp");
         try {
-            byte[] bytes = JSON.writeValueAsBytes(next);
+            validate(next, directory.getFileName().toString());
+            byte[] bytes = ApiCheckpointCodec.encode(next);
             if (bytes.length > config.maximumCheckpointBytes) {
                 throw new IOException("checkpoint budget exceeded");
             }
@@ -186,7 +148,7 @@ final class ApiSessionStore
             try (FileChannel parent = FileChannel.open(directory, StandardOpenOption.READ)) {
                 parent.force(true);
             }
-            state = next.deepCopy();
+            state = next;
         }
         catch (IOException failure) {
             throw new AgentUnavailableException("Cannot persist API session checkpoint");
@@ -201,7 +163,8 @@ final class ApiSessionStore
         }
     }
 
-    ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments)
+    @Override
+    public ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments)
     {
         List<AgentAttachment> staged = new ArrayList<>();
         long total = 0;
@@ -254,37 +217,6 @@ final class ApiSessionStore
             }
             throw new AgentUnavailableException("Cannot stage API session attachments");
         }
-    }
-
-    static void replay(ObjectNode node, ModelReplayState replay)
-    {
-        node.putObject("replay").put("provider", replay.providerId()).put("version", replay.formatVersion()).put("payload", replay.payload());
-    }
-
-    static ModelReplayState replay(ObjectNode node)
-    {
-        JsonNode replay = node.path("replay");
-        if (!replay.path("provider").isTextual() || !replay.path("version").isIntegralNumber() || !replay.path("payload").isTextual()) {
-            throw new AgentUnavailableException("Invalid API replay checkpoint");
-        }
-        return new ModelReplayState(replay.path("provider").textValue(), replay.path("version").intValue(), replay.path("payload").textValue());
-    }
-
-    static ObjectNode input(ModelInput input)
-    {
-        ObjectNode node = JSON.createObjectNode();
-        if (input instanceof ModelInput.UserMessage user) {
-            node.put("kind", "user").put("text", user.text());
-            var attachments = node.putArray("attachments");
-            user.attachments().forEach(item -> attachments.addObject().put("id", item.id()).put("name", item.name())
-                    .put("mediaType", item.mediaType()).put("path", item.path().toString()));
-        }
-        else if (input instanceof ModelInput.ToolResults batch) {
-            node.put("kind", "results");
-            var results = node.putArray("results");
-            batch.results().forEach(item -> results.addObject().put("id", item.callId()).put("text", item.text()).put("error", item.error()));
-        }
-        return node;
     }
 
     private static void privateDirectory(Path path)

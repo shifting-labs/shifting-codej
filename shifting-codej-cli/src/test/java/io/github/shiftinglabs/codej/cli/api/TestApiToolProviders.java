@@ -719,9 +719,11 @@ class TestApiToolProviders
         for (boolean missing : List.of(false, true)) {
             if (missing) {
                 try (ApiSessionStore store = ApiSessionStore.open(directory.resolve("profile"), reference.providerValue(), true, config(new Client()).build())) {
-                    var state = store.state();
-                    state.withObject("setup").remove("toolContracts");
-                    store.save(state);
+                    ApiCheckpoint state = store.state();
+                    ApiRequestSetup setup = state.setup().orElseThrow();
+                    var legacy = new ApiRequestSetup(setup.model(), setup.instructions(), setup.effort(), setup.tier(), setup.tools(), Optional.empty());
+                    store.save(new ApiCheckpoint(state.version(), state.id(), state.identity(), state.lane(), state.phase(), state.journal(), state.receipts(),
+                            state.replay(), Optional.of(legacy), state.input()));
                 }
             }
             Provider changed = new Provider();

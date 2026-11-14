@@ -230,16 +230,16 @@ class TestToolDispatcher
         Tool original = Tool.withSchema("example", "Example", " {} ", input -> "ok");
         var registration = ToolRegistration.create(LegacyToolAdapter.builder(original).build(), true, false, Optional.of(original), ToolFailure::message);
         var registry = ApiToolRegistry.registered(List.of(registration));
-        var setup = ApiSessionStore.JSON.createObjectNode();
+        var setup = ApiCheckpointCodec.JSON.createObjectNode().put("model", "model").put("instructions", "");
         setup.putArray("tools").addObject().put("name", original.name()).put("description", original.description()).put("schema", original.inputSchema());
-        assertThat(registry.matches(setup)).isTrue();
-        setup.set("toolContracts", ApiSessionStore.JSON.valueToTree(registry.contracts()));
-        assertThat(registry.matches(setup)).isTrue();
+        assertThat(matches(registry, setup)).isTrue();
+        setup.set("toolContracts", ApiCheckpointCodec.JSON.valueToTree(registry.contracts()));
+        assertThat(matches(registry, setup)).isTrue();
         setup.withArray("toolContracts").removeAll().addObject().put("name", "example").put("version", 2).put("schemaFingerprint", registration.contract.schemaFingerprint());
-        assertThat(registry.matches(setup)).isFalse();
+        assertThat(matches(registry, setup)).isFalse();
         setup.remove("toolContracts");
         ((com.fasterxml.jackson.databind.node.ObjectNode) setup.withArray("tools").get(0)).put("schema", "{}");
-        assertThat(registry.matches(setup)).isFalse();
+        assertThat(matches(registry, setup)).isFalse();
         assertThatThrownBy(() -> ApiToolRegistry.registered(List.of(registration, registration))).isInstanceOf(IllegalArgumentException.class);
         var context = new Context();
         context.grants = ToolRequirements.builder().require(ToolCapability.HOST_INVOKE).build();
@@ -252,20 +252,20 @@ class TestToolDispatcher
     void pendingMetadataMustMatchExactlyWithoutScalarCoercionOrIgnoredFields()
     {
         var registry = new ApiToolRegistry(List.of(Tool.withSchema("example", "42", "{}", input -> "ok")));
-        var setup = ApiSessionStore.JSON.createObjectNode();
+        var setup = ApiCheckpointCodec.JSON.createObjectNode().put("model", "model").put("instructions", "");
         var definition = setup.putArray("tools").addObject().put("name", "example").put("description", "42").put("schema", "{}");
-        assertThat(registry.matches(setup)).isTrue();
+        assertThat(matches(registry, setup)).isTrue();
         definition.put("description", 42);
-        assertThat(registry.matches(setup)).isFalse();
+        assertThat(matches(registry, setup)).isFalse();
         definition.put("description", "42").put("extra", "unreviewed");
-        assertThat(registry.matches(setup)).isFalse();
+        assertThat(matches(registry, setup)).isFalse();
         definition.remove("extra");
         setup.putNull("toolContracts");
-        assertThat(registry.matches(setup)).isFalse();
-        setup.set("toolContracts", ApiSessionStore.JSON.valueToTree(registry.contracts()));
-        assertThat(registry.matches(setup)).isTrue();
+        assertThat(matches(registry, setup)).isFalse();
+        setup.set("toolContracts", ApiCheckpointCodec.JSON.valueToTree(registry.contracts()));
+        assertThat(matches(registry, setup)).isTrue();
         ((com.fasterxml.jackson.databind.node.ObjectNode) setup.withArray("toolContracts").get(0)).put("version", "1");
-        assertThat(registry.matches(setup)).isFalse();
+        assertThat(matches(registry, setup)).isFalse();
     }
 
     @Test
@@ -274,18 +274,28 @@ class TestToolDispatcher
         var context = new Context();
         var tool = tool(1, (input, execution) -> ToolExecutions.completed("ok"));
         var registry = registry(tool);
-        var setup = ApiSessionStore.JSON.createObjectNode();
+        var setup = ApiCheckpointCodec.JSON.createObjectNode().put("model", "model").put("instructions", "");
         setup.putArray("tools").addObject().put("name", "example").put("description", "Example").put("schema", tool.definition().parameters().schema().json());
-        assertThat(registry.matches(setup)).isFalse();
-        setup.set("toolContracts", ApiSessionStore.JSON.valueToTree(registry.contracts()));
-        assertThat(registry.matches(setup)).isTrue();
-        assertThat(registry(tool(2, (input, execution) -> ToolExecutions.completed("ok"))).matches(setup)).isFalse();
+        assertThat(matches(registry, setup)).isFalse();
+        setup.set("toolContracts", ApiCheckpointCodec.JSON.valueToTree(registry.contracts()));
+        assertThat(matches(registry, setup)).isTrue();
+        assertThat(matches(registry(tool(2, (input, execution) -> ToolExecutions.completed("ok"))), setup)).isFalse();
         setup.put("toolContracts", "malformed");
-        assertThat(registry.matches(setup)).isFalse();
+        assertThat(matches(registry, setup)).isFalse();
         var turn = new ToolDispatcher(registry, Duration.ofMillis(50)).turn(1);
         turn.dispatch(CALL, context);
         assertThatThrownBy(() -> turn.dispatch(CALL, context)).isInstanceOf(ToolDispatcher.Limit.class);
         assertThat(context.results).hasSize(1);
+    }
+
+    private static boolean matches(ApiToolRegistry registry, com.fasterxml.jackson.databind.node.ObjectNode setup)
+    {
+        try {
+            return registry.matches(ApiCheckpointCodec.decodeSetup(ApiCheckpointCodec.JSON.writeValueAsBytes(setup)));
+        }
+        catch (java.io.IOException failure) {
+            return false;
+        }
     }
 
     private static ToolExecution<String> execution(ToolOutcome<String> outcome, Context context)

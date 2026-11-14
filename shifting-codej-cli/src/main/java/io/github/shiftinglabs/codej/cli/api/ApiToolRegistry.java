@@ -13,8 +13,6 @@
  */
 package io.github.shiftinglabs.codej.cli.api;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.shiftinglabs.codej.Tool;
 import io.github.shiftinglabs.codej.cli.api.tools.LegacyToolAdapter;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
@@ -34,8 +32,6 @@ final class ApiToolRegistry
     private final Map<String, ToolRegistration> tools;
     private final List<ModelRequest.ToolDefinition> definitions;
     private final List<ToolRegistration.Contract> contracts;
-    private final JsonNode wireDefinitions;
-    private final JsonNode contractManifest;
     private final boolean legacyContracts;
 
     ApiToolRegistry(List<Tool> supplied)
@@ -49,9 +45,6 @@ final class ApiToolRegistry
         tools = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(supplied));
         definitions = tools.values().stream().map(value -> value.definition).toList();
         contracts = tools.values().stream().map(value -> value.contract).toList();
-        wireDefinitions = ApiSessionStore.JSON.valueToTree(definitions.stream()
-                .map(tool -> new WireDefinition(tool.name(), tool.description(), tool.inputSchema())).toList());
-        contractManifest = ApiSessionStore.JSON.valueToTree(contracts);
         legacyContracts = tools.values().stream().allMatch(tool -> tool.legacy && tool.contract.version() == 1);
     }
 
@@ -96,21 +89,9 @@ final class ApiToolRegistry
         return registration.original.orElseThrow();
     }
 
-    boolean matches(ObjectNode setup)
+    boolean matches(ApiRequestSetup setup)
     {
         requireNonNull(setup, "setup is null");
-        // Compare the serialized typed metadata exactly: binding it back could coerce numbers into strings.
-        return wireDefinitions.equals(setup.path("tools")) && (setup.has("toolContracts")
-                ? contractManifest.equals(setup.path("toolContracts")) : legacyContracts);
-    }
-
-    private record WireDefinition(String name, String description, String schema)
-    {
-        WireDefinition
-        {
-            requireNonNull(name, "name is null");
-            requireNonNull(description, "description is null");
-            requireNonNull(schema, "schema is null");
-        }
+        return definitions.equals(setup.tools()) && setup.toolContracts().map(contracts::equals).orElse(legacyContracts);
     }
 }
