@@ -78,7 +78,7 @@ final class ApiSession
     {
         this.engine = engine;
         this.config = engine.config;
-        dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
+        dispatcher = new ToolDispatcher(tools, config.shutdownTimeout, config.toolExecutionBudget);
         this.context = context;
         this.events = events;
         this.store = store;
@@ -140,7 +140,7 @@ final class ApiSession
             builtins.ifPresent(value -> value.tools().forEach(tool -> registrations.add(legacy(tool, true))));
             registrations.addAll(toolSets.open(plan, assembly()));
             tools = ApiToolRegistry.registered(registrations);
-            dispatcher = new ToolDispatcher(tools, config.shutdownTimeout);
+            dispatcher = new ToolDispatcher(tools, config.shutdownTimeout, config.toolExecutionBudget);
             ExtensionScope scope = new ExtensionScope();
             prompts.open(config.promptProviders, scope);
             extensions.open(config.extensions, scope);
@@ -277,6 +277,7 @@ final class ApiSession
                 if (builtins.isPresent()) {
                     builtins.orElseThrow().close();
                 }
+                dispatcher.resourcesClosed();
                 store.close();
                 released = true;
                 engine.released(this);

@@ -19,6 +19,7 @@ import io.github.shiftinglabs.codej.cli.api.tools.LegacyToolAdapter;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecution;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutions;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolFailure;
@@ -286,6 +287,142 @@ class TestToolDispatcher
         turn.dispatch(CALL, context);
         assertThatThrownBy(() -> turn.dispatch(CALL, context)).isInstanceOf(ToolDispatcher.Limit.class);
         assertThat(context.results).hasSize(1);
+    }
+
+    @Test
+    void sharedBudgetIsBorrowedAfterApprovalAndReleasedOnlyAfterDurableAcknowledgement()
+    {
+        var context = new Context();
+        var budget = new Budget(context);
+        var dispatcher = new ToolDispatcher(registry(tool(1, (input, execution) -> execution(ToolOutcome.completed("result"), context))),
+                Duration.ofMillis(50), Optional.of(budget));
+        dispatcher.turn(1).dispatch(CALL, context);
+        assertThat(context.trace).containsExactly("approval", "budget", "started", "intent", "stop", "result", "commit", "release", "completed");
+        assertThat(budget.released).isEqualTo(1);
+        dispatcher.verifyStopped();
+        dispatcher.resourcesClosed();
+        assertThat(budget.released).isEqualTo(1);
+    }
+
+    @Test
+    void rejectedCallsConsumeNoExecutionCapacityAndIntentFailureReleasesItsReservation()
+    {
+        var context = new Context();
+        var budget = new Budget(context);
+        var dispatcher = new ToolDispatcher(registry(tool(1, (input, execution) -> { throw new AssertionError("No effects"); })),
+                Duration.ofMillis(50), Optional.of(budget));
+        var turn = dispatcher.turn(4);
+        turn.dispatch(new ToolDispatcher.Call("call", "example", "{}", null), context);
+        context.grants = ToolRequirements.none();
+        turn.dispatch(CALL, context);
+        context.grants = REQUIREMENTS;
+        context.allow = false;
+        turn.dispatch(CALL, context);
+        assertThat(budget.acquired).isZero();
+        context.allow = true;
+        context.failIntent = true;
+        assertThatThrownBy(() -> turn.dispatch(CALL, context)).isInstanceOf(IllegalStateException.class);
+        assertThat(budget.acquired).isEqualTo(1);
+        assertThat(budget.released).isEqualTo(1);
+        assertThat(context.trace).endsWith("approval", "budget", "started", "intent", "release");
+    }
+
+    @Test
+    void shutdownPersistenceAndAcknowledgementFailuresRetainTheSharedLeaseForRetry()
+    {
+        for (String mode : List.of("stop", "result", "commit", "release")) {
+            var context = new Context();
+            var budget = new Budget(context);
+            context.stopped = !mode.equals("stop");
+            context.failResult = mode.equals("result");
+            context.failCommit = mode.equals("commit");
+            budget.failRelease = mode.equals("release");
+            var dispatcher = new ToolDispatcher(registry(tool(1, (input, execution) -> execution(ToolOutcome.completed("result"), context))),
+                    Duration.ofMillis(50), Optional.of(budget));
+            assertThatThrownBy(() -> dispatcher.turn(1).dispatch(CALL, context)).isInstanceOf(RuntimeException.class);
+            assertThat(budget.acquired).isEqualTo(1);
+            assertThat(budget.released).isZero();
+            if (mode.equals("stop")) {
+                assertThatThrownBy(dispatcher::verifyStopped).isInstanceOf(ToolDispatcher.Uncertain.class);
+                assertThat(budget.released).isZero();
+            }
+            context.stopped = true;
+            context.failCommit = false;
+            budget.failRelease = false;
+            dispatcher.verifyStopped();
+            assertThat(budget.released).isEqualTo(1);
+            dispatcher.verifyStopped();
+            dispatcher.resourcesClosed();
+            assertThat(budget.released).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void startupWithoutAHandleRetainsCapacityUntilTheOwningResourcesClose()
+    {
+        var context = new Context();
+        var budget = new Budget(context);
+        var dispatcher = new ToolDispatcher(registry(tool(1, (input, execution) -> { throw new IllegalStateException("No returned handle"); })),
+                Duration.ofMillis(50), Optional.of(budget));
+        assertThatThrownBy(() -> dispatcher.turn(1).dispatch(CALL, context)).isInstanceOf(ToolDispatcher.Uncertain.class);
+        dispatcher.verifyStopped();
+        assertThat(budget.acquired).isEqualTo(1);
+        assertThat(budget.released).isZero();
+        budget.failRelease = true;
+        assertThatThrownBy(dispatcher::resourcesClosed).isInstanceOf(IllegalStateException.class);
+        assertThat(budget.released).isZero();
+        budget.failRelease = false;
+        dispatcher.resourcesClosed();
+        dispatcher.resourcesClosed();
+        assertThat(budget.released).isEqualTo(1);
+    }
+
+    @Test
+    void failedNullAndInterruptedAcquisitionsCannotRecordIntentOrInvokeHandlers()
+    {
+        for (String mode : List.of("null", "throw", "interrupt", "cancel")) {
+            var context = new Context();
+            ToolExecutionBudget budget = request -> switch (mode) {
+                case "null" -> null;
+                case "throw" -> throw new IllegalStateException("private admission failure");
+                case "interrupt" -> throw new InterruptedException("interrupted");
+                default -> throw new java.util.concurrent.CancellationException();
+            };
+            var dispatcher = new ToolDispatcher(registry(tool(1, (input, execution) -> { throw new AssertionError("No effects"); })),
+                    Duration.ofMillis(50), Optional.of(budget));
+            assertThatThrownBy(() -> dispatcher.turn(1).dispatch(CALL, context)).isInstanceOf(RuntimeException.class);
+            assertThat(context.trace).containsExactly("approval");
+            assertThat(context.interruptible).isFalse();
+            assertThat(Thread.currentThread().isInterrupted()).isFalse();
+        }
+    }
+
+    private static final class Budget
+            implements ToolExecutionBudget
+    {
+        private final TestToolDispatcher.Context context;
+        int acquired;
+        int released;
+        boolean failRelease;
+
+        Budget(TestToolDispatcher.Context context) { this.context = context; }
+
+        @Override
+        public Lease acquire(ToolExecutionBudget.Context request)
+        {
+            assertThat(request.invocationId()).isEqualTo(CALL.eventId());
+            assertThat(request.deadline()).isEqualTo(context.deadline());
+            assertThat(request.cancellationRequested()).isFalse();
+            context.trace.add("budget");
+            acquired++;
+            return () -> {
+                if (failRelease) {
+                    throw new IllegalStateException("Not released");
+                }
+                released++;
+                context.trace.add("release");
+            };
+        }
     }
 
     private static boolean matches(ApiToolRegistry registry, com.fasterxml.jackson.databind.node.ObjectNode setup)

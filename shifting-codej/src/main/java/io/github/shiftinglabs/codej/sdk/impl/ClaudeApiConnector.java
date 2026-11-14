@@ -53,6 +53,7 @@ public final class ClaudeApiConnector
             config.toolProviders.forEach(engine::toolProvider);
             config.promptProviders.forEach(engine::promptProvider);
             config.extensions.forEach(engine::extension);
+            config.toolExecutionBudget.ifPresent(engine::toolExecutionBudget);
             return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {

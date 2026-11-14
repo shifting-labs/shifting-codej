@@ -27,6 +27,10 @@ through those same builders. `ToolPolicy` restricts fresh tool admission after v
 permissions, while `EngineObserver` receives metadata-only lifecycle notifications. Policies cannot
 grant authority or bypass approval; observers cannot rewrite requests, results or checkpoint state.
 
+The [tool scheduling plan](tool-scheduling.md) adds an optional borrowed `ToolExecutionBudget` shared
+across API drivers. Capacity is reserved after approval, before durable admission, and retained until
+execution/resource cleanup confirms release. It introduces no worker pool or within-batch overlap.
+
 ## Boundaries
 
 Keep the existing `Agent`, `Session`, `Turn`, `AgentConnector`, `ConnectorDriver`, `AgentDriver`,

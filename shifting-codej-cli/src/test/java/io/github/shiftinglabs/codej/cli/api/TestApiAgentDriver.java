@@ -70,6 +70,7 @@ import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSection;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -80,12 +81,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -104,6 +107,141 @@ class TestApiAgentDriver
 {
     @TempDir
     Path directory;
+
+    @Test
+    void oneBorrowedBudgetBoundsToolsAcrossIndependentDriversAndCancelledWaitersDoNotStart()
+            throws Exception
+    {
+        var shared = ToolExecutionBudget.bounded(1);
+        AtomicInteger acquired = new AtomicInteger();
+        CountDownLatch firstEntered = new CountDownLatch(1);
+        CountDownLatch secondWaiting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ToolExecutionBudget budget = request -> {
+            if (acquired.incrementAndGet() == 2) {
+                secondWaiting.countDown();
+            }
+            assertThat(Thread.currentThread().getName()).startsWith("codej-api-worker-");
+            return shared.acquire(request);
+        };
+        AtomicInteger executed = new AtomicInteger();
+        Tool firstTool = Tool.withSchema("lookup", "Lookup", "{}", args -> {
+            executed.incrementAndGet();
+            firstEntered.countDown();
+            release.await();
+            return "first";
+        });
+        Tool secondTool = Tool.withSchema("lookup", "Lookup", "{}", args -> {
+            executed.incrementAndGet();
+            return "second";
+        });
+        FakeClient firstClient = new FakeClient();
+        FakeClient secondClient = new FakeClient();
+        firstClient.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        secondClient.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        try (ApiAgentDriver firstDriver = new ApiAgentDriver(config(firstClient).toolExecutionBudget(budget).build(), connectorContext());
+                ApiAgentDriver secondDriver = new ApiAgentDriver(config(secondClient).toolExecutionBudget(budget).build(), connectorContext());
+                AgentSession first = firstDriver.open(context(Optional.empty(), List.of(firstTool), allow()), event -> {});
+                AgentSession second = secondDriver.open(context(Optional.empty(), List.of(secondTool), allow()), event -> {})) {
+            RunningTurn firstTurn = first.start(command("First"));
+            try {
+                assertThat(firstEntered.await(1, TimeUnit.SECONDS)).isTrue();
+                RunningTurn secondTurn = second.start(command("Second"));
+                assertThat(secondWaiting.await(1, TimeUnit.SECONDS)).isTrue();
+                assertThat(executed).hasValue(1);
+                secondTurn.cancel();
+                assertThat(done(secondTurn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+                assertThat(readCheckpoint(second.reference()).receipts().getFirst().started()).isFalse();
+                assertThat(executed).hasValue(1);
+            }
+            finally {
+                release.countDown();
+            }
+            assertThat(done(firstTurn).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            secondClient.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+            try (AgentSession fresh = secondDriver.open(context(Optional.empty(), List.of(secondTool), allow()), event -> {})) {
+                assertThat(done(fresh.start(command("Fresh"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            }
+            assertThat(executed).hasValue(2);
+        }
+    }
+
+    @Test
+    void deadlineWhileWaitingForSharedCapacityLeavesTheReceiptUnstarted()
+            throws Exception
+    {
+        var budget = ToolExecutionBudget.bounded(1);
+        try (var held = budget.acquire(budgetContext(Optional.empty()))) {
+            FakeClient client = new FakeClient();
+            client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+            Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> { throw new AssertionError("No capacity available"); });
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).toolExecutionBudget(budget).build(), connectorContext());
+                    AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
+                assertThat(done(session.start(new AgentTurnCommand("turn", "Hello", List.of(), Duration.ofMillis(500)))).state())
+                        .isEqualTo(AgentTurnResult.State.INTERRUPTED);
+                assertThat(readCheckpoint(session.reference()).receipts().getFirst().started()).isFalse();
+            }
+        }
+    }
+
+    @Test
+    void cancellationCannotReleaseSharedCapacityUntilAnExecutingCallbackReallyStops()
+            throws Exception
+    {
+        var budget = ToolExecutionBudget.bounded(1);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> {
+            entered.countDown();
+            boolean done = false;
+            while (!done) {
+                try {
+                    release.await();
+                    done = true;
+                }
+                catch (InterruptedException ignored) {
+                }
+            }
+            return "observed success";
+        });
+        FakeClient client = new FakeClient();
+        client.script.add((request, events) -> completed(toolResponse("lookup", "{}")));
+        ApiAgentDriver driver = new ApiAgentDriver(config(client).shutdownTimeout(Duration.ofMillis(30)).toolExecutionBudget(budget).build(), connectorContext());
+        AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {});
+        RunningTurn turn = session.start(command("Hello"));
+        try {
+            assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThatThrownBy(driver::close).isInstanceOf(AgentUnavailableException.class);
+            assertThat(turn.completion().toCompletableFuture()).isNotDone();
+            assertThatThrownBy(() -> budget.acquire(budgetContext(Optional.of(Instant.now().plusMillis(25)))))
+                    .isInstanceOf(CancellationException.class);
+        }
+        finally {
+            release.countDown();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            session.close();
+            driver.close();
+        }
+        try (var reclaimed = budget.acquire(budgetContext(Optional.empty()))) {
+            assertThat(readCheckpoint(session.reference()).receipts().getFirst().result().orElseThrow().text()).isEqualTo("observed success");
+        }
+    }
+
+    private static ToolExecutionBudget.Context budgetContext(Optional<Instant> deadline)
+    {
+        return new ToolExecutionBudget.Context()
+        {
+            @Override
+            public String invocationId() { return "external"; }
+
+            @Override
+            public Optional<Instant> deadline() { return deadline; }
+
+            @Override
+            public boolean cancellationRequested() { return false; }
+        };
+    }
 
     @Test
     void scopedExtensionsApplyPoliciesAndObserveDurableOutcomesInOrder()
@@ -189,7 +327,8 @@ class TestApiAgentDriver
                 throw new AssertionError("Policies after denial must not run");
             }, event -> {}, () -> {}));
             Tool tool = Tool.withSchema("lookup", "Lookup", "{}", args -> { throw new AssertionError("Denied tool must not run"); });
-            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(first, "one").extension(second, "two").extension(third, "three").build(), connectorContext());
+            try (ApiAgentDriver driver = new ApiAgentDriver(config(client).extension(first, "one").extension(second, "two").extension(third, "three")
+                    .toolExecutionBudget(request -> { throw new AssertionError("Denied calls consume no capacity"); }).build(), connectorContext());
                     AgentSession session = driver.open(context(Optional.empty(), List.of(tool), (request, timeout) -> {
                         throw new AssertionError("Denied invocation must not prompt");
                     }), event -> {})) {

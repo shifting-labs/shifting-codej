@@ -18,6 +18,7 @@ import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 
@@ -46,6 +47,7 @@ public final class ClaudeApiConfig
     final List<ToolProviderBinding> toolProviders;
     final List<PromptProviderBinding> promptProviders;
     final List<EngineExtensionBinding> extensions;
+    final Optional<ToolExecutionBudget> toolExecutionBudget;
 
     private ClaudeApiConfig(Builder builder)
     {
@@ -59,6 +61,7 @@ public final class ClaudeApiConfig
         toolProviders = List.copyOf(builder.toolProviders);
         promptProviders = PromptProviderBinding.snapshot(builder.promptProviders);
         extensions = EngineExtensionBinding.snapshot(builder.extensions);
+        toolExecutionBudget = builder.toolExecutionBudget;
     }
 
     public static Builder builder(String model, Supplier<String> key) { return new Builder(model, key); }
@@ -75,6 +78,7 @@ public final class ClaudeApiConfig
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
+        private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -148,6 +152,13 @@ public final class ClaudeApiConfig
         public Builder extension(EngineExtensionBinding binding)
         {
             extensions.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Borrows a shared admission budget; the engine never closes the host service. */
+        public Builder toolExecutionBudget(ToolExecutionBudget budget)
+        {
+            toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
             return this;
         }
 

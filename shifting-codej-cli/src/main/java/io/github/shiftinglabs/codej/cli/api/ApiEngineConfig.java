@@ -22,6 +22,7 @@ import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 
@@ -64,6 +65,7 @@ public final class ApiEngineConfig
     final List<ToolProviderBinding> toolProviders;
     final List<PromptProviderBinding> promptProviders;
     final List<EngineExtensionBinding> extensions;
+    final Optional<ToolExecutionBudget> toolExecutionBudget;
 
     private ApiEngineConfig(Builder b)
     {
@@ -90,6 +92,7 @@ public final class ApiEngineConfig
         toolProviders = List.copyOf(b.toolProviders);
         promptProviders = PromptProviderBinding.snapshot(b.promptProviders);
         extensions = EngineExtensionBinding.snapshot(b.extensions);
+        toolExecutionBudget = b.toolExecutionBudget;
     }
 
     SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
@@ -123,6 +126,7 @@ public final class ApiEngineConfig
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
+        private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -274,6 +278,13 @@ public final class ApiEngineConfig
         public Builder extension(EngineExtensionBinding binding)
         {
             extensions.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Borrows a shared admission budget; the engine never closes the host service. */
+        public Builder toolExecutionBudget(ToolExecutionBudget budget)
+        {
+            toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
             return this;
         }
 

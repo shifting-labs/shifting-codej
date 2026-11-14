@@ -114,7 +114,9 @@ format-1 read migration. The version-1 layout described above records the initia
 - [x] Add scoped prompt/context contributors; see [prompt contributors](prompt-contributors.md).
 - [x] Add scoped restrictive tool policies and metadata observers; see
       [policy extensions](policy-extensions.md).
-- [ ] Evaluate bounded parallel tools under a host-wide budget, with cancellation/ordering contracts.
+- [x] Evaluate bounded parallel tools and implement a shared execution-budget prerequisite; see
+      [tool scheduling](tool-scheduling.md).
+- [ ] Implement opt-in batch overlap with explicit eligibility, atomic checkpoint updates and draining cancellation.
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event
       mapping and focused connector contract tests before any default-route change.
 

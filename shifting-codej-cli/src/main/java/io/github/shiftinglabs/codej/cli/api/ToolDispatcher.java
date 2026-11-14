@@ -15,6 +15,7 @@ package io.github.shiftinglabs.codej.cli.api;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation.Admission;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolPreparationContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolRequirements;
@@ -23,6 +24,8 @@ import io.github.shiftinglabs.codej.cli.spi.tool.ToolStopResult;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -81,14 +84,24 @@ final class ToolDispatcher
         void interruptible(boolean value);
     }
 
+    private record Ownership(boolean durable, Optional<ToolExecutionBudget.Lease> lease) {}
+
     private final ApiToolRegistry registry;
     private final Duration stopTimeout;
-    private final Map<ToolRegistration.Active, Boolean> active = new ConcurrentHashMap<>();
+    private final Optional<ToolExecutionBudget> budget;
+    private final Map<ToolRegistration.Active, Ownership> active = new ConcurrentHashMap<>();
+    private final List<ToolExecutionBudget.Lease> startupClaims = new ArrayList<>();
 
     ToolDispatcher(ApiToolRegistry registry, Duration stopTimeout)
     {
+        this(registry, stopTimeout, Optional.empty());
+    }
+
+    ToolDispatcher(ApiToolRegistry registry, Duration stopTimeout, Optional<ToolExecutionBudget> budget)
+    {
         this.registry = registry;
         this.stopTimeout = stopTimeout;
+        this.budget = requireNonNull(budget, "budget is null");
     }
 
     Turn turn(int maximumCalls) { return new Turn(maximumCalls); }
@@ -96,10 +109,10 @@ final class ToolDispatcher
     void committed()
     {
         for (var entry : active.entrySet()) {
-            if (entry.getValue()) {
+            if (entry.getValue().durable()) {
                 verify(entry.getKey());
                 entry.getKey().committed();
-                active.remove(entry.getKey());
+                release(entry.getKey());
             }
         }
     }
@@ -109,7 +122,53 @@ final class ToolDispatcher
         committed();
         for (var execution : active.keySet()) {
             verify(execution);
-            active.remove(execution);
+            release(execution);
+        }
+    }
+
+    /** Startup without a returned handle is fenced by the session's resource owners, not cancellation. */
+    void resourcesClosed()
+    {
+        while (!startupClaims.isEmpty()) {
+            startupClaims.getLast().close();
+            startupClaims.removeLast();
+        }
+    }
+
+    private void release(ToolRegistration.Active execution)
+    {
+        Ownership ownership = active.get(execution);
+        ownership.lease().ifPresent(ToolExecutionBudget.Lease::close);
+        active.remove(execution, ownership);
+    }
+
+    private Optional<ToolExecutionBudget.Lease> reserve(Call call, Context context)
+    {
+        if (budget.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            context.interruptible(true);
+            context.checkStop();
+            return Optional.of(requireNonNull(budget.orElseThrow().acquire(new ToolExecutionBudget.Context()
+            {
+                @Override
+                public String invocationId() { return call.eventId(); }
+
+                @Override
+                public Optional<Instant> deadline() { return context.deadline(); }
+
+                @Override
+                public boolean cancellationRequested() { return context.cancelled(); }
+            }), "tool budget returned no lease"));
+        }
+        catch (InterruptedException | java.util.concurrent.CancellationException failure) {
+            context.checkStop();
+            throw new Limit("Tool budget admission interrupted, cancelled or deadline exceeded");
+        }
+        finally {
+            context.interruptible(false);
+            Thread.interrupted();
         }
     }
 
@@ -181,54 +240,67 @@ final class ToolDispatcher
                 context.decided(call, Admission.APPROVAL_DENIED);
                 return;
             }
-            context.checkStop();
-            context.decided(call, Admission.ADMITTED);
-            context.checkStop();
-            context.started(call);
-            context.checkStop();
-            context.recordStarted(call);
-            if (context.cancelled()) {
-                context.recordResult(new ToolRegistration.Result("Not executed: turn interrupted before handler invocation", true));
-                context.checkStop();
-            }
-            ToolRegistration.Active execution;
-            ToolRegistration.Result result;
+            Optional<ToolExecutionBudget.Lease> lease = reserve(call, context);
+            lease.ifPresent(startupClaims::add);
+            boolean invoked = false;
             try {
-                context.interruptible(true);
-                try {
-                    execution = prepared.start(executionContext(call, context, prepared.requirements()));
-                }
-                catch (Exception failure) {
-                    throw new Uncertain("Tool execution ended without an outcome");
-                }
-                active.put(execution, false);
+                context.checkStop();
+                context.decided(call, Admission.ADMITTED);
+                context.checkStop();
+                context.started(call);
+                context.checkStop();
+                context.recordStarted(call);
                 if (context.cancelled()) {
-                    execution.cancel();
+                    context.recordResult(new ToolRegistration.Result("Not executed: turn interrupted before handler invocation", true));
+                    context.checkStop();
                 }
-                while (true) {
+                ToolRegistration.Active execution;
+                ToolRegistration.Result result;
+                try {
+                    context.interruptible(true);
                     try {
-                        result = execution.await();
-                        break;
+                        invoked = true;
+                        execution = prepared.start(executionContext(call, context, prepared.requirements()));
                     }
-                    catch (InterruptedException failure) {
-                        execution.cancel();
-                    }
-                    catch (ExecutionException | java.util.concurrent.CancellationException failure) {
+                    catch (Exception failure) {
                         throw new Uncertain("Tool execution ended without an outcome");
                     }
+                    active.put(execution, new Ownership(false, lease));
+                    lease.ifPresent(startupClaims::remove);
+                    if (context.cancelled()) {
+                        execution.cancel();
+                    }
+                    while (true) {
+                        try {
+                            result = execution.await();
+                            break;
+                        }
+                        catch (InterruptedException failure) {
+                            execution.cancel();
+                        }
+                        catch (ExecutionException | java.util.concurrent.CancellationException failure) {
+                            throw new Uncertain("Tool execution ended without an outcome");
+                        }
+                    }
+                    Thread.interrupted();
+                    verify(execution);
                 }
-                Thread.interrupted();
-                verify(execution);
+                finally {
+                    context.interruptible(false);
+                    Thread.interrupted();
+                }
+                context.recordResult(result);
+                active.computeIfPresent(execution, (key, ownership) -> new Ownership(true, ownership.lease()));
+                execution.committed();
+                release(execution);
+                context.completed(call, result);
             }
             finally {
-                context.interruptible(false);
-                Thread.interrupted();
+                if (!invoked && lease.isPresent()) {
+                    lease.orElseThrow().close();
+                    startupClaims.remove(lease.orElseThrow());
+                }
             }
-            context.recordResult(result);
-            active.replace(execution, true);
-            execution.committed();
-            active.remove(execution);
-            context.completed(call, result);
         }
     }
 

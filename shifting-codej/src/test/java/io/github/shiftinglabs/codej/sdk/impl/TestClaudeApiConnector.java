@@ -16,6 +16,7 @@ package io.github.shiftinglabs.codej.sdk.impl;
 import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.testing.AbstractTestApiConnector;
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
@@ -33,6 +34,20 @@ class TestClaudeApiConnector
         extends AbstractTestApiConnector<ClaudeApiConfig>
 {
     private AnthropicHttpFixture http;
+
+    @Test
+    void executionBudgetsAreBorrowedOptionalAndSnapshotBuilderState()
+    {
+        var firstBudget = ToolExecutionBudget.bounded(1);
+        var secondBudget = ToolExecutionBudget.bounded(2);
+        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        assertThat(builder.build().toolExecutionBudget).isEmpty();
+        var first = builder.toolExecutionBudget(firstBudget).build();
+        builder.toolExecutionBudget(secondBudget);
+        assertThat(first.toolExecutionBudget).containsSame(firstBudget);
+        assertThat(builder.build().toolExecutionBudget).containsSame(secondBudget);
+        assertThatThrownBy(() -> builder.toolExecutionBudget(null)).isInstanceOf(NullPointerException.class);
+    }
 
     @Test
     void extensionBindingsAreTypedImmutableAndRejectDuplicateIds()

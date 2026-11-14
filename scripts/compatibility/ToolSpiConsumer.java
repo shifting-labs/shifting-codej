@@ -56,6 +56,7 @@ import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecution;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutions;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolOutcome;
@@ -226,7 +227,8 @@ public final class ToolSpiConsumer
                 }
             };
             var configurationBuilder = ApiEngineConfig.builder(new ConnectorIdentity("fixture", "tools"), new AgentLaneId("fixture-tools"), "model", () -> model)
-                    .maximumSessions(1).toolProvider(provider, configuration).promptProvider(prompts, "project").extension(extensions, "configuration");
+                    .maximumSessions(1).toolProvider(provider, configuration).promptProvider(prompts, "project").extension(extensions, "configuration")
+                    .toolExecutionBudget(ToolExecutionBudget.bounded(1));
             var context = new AgentSessionContext("fixture", root, root.resolve("runtime"), root.resolve("runtime/provider"), AgentPermissionPolicy.AUTO,
                     Optional.empty(), (request, timeout) -> CompletableFuture.completedStage(ProviderApprovalDecision.allow(Optional.empty())),
                     Optional.empty(), Optional.empty(), SessionAccess.TOOLS_ONLY, "", List.of());

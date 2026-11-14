@@ -51,6 +51,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 import io.github.shiftinglabs.codej.cli.spi.tool.AgentTool;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecution;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolFailure;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolOutcome;
@@ -372,6 +373,33 @@ class TestApiToolProviders
     private Path checkpoint(AgentSessionRef reference) { return directory.resolve("profile/api-sessions").resolve(reference.providerValue()).resolve("checkpoint.json"); }
 
     private static ModelInput.ToolResult result(Client client) { return ((ModelInput.ToolResults) client.requests.getLast().input()).results().getFirst(); }
+
+    @Test
+    void startupFailureKeepsItsBudgetLeaseUntilTheToolSetConfirmsCleanup()
+            throws Exception
+    {
+        Provider provider = new Provider();
+        provider.throwDuringExecution = true;
+        provider.refuseClose = true;
+        AtomicInteger released = new AtomicInteger();
+        ToolExecutionBudget budget = request -> released::incrementAndGet;
+        Client client = new Client();
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(client).toolProvider(provider, SETTINGS).toolExecutionBudget(budget).build(), host())) {
+            AgentSession session = driver.open(tools(), event -> {});
+            try {
+                assertThat(run(session).state()).isEqualTo(AgentTurnResult.State.FAILED);
+                assertThat(released).hasValue(0);
+                assertThatThrownBy(session::close).isInstanceOf(AgentUnavailableException.class);
+                assertThat(released).hasValue(0);
+            }
+            finally {
+                provider.refuseClose = false;
+                session.close();
+            }
+            assertThat(provider.closed).isEqualTo(1);
+            assertThat(released).hasValue(1);
+        }
+    }
 
     @Test
     void bindingAndBuilderSnapshotConfigurationWithoutOpeningResources()

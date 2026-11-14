@@ -17,6 +17,7 @@ import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.impl.DeepSeekApiConfig;
@@ -68,6 +69,7 @@ public final class DeepSeekApi
         private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
         private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
         private final List<EngineExtensionBinding> extensions = new ArrayList<>();
+        private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
 
         private Builder() {}
 
@@ -224,6 +226,19 @@ public final class DeepSeekApi
         }
 
         /**
+         * Borrows a tool admission budget; share one instance across drivers for an aggregate limit.
+         * No additional tool workers or within-batch overlap are enabled.
+         *
+         * @param budget thread-safe host service; failed acquisition must release its capacity
+         * @return this builder
+         */
+        public Builder toolExecutionBudget(ToolExecutionBudget budget)
+        {
+            toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -239,6 +254,7 @@ public final class DeepSeekApi
             toolProviders.forEach(settings::toolProvider);
             promptProviders.forEach(settings::promptProvider);
             extensions.forEach(settings::extension);
+            toolExecutionBudget.ifPresent(settings::toolExecutionBudget);
             return DriverAgent.deepSeekApi(settings.build(), state, profile);
         }
     }

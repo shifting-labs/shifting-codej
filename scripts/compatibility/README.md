@@ -157,3 +157,6 @@ The same engine example installs an `EngineExtensionProvider` implementing separ
 and `EngineObserver` ports. It checks prepared requirements, passes admission through the existing
 approval path, receives typed metadata notifications, and verifies scope cleanup. No raw model
 arguments, prompt text or result content is supplied to the observer.
+
+That engine also borrows `ToolExecutionBudget.bounded(1)`. The packaged consumer exercises admission
+and lease release through the public builder and existing tool lifecycle, without another executor.

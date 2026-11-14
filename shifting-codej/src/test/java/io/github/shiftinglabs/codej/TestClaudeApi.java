@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej;
 
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredExtensions;
 import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
@@ -65,6 +66,40 @@ class TestClaudeApi
     private SessionOptions options()
     {
         return SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+    }
+
+    @Test
+    void facadeForwardsBorrowedToolBudgetsWithoutEagerAdmission()
+            throws Exception
+    {
+        AtomicInteger acquired = new AtomicInteger();
+        AtomicInteger released = new AtomicInteger();
+        AtomicInteger executed = new AtomicInteger();
+        ToolExecutionBudget budget = request -> {
+            assertThat(request.invocationId()).isNotBlank();
+            assertThat(request.cancellationRequested()).isFalse();
+            acquired.incrementAndGet();
+            return released::incrementAndGet;
+        };
+        Tool tool = Tool.of("contract_lookup", "Lookup", Lookup.class, input -> {
+            assertThat(acquired).hasValue(1);
+            assertThat(released).hasValue(0);
+            executed.incrementAndGet();
+            return input.key();
+        });
+        var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).tool(tool)
+                .approvals(request -> java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE)).build();
+        try (Agent agent = builder().toolExecutionBudget(budget).build()) {
+            assertThat(acquired).hasValue(0);
+            try (Session session = agent.startSession(options)) {
+                assertThat(acquired).hasValue(0);
+                assertThat(session.run(Input.text("Lookup"))).isInstanceOf(TurnResult.Completed.class);
+            }
+            assertThat(acquired).hasValue(1);
+            assertThat(released).hasValue(1);
+            assertThat(executed).hasValue(1);
+        }
+        assertThatThrownBy(() -> builder().toolExecutionBudget(null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test
