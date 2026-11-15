@@ -32,6 +32,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolCapability;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolFailure;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolOutcome;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolRequirements;
@@ -198,6 +199,9 @@ final class ApiSession
 
             @Override
             public Duration shutdownTimeout() { return config.shutdownTimeout; }
+
+            @Override
+            public Optional<ToolExecutionBudget> toolExecutionBudget() { return config.toolExecutionBudget; }
         };
     }
 

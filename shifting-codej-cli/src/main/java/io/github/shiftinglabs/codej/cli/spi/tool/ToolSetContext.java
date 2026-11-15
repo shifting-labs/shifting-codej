@@ -17,6 +17,7 @@ import io.github.shiftinglabs.codej.cli.driver.AgentSessionContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 
 import java.time.Duration;
+import java.util.Optional;
 import java.util.concurrent.Executor;
 
 /** Trusted provider assembly boundary. These borrowed host services must not be exposed wholesale to handlers. */
@@ -30,4 +31,11 @@ public interface ToolSetContext
 
     /** Positive finite bound for stop verification; providers must not replace it with an unbounded wait. */
     default Duration shutdownTimeout() { return Duration.ofSeconds(2); }
+
+    /**
+     * Borrowed engine admission service, when configured. Required-backend providers can reject
+     * unbudgeted execution during open. The dispatcher acquires it; do not acquire it again from
+     * a handler or close the host service. Default preserves existing assembly implementations.
+     */
+    default Optional<ToolExecutionBudget> toolExecutionBudget() { return Optional.empty(); }
 }

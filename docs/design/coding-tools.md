@@ -1,7 +1,7 @@
 # Built-in tools for the shared API engine
 
 This is an additive, opt-in capability of `ApiAgentDriver`, shared by Claude API and DeepSeek API.
-The [tool SPI refactor](tool-spi.md) now has its interfaces and baseline tests; migrating these built-ins onto it is the next stage.
+The [tool SPI refactor](tool-spi.md) now routes these built-ins through typed handlers and narrow resource interfaces.
 Existing APIs, reference encodings, CLI behavior, and text/host-tool defaults are unchanged.
 `CodingTools` is an immutable record with validated resource limits. Provider adapters still own
 only inference; they receive schemas and tool results, never filesystem/process handles.
@@ -109,6 +109,10 @@ verifies runtime cleanup. Cancellation requests stop and waits for verification.
 termination or uncertain file durability leaves the started receipt unresolved, blocks replay,
 and retains workspace/session ownership until shutdown can be confirmed. Reopening does not
 silently rerun an uncertain operation.
+
+The separate opt-in [`run_command` provider](command-execution.md) adds Java contracts for a
+host-supplied command-tree backend. It requires configured shared admission and an enforcing host
+implementation, adds no dependencies, and does not change this fork-denied `shell_command` backend.
 
 ## Implementation checklist
 

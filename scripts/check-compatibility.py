@@ -231,6 +231,17 @@ def verify(args, report):
             report["passed"].append("Context budgets: provider sizing, output caps, pressured compaction and resume; JDK + jar only")
 
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_command_tools = PREFIX + "cli/api/tools/CommandToolProvider.class" in artifact.namelist()
+        if has_command_tools:
+            fixture = Path(__file__).parent / "compatibility" / "CommandToolsConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "CommandToolsConsumer", str(Path(folder) / "command-tools-api")])
+            (output / "command-tools-consumer.txt").write_text(result)
+            report["passed"].append("Command tools: Java host backend, shared admission, typed output and both API facades; JDK + jar only")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, default=Path.home() / ".m2/repository/io/github/shifting-labs/shifting-codej/0.164.0-1/shifting-codej-0.164.0-1.jar")

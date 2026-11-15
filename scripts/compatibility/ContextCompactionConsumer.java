@@ -97,6 +97,7 @@ public final class ContextCompactionConsumer
         final String model;
         final HttpServer server;
         final AtomicInteger requests = new AtomicInteger();
+        final java.util.concurrent.atomic.AtomicBoolean commandRequested = new java.util.concurrent.atomic.AtomicBoolean();
         final java.util.List<String> requestBodies = new java.util.concurrent.CopyOnWriteArrayList<>();
         final AtomicReference<String> lastBody = new AtomicReference<>();
         final AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -162,6 +163,19 @@ public final class ContextCompactionConsumer
                                 : "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"model\":\"" + model
                                 + "\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Answer\"},\"finish_reason\":\"stop\"}],"
                                 + "\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\ndata: [DONE]\n\n";
+                    }
+                    if (!metadata && commandRequested.compareAndSet(true, false)) {
+                        String arguments = "{\"argv\":[\"/usr/bin/true\"],\"directory\":\".\",\"timeoutSeconds\":1}";
+                        body = claude ? event("message_start", "\"message\":{\"id\":\"msg-command\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"" + model
+                                + "\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}")
+                                + event("content_block_start", "\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"command-1\",\"name\":\"run_command\",\"input\":" + arguments + "}")
+                                + event("content_block_stop", "\"index\":0")
+                                + event("message_delta", "\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}")
+                                + event("message_stop", "")
+                                : "data: {\"id\":\"command-1\",\"object\":\"chat.completion.chunk\",\"model\":\"" + model
+                                + "\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"command-1\",\"type\":\"function\","
+                                + "\"function\":{\"name\":\"run_command\",\"arguments\":\"" + arguments.replace("\"", "\\\"")
+                                + "\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\ndata: [DONE]\n\n";
                     }
                     exchange.getResponseHeaders().add("Content-Type", metadata ? "application/json" : "text/event-stream");
                     byte[] bytes = body.getBytes(StandardCharsets.UTF_8);

@@ -198,3 +198,9 @@ The context-budget packaged consumer also enables `contextBudget(...)` without a
 output reservation to the smaller of the built-in provider limit and the existing engine turn budget. Each fixture receives exactly one inference;
 no token-count or metadata endpoint is needed. These are conservative local estimates, not tokenizer
 accuracy tests or a live model-availability check.
+
+`CommandToolsConsumer` compiles with only the JDK and candidate shaded artifact. It verifies the
+legacy command executor's unsupported default, then registers `CommandToolProvider` through both
+public API facades. A scripted Java backend exercises approval, shared-budget wiring, prepared
+resource journaling, typed command/result codecs and stop-before-acknowledgement. No command tree
+or external execution runtime is launched; real platform containment requires backend-specific tests.

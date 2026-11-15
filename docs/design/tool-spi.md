@@ -284,8 +284,8 @@ Implementation stages:
 - [x] Run focused adapter/dispatcher contracts, affected tool/facade tests, and artifact compatibility checks for this migration.
 - [x] Run existing production handlers against alternate fake resources without editing the dispatcher or providers.
 - [x] Install explicitly configured ToolProvider sets into ApiAgentDriver with session-owned ToolSet cleanup.
-- [ ] Add a new logical tool when its feature and behavioral contract are chosen.
-- [ ] Consider richer execution, directory/move tools, plans/questions, and optional integrations separately.
+- [x] Add opt-in `run_command` through the [Java host-backend contract](command-execution.md), preserving existing tools.
+- [ ] Add optional native command-tree enforcement, directory/move tools, plans/questions, and other integrations separately.
 
 Stage 4 installs configured ToolProvider sets into the shared engine and both direct API facades.
 Built-in and existing host tools retain the legacy facade path for argument-binding compatibility;

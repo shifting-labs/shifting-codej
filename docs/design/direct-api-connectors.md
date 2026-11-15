@@ -367,6 +367,7 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 - [x] Bound incremental summary inputs and recover committed memory across sessions.
 - [x] Add opt-in summary-backed audit retention and post-commit staged-attachment cleanup.
 - [x] Add optional provider-aware input sizing and pre-submission context budgets.
+- [x] Add pure-Java registration and lifecycle contracts for host-supplied bounded commands; see [command execution](command-execution.md).
 - [ ] Evaluate provider-hosted tools and separate connector artifacts as needed.
 
 ## Second direct provider: DeepSeek
