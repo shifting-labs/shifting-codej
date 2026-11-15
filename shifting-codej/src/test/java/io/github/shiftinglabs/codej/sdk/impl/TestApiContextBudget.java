@@ -78,6 +78,82 @@ class TestApiContextBudget
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    void builtinsAreOptInAndBothFacadesUseProviderOutputLimitsWithoutExtraHttp(boolean claude)
+            throws Exception
+    {
+        try (Fixture f = new Fixture(claude, true)) {
+            var request = ModelRequest.builder("sizing", f.model, new ModelInput.UserMessage("hello", List.of()), 1).build();
+            try (ModelClient disabled = f.client(Optional.empty(), Optional.empty());
+                    ModelClient enabled = f.client(Optional.of(new ContextBudget(1024, true)), Optional.empty())) {
+                assertThat(disabled.contextBudget(request)).isEmpty();
+                assertThat(enabled.contextBudget(request).orElseThrow().accuracy()).isEqualTo(ModelContextAssessment.Accuracy.ESTIMATED);
+                assertThat(f.inferences()).isZero();
+            }
+            var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+            try (Agent agent = f.agent(Optional.of(new ContextBudget(1024, true)), Optional.empty(), context -> Optional.empty(), 500000);
+                    Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("hello"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(JSON.readValue(f.lastBody(), OutputView.class).max_tokens()).isEqualTo(claude ? 64000 : 131072);
+                assertThat(f.inferences()).isEqualTo(1);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void strictUnknownModelsAndCustomUnknownOverridesFailBeforeHttp(boolean claude)
+            throws Exception
+    {
+        var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+        try (Fixture f = new Fixture(claude)) {
+            try (Agent agent = f.agent(Optional.of(new ContextBudget(1024, true)), Optional.empty(), context -> Optional.empty(), 128);
+                    Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("unknown model"))).isInstanceOf(TurnResult.Failed.class);
+                assertThat(f.inferences()).isZero();
+            }
+        }
+        try (Fixture f = new Fixture(claude, true)) {
+            ModelContextSizer unknown = input -> Optional.empty();
+            try (Agent agent = f.agent(Optional.of(new ContextBudget(1024, true)), Optional.of(unknown), context -> Optional.empty(), 128);
+                    Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("custom override"))).isInstanceOf(TurnResult.Failed.class);
+                assertThat(f.inferences()).isZero();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void builtinPressureSummarizationReassessesAndResumesActiveContext(boolean claude)
+            throws Exception
+    {
+        try (Fixture f = new Fixture(claude, true)) {
+            var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+            SessionRef saved;
+            try (Agent agent = f.agent(Optional.empty(), Optional.empty(), context -> Optional.empty(), 128); Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("old-audit " + "x".repeat(12000)))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(session.run(Input.text("kept " + "y".repeat(12000)))).isInstanceOf(TurnResult.Completed.class);
+                saved = session.ref().orElseThrow();
+            }
+            var budget = new ContextBudget((claude ? 200000 : 1048576) - 20000, true);
+            ContextSummarizationPolicy policy = context -> context.contextAssessment().isPresent()
+                    ? Optional.of(new ContextSummarizationPlan(1, 128)) : Optional.empty();
+            try (Agent agent = f.agent(Optional.of(budget), Optional.empty(), policy, 128); Session session = agent.resumeSession(saved, options)) {
+                f.textReply("budget memory");
+                assertThat(session.run(Input.text("fresh input"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.inferences()).isEqualTo(4);
+                assertThat(f.lastBody()).contains("budget memory", "kept", "fresh input").doesNotContain("old-audit");
+            }
+            try (Agent agent = f.agent(Optional.of(budget), Optional.empty(), policy, 128); Session session = agent.resumeSession(saved, options)) {
+                assertThat(session.run(Input.text("after restart"))).isInstanceOf(TurnResult.Completed.class);
+                assertThat(f.inferences()).isEqualTo(5);
+                assertThat(f.lastBody()).contains("budget memory").doesNotContain("old-audit");
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     void sizingProjectsTheActualActiveWireInputIncludingPrivateBlocksAndToolSchemasWithoutHttp(boolean claude)
             throws Exception
     {
@@ -120,6 +196,16 @@ class TestApiContextBudget
                 }
                 else {
                     assertThat(input.serializedInput()).contains("private thought");
+                }
+                var builtin = claude ? BuiltinContextSizer.CLAUDE : BuiltinContextSizer.DEEPSEEK;
+                var knownInput = new ModelContextInput(input.providerId(), claude ? "claude-sonnet-4-5" : "deepseek-flash",
+                        input.serializedInput(), input.maximumOutputTokens(), input.deadline());
+                if (claude) {
+                    // The fixture's signed thinking contains an opaque future_field; do not guess its modality.
+                    assertThat(builtin.assess(knownInput)).isEmpty();
+                }
+                else {
+                    assertThat(builtin.assess(knownInput).orElseThrow().inputTokens()).isGreaterThan(input.serializedInput().length());
                 }
                 generate(client, request);
                 assertThat(JSON.readValue(input.serializedInput(), InputView.class)).isEqualTo(JSON.readValue(f.lastBody(), InputView.class));
@@ -216,28 +302,51 @@ class TestApiContextBudget
         Fixture(boolean claude)
                 throws Exception
         {
-            anthropic = claude ? new AnthropicHttpFixture() : null;
-            deepseek = claude ? null : new DeepSeekHttpFixture();
-            model = claude ? AnthropicHttpFixture.MODEL : DeepSeekHttpFixture.MODEL;
+            this(claude, false);
         }
 
-        ModelClient client(ModelContextSizer sizer)
+        Fixture(boolean claude, boolean knownModel)
+                throws Exception
         {
-            return anthropic != null ? new AnthropicModelClient(ClaudeApiConfig.builder(model, () -> "sk-budget-test").baseUrl(anthropic.baseUrl()).contextSizer(sizer).build())
-                    : new DeepSeekModelClient(DeepSeekApiConfig.builder(model, () -> "sk-budget-test").baseUrl(deepseek.baseUrl()).contextSizer(sizer).build());
+            anthropic = claude ? new AnthropicHttpFixture() : null;
+            deepseek = claude ? null : new DeepSeekHttpFixture(knownModel ? "deepseek-flash" : DeepSeekHttpFixture.MODEL);
+            model = knownModel ? (claude ? "claude-sonnet-4-5" : "deepseek-flash") : (claude ? AnthropicHttpFixture.MODEL : DeepSeekHttpFixture.MODEL);
+        }
+
+        ModelClient client(ModelContextSizer sizer) { return client(Optional.empty(), Optional.of(sizer)); }
+
+        ModelClient client(Optional<ContextBudget> budget, Optional<ModelContextSizer> sizer)
+        {
+            if (anthropic != null) {
+                var builder = ClaudeApiConfig.builder(model, () -> "sk-budget-test").baseUrl(anthropic.baseUrl());
+                budget.ifPresent(builder::contextBudget);
+                sizer.ifPresent(builder::contextSizer);
+                return new AnthropicModelClient(builder.build());
+            }
+            var builder = DeepSeekApiConfig.builder(model, () -> "sk-budget-test").baseUrl(deepseek.baseUrl());
+            budget.ifPresent(builder::contextBudget);
+            sizer.ifPresent(builder::contextSizer);
+            return new DeepSeekModelClient(builder.build());
         }
 
         Agent agent(Optional<ContextBudget> budget, ModelContextSizer sizer, ContextSummarizationPolicy policy)
         {
+            return agent(budget, Optional.of(sizer), policy, 4096);
+        }
+
+        Agent agent(Optional<ContextBudget> budget, Optional<ModelContextSizer> sizer, ContextSummarizationPolicy policy, int outputTokens)
+        {
             if (anthropic != null) {
-                var builder = ClaudeApi.builder().model(model).apiKey(() -> "sk-budget-test").baseUrl(anthropic.baseUrl()).contextSizer(sizer).contextSummarization(policy)
-                        .profileDirectory(directory.resolve("profile")).stateDirectory(directory.resolve("state"));
+                var builder = ClaudeApi.builder().model(model).apiKey(() -> "sk-budget-test").baseUrl(anthropic.baseUrl()).contextSummarization(policy)
+                        .maximumOutputTokens(outputTokens).profileDirectory(directory.resolve("profile")).stateDirectory(directory.resolve("state"));
                 budget.ifPresent(builder::contextBudget);
+                sizer.ifPresent(builder::contextSizer);
                 return builder.build();
             }
-            var builder = DeepSeekApi.builder().model(model).apiKey(() -> "sk-budget-test").baseUrl(deepseek.baseUrl()).contextSizer(sizer).contextSummarization(policy)
-                    .profileDirectory(directory.resolve("profile")).stateDirectory(directory.resolve("state"));
+            var builder = DeepSeekApi.builder().model(model).apiKey(() -> "sk-budget-test").baseUrl(deepseek.baseUrl()).contextSummarization(policy)
+                    .maximumOutputTokens(outputTokens).profileDirectory(directory.resolve("profile")).stateDirectory(directory.resolve("state"));
             budget.ifPresent(builder::contextBudget);
+            sizer.ifPresent(builder::contextSizer);
             return builder.build();
         }
 
@@ -260,6 +369,12 @@ class TestApiContextBudget
                 deepseek.reply(200, DeepSeekHttpFixture.chunk(DeepSeekHttpFixture.JSON.valueToTree(new Thinking("private thought")), null, false)
                         + DeepSeekHttpFixture.parallelToolStream());
             }
+        }
+
+        long inferences()
+        {
+            return anthropic != null ? anthropic.requests().stream().filter(request -> request.method().equals("POST")).count()
+                    : deepseek.requests().stream().filter(request -> request.method().equals("POST")).count();
         }
 
         int requests() { return anthropic != null ? anthropic.requests().size() : deepseek.requests().size(); }

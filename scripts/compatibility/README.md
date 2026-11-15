@@ -192,3 +192,9 @@ budget options, triggers compaction from measured pressure, verifies the provide
 resumes the compacted replay. Four conversation requests plus one summary request per provider
 confirm that sizing itself adds no inference. Its character counts deliberately simulate token
 counts for the loopback fixture; they are not a production tokenizer or provider limit table.
+
+The context-budget packaged consumer also enables `contextBudget(...)` without a custom sizer for
+`claude-sonnet-4-5` and `deepseek-flash`. Strict admission must succeed locally and cap the outgoing
+output reservation to the smaller of the built-in provider limit and the existing engine turn budget. Each fixture receives exactly one inference;
+no token-count or metadata endpoint is needed. These are conservative local estimates, not tokenizer
+accuracy tests or a live model-availability check.

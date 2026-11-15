@@ -322,7 +322,7 @@ public final class DeepSeekApi
 
         /**
          * Enables provider-aware preflight of actual input plus reserved output and a safety margin.
-         * Disabled by default; sizing never adds inference calls or changes tool authority.
+         * Disabled by default; uses built-in text estimates unless a custom sizer is installed.
          *
          * @param budget immutable policy, including explicit handling of unknown sizes
          * @return this builder
@@ -334,7 +334,7 @@ public final class DeepSeekApi
         }
 
         /**
-         * Borrows a local provider-specific sizing service. No model limits or token heuristics are inferred.
+         * Borrows a local provider-specific sizing service, overriding built-in estimates even when it returns unknown.
          *
          * @param sizer thread-safe service receiving private, adapter-projected active input
          * @return this builder

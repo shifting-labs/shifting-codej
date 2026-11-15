@@ -104,9 +104,15 @@ public final class ContextCompactionConsumer
         Fixture(boolean claude, Path root)
                 throws IOException
         {
+            this(claude, root, claude ? "claude-contract" : "deepseek-chat");
+        }
+
+        Fixture(boolean claude, Path root, String model)
+                throws IOException
+        {
             this.claude = claude;
             this.root = root;
-            model = claude ? "claude-contract" : "deepseek-chat";
+            this.model = model;
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/", this::handle);
             server.start();

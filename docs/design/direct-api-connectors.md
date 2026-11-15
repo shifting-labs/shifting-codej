@@ -43,7 +43,9 @@ Growing histories use bounded complete-group chunks and provider-recovered summa
 The separate [audit retention plan](audit-retention.md) opts into summary-covered audit removal,
 explicit retained history and bounded owned attachment cleanup after checkpoint commit.
 The [context budgeting plan](context-budgeting.md) adds optional provider sizing, input/output
-reservations and measured compaction pressure through the same model-client boundary.
+reservations and measured compaction pressure through the same model-client boundary. Opt-in
+budgeting includes built-in local text estimates for a reviewed Claude/DeepSeek catalog; custom
+sizers override them and unsupported inputs remain explicitly unknown.
 
 ## Boundaries
 

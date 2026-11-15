@@ -125,6 +125,7 @@ format-1 read migration. The version-1 layout described above records the initia
 - [x] Add opt-in [audit/storage retention](audit-retention.md) without changing default persistence.
 - [x] Add opt-in [provider-aware context budgeting](context-budgeting.md), pressure-triggered compaction
       and bounded summary sizing without mandatory adapter changes.
+- [x] Add built-in local Claude/DeepSeek text sizing with explicit limits, estimated accuracy and custom overrides.
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event
       mapping and focused connector contract tests before any default-route change.
 

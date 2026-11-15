@@ -33,6 +33,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import static java.util.Objects.requireNonNull;
+
 /** Loopback Chat Completions with deterministic metadata, framing, errors and cancellation. */
 public final class DeepSeekHttpFixture
         implements AutoCloseable
@@ -40,6 +42,7 @@ public final class DeepSeekHttpFixture
     public static final ObjectMapper JSON = new ObjectMapper();
     public static final String MODEL = "deepseek-contract";
     private final HttpServer server;
+    private final String model;
     private final ExecutorService executor = Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon().name("deepseek-fixture-", 0).factory());
     private final BlockingQueue<Reply> replies = new LinkedBlockingQueue<>();
     private final List<Request> requests = new CopyOnWriteArrayList<>();
@@ -49,6 +52,13 @@ public final class DeepSeekHttpFixture
     public DeepSeekHttpFixture()
             throws IOException
     {
+        this(MODEL);
+    }
+
+    public DeepSeekHttpFixture(String model)
+            throws IOException
+    {
+        this.model = requireNonNull(model, "model is null");
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.setExecutor(executor);
         server.createContext("/", this::handle);
@@ -85,7 +95,7 @@ public final class DeepSeekHttpFixture
                 return;
             }
             if (exchange.getRequestMethod().equals("GET")) {
-                send(exchange, 200, "{\"object\":\"list\",\"data\":[{\"id\":\"" + MODEL + "\",\"object\":\"model\",\"owned_by\":\"deepseek\"}]}");
+                send(exchange, 200, "{\"object\":\"list\",\"data\":[{\"id\":\"" + model + "\",\"object\":\"model\",\"owned_by\":\"deepseek\"}]}");
                 return;
             }
             JsonNode messages = body.path("messages");

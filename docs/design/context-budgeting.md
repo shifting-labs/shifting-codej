@@ -11,18 +11,20 @@ contains the joint context-window limit, complete input-token count, provider ou
 and `EXACT` / `ESTIMATED` accuracy. Values are validated; a count exceeding the window is a valid
 assessment, not a malformed record. Overflow-safe admission reserves output and an additional margin.
 
-Claude and DeepSeek implement this port through an explicitly installed, borrowed
-`ModelContextSizer`. Their `contextSizer(...)` config/facade setters capture the thread-safe service
+Claude and DeepSeek implement this port through a local `ModelContextSizer`. Enabling
+`contextBudget(...)` now selects built-in text sizing when no custom service is installed.
+Their `contextSizer(...)` config/facade setters capture a borrowed thread-safe service
 without calling or closing it. The service receives a private `ModelContextInput` containing provider,
 model, serialized active input, requested output cap and deadline. It is local, bounded and cooperative
 with interruption/deadlines; no inference, metadata HTTP, tool effects or network counting calls occur.
 Its projected content must never be logged, published or retained by observers.
 
-No model-name table, character-to-token heuristic or production tokenizer is installed automatically.
-Supply a provider-aware tokenizer/limits service through this interface; unsupported modalities or
-unknown limits must return empty. The input count includes provider framing and is independent of
-the output cap. Accuracy is declared by that service, not inferred by the engine. An estimate plus a
-margin can still underestimate real provider usage; the provider remains authoritative.
+Built-ins use a reviewed, finite model catalog and deliberately conservative estimates; they are not
+production tokenizers. An explicitly installed service always takes precedence, including an empty
+result. Hosts can therefore retain unknown behavior with `contextSizer(input -> Optional.empty())`,
+or install their own model-limit/tokenizer service. Unknown limits and unsupported modalities return
+empty. The input count includes provider framing and is independent of the output cap. An estimate
+plus a margin can still underestimate real provider usage; the provider remains authoritative.
 
 ## Input projection
 
@@ -39,6 +41,67 @@ from the installed service are normalized without their private diagnostics or c
 Anthropic's typed host DTOs cross a plain-mapper tree before SDK-model conversion; the SDK mapper
 continues to introspect SDK types. Existing signed-block, image, streaming and facade contracts
 exercise this boundary alongside the new projected-input comparisons.
+
+## Built-in local sizing
+
+`BuiltinContextSizer` is an internal implementation of the existing `ModelContextSizer` SPI. Both
+immutable provider configs select their own shared stateless implementation only when budgeting is
+enabled and no custom service was provided. Nothing changes for callers without `contextBudget`;
+no new public method, dependency, remote counting call, worker or cache is required.
+
+The initial explicit catalog was reviewed on **2026-11-15**:
+
+| Claude IDs | Joint context / maximum output tokens |
+| --- | --- |
+| `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` | 1,000,000 / 128,000 |
+| `claude-fable-5-1`, `claude-fable-5`, `claude-opus-5`, `claude-sonnet-5` | 1,000,000 / 128,000 |
+| `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6` | 1,000,000 / 128,000 |
+| `claude-opus-4-5`, `claude-opus-4-5-20251101` | 200,000 / 64,000 |
+| `claude-sonnet-4-5`, `claude-sonnet-4-5-20250929` | 200,000 / 64,000 |
+| `claude-haiku-4-5`, `claude-haiku-4-5-20251001` | 200,000 / 64,000 |
+
+Sources: [Claude model limits](https://platform.claude.com/docs/en/models/overview),
+[model IDs and snapshots](https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions).
+These are standard limits; optional larger beta windows are not assumed. A catalog entry describes
+sizing, not availability, access rights or new adapter capabilities.
+
+DeepSeek IDs `deepseek-flash`, `deepseek-v4-pro`, `deepseek-v4-flash` and
+`deepseek-v4-flash-vision-exp` use a 1,048,576-token joint window and 393,216-token output ceiling.
+The last two are documented compatibility aliases. Retired `deepseek-chat` and `deepseek-reasoner`
+remain unknown. Sources: [machine-readable limits](https://api-docs.deepseek.com/api/list-models/),
+[accepted aliases](https://api-docs.deepseek.com/quick_start/pricing/),
+[retirement notice](https://api-docs.deepseek.com/news/news260424/).
+Future IDs, arbitrary dated suffixes and proxy-specific names never inherit limits by prefix.
+Adding a catalog entry requires a source and baseline case; a custom sizer can supply other limits
+without an engine change. The bundled catalog does not fetch updates or promise live availability.
+
+All built-in results are `ESTIMATED`. The estimate is one token per UTF-8 byte of the **entire
+serialized active input**, plus 1,024 framing tokens, 64 per message, 256 per tool definition, and
+32 per Claude content block. Counting keys, escaping, signatures and retained thinking deliberately
+errs toward earlier compaction, especially for English text. These framing allowances are engineering
+heuristics, not provider-specified token costs or a mathematically guaranteed upper bound. The existing
+host safety margin is additional. No prompt is truncated. The UTF-8 scan uses long arithmetic, avoids
+an input-sized byte-array allocation, and checks interruption/deadline periodically.
+
+Strict immutable records describe the supported projections. Claude accepts text, thinking,
+redacted thinking, client tool calls with opaque JSON arguments, and string tool results; tool schemas
+remain opaque JSON objects. DeepSeek accepts text/system/tool messages, function calls, retained
+reasoning and function definitions. Unknown fields, block types, image/document inputs, malformed
+projections, scalar coercions and unsupported tool-result content return unknown instead of pretending
+the encoded bytes measure a non-text modality. Parser diagnostics never escape. Existing custom
+services still receive the complete native projection, including images they know how to count.
+
+Claude offers a [remote counting endpoint](https://platform.claude.com/docs/en/build-with-claude/token-counting),
+while DeepSeek documents [offline tokenizer assets](https://api-docs.deepseek.com/quick_start/token_usage/).
+Neither is silently invoked or downloaded. A later exact-counting stage would need a separately
+explicit remote-operation policy or a reviewed local tokenizer/artifact implementation.
+
+```java
+// Built-in estimates; unknown models/modalities fail locally with this strict policy.
+// ClaudeApi.builder().contextBudget(new ContextBudget(1024, true)) ...
+// DeepSeekApi.builder() exposes the same policy.
+// .contextSizer(customSizer) overrides built-ins; returning empty does not fall back.
+```
 
 ## Engine policy and admission
 
@@ -84,7 +147,7 @@ ContextSummarizationPolicy summaries = context -> {
     return Optional.of(new ContextSummarizationPlan(retain, 1024));
 };
 
-// Supply a real provider-specific tokenizer/limits implementation; no default sizing is guessed.
+// Built-in estimates or an explicit provider tokenizer/limits override.
 // ClaudeApi.builder().contextSizer(providerSizer)
 //         .contextBudget(new ContextBudget(1024, true)).contextSummarization(summaries) ...
 // DeepSeekApi.builder() exposes the same additions.
@@ -109,8 +172,9 @@ budget or authorize any retry after uncertain delivery.
 ## Compatibility and plan
 
 No existing constructor, record component, enum member or sealed shape changes. New model-client and
-compaction-context methods are defaults. Existing builders gain optional setters; unknown/default
-behavior remains unchanged. No checkpoint, provider replay, session-reference or artifact-layout
+compaction-context methods are defaults. Existing builders retain their descriptors. Budgeting remains disabled by default; enabling it now
+uses built-in estimates for the finite catalog when no custom sizer was installed. Unknown inputs
+still follow the existing explicit policy. No checkpoint, provider replay, session-reference or artifact-layout
 version changes are needed, and no new dependency, pool or background service is introduced.
 
 - [x] Add typed assessments, private projected input and the optional sizing service/default SPI.
@@ -122,7 +186,16 @@ version changes are needed, and no new dependency, pool or background service is
 - [x] Add baseline SPI, fake-client, actual-wire projection and fake-HTTP facade tests.
 - [x] Complete focused tests, packaged/API compatibility checks, record evidence and commit.
 
-## Validation
+## Built-in sizing plan
+
+- [x] Verify official provider limits and document catalog scope and estimate accuracy.
+- [x] Implement a bounded local sizer through the existing SPI with typed projection records.
+- [x] Wire provider defaults only for opt-in budgeting; keep custom unknown results authoritative.
+- [x] Cover Unicode, private native blocks, tools, unsupported input, deadlines and exact model matching.
+- [x] Cover both public facades, provider output limits, pressured summaries and durable resume.
+- [x] Run focused isolated tests and packaged/API compatibility checks, record evidence, commit.
+
+## Previous budget-stage validation
 
 The isolated source snapshot based on `52a25e3` passed **375 focused Java cases**, zero failures,
 errors or skips:
@@ -167,5 +240,35 @@ results were reused while correcting the typed Anthropic SDK conversion boundary
 Claude and projection contracts passed afterward. The final reservation guard was tested and the
 packaged compatibility checks rerun on that artifact. Strict style, license, Javadocs and shading
 passed. No agents, broad suites, Bytequay tests, live providers, provider CLIs, native builds or
-simulators ran. Production tokenizer accuracy, live model limits and performance benchmarks remain
-outside this check; sizing stays explicitly unknown unless an appropriate service is installed.
+simulators ran. Production tokenizer accuracy, live model availability and performance benchmarks remain outside this
+check. The following built-in stage adds local estimates for its explicitly documented catalog.
+
+
+## Built-in sizing validation
+
+An isolated snapshot based on `f3e77d3` passed **183 focused Java cases**, with zero failures,
+errors or skips: built-in sizing (48), context-budget projection/facade behavior (16), public
+Claude/DeepSeek facades (13 each), Anthropic/DeepSeek model clients (21/20), each API connector
+(18 each), and context compaction (16). Passing unaffected Claude contracts were reused while
+correcting the fake metadata catalog and readiness/inference counters; the affected DeepSeek and
+sizing cases passed afterward. The strict unit reader also confirms that a future field in signed
+Claude native content produces unknown sizing without rewriting that native content.
+
+The build passed strict style, license, Javadocs and shaded packaging checks. The published
+`0.164.0-1` compatibility suite and packaged consumers passed. The context-budget consumer now
+runs both public facades with built-ins and no custom service, alongside its existing custom-sizing,
+pressured-compaction and resume checks. Direct sizing performs no HTTP; facade session startup
+retains its existing readiness request. Output remains capped by both provider and existing engine
+turn limits. A separate comparison against the preceding engine artifact verified **138 existing
+types** with identical descriptors, record components, enum order and sealed shapes; no public API
+was added or changed.
+
+Candidate shaded artifact SHA-256:
+`3ae063d0fae42a8bab7157ba0556d07e96876bbcf7f4a3a741f14a7942c4e77c`.
+
+All checks used one active CPU, one test fork, disabled JUnit parallel execution, offline Maven,
+low process priority, a 512 MB heap and SerialGC. The four unrelated Claude CLI edits were excluded
+from the snapshot and preserved byte-for-byte. No agents, broad test suites, live provider calls,
+provider CLIs, Xcode builds or simulators ran. Exact tokenizer accuracy, live model availability and
+performance benchmarks were not tested; estimates can cause earlier compaction and are not a
+provider acceptance guarantee.

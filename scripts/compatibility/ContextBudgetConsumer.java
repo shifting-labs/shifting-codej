@@ -66,7 +66,33 @@ public final class ContextBudgetConsumer
                 require(fixture.failure.get() == null && fixture.requests.get() == 5 && sizingCalls.get() == 4, "Unexpected inference or sizing count");
             }
         }
-        System.out.println("PASS: provider-aware context budgets, pressured compaction, output caps and resume; JDK + jar only");
+        for (boolean claude : new boolean[] {true, false}) {
+            builtInSizing(claude, Path.of(args[0]).resolve(claude ? "claude-builtin" : "deepseek-builtin"));
+        }
+        System.out.println("PASS: custom and built-in context sizing, pressured compaction, output caps and resume; JDK + jar only");
+    }
+
+    private static void builtInSizing(boolean claude, Path root)
+            throws Exception
+    {
+        Files.createDirectories(root);
+        try (var fixture = new ContextCompactionConsumer.Fixture(claude, root, claude ? "claude-sonnet-4-5" : "deepseek-flash")) {
+            URI endpoint = URI.create("http://127.0.0.1:" + fixture.server.getAddress().getPort());
+            var budget = new ContextBudget(1024, true);
+            var options = SessionOptions.in(root).access(Access.TOOLS_ONLY).build();
+            try (Agent agent = claude
+                    ? ClaudeApi.builder().model("claude-sonnet-4-5").apiKey(() -> "sk-context-packaged").baseUrl(endpoint)
+                            .profileDirectory(root.resolve("profile")).stateDirectory(root.resolve("state"))
+                            .maximumOutputTokens(500000).contextBudget(budget).build()
+                    : DeepSeekApi.builder().model("deepseek-flash").apiKey(() -> "sk-context-packaged").baseUrl(endpoint)
+                            .profileDirectory(root.resolve("profile")).stateDirectory(root.resolve("state"))
+                            .maximumOutputTokens(500000).contextBudget(budget).build();
+                    Session session = agent.startSession(options)) {
+                ContextCompactionConsumer.completed(session, "Size this without a custom callback 世界 😀");
+                require(fixture.lastBody.get().contains("\"max_tokens\":" + (claude ? 64000 : 131072)), "Built-in output cap missing");
+            }
+            require(fixture.failure.get() == null && fixture.requests.get() == 1, "Built-in sizing added inference HTTP");
+        }
     }
 
     private static Agent agent(ContextCompactionConsumer.Fixture f, ModelContextSizer sizer)
