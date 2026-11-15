@@ -14,9 +14,11 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.cli.spi.AgentConnector;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextSizer;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
@@ -39,6 +41,24 @@ class TestClaudeApiConnector
         extends AbstractTestApiConnector<ClaudeApiConfig>
 {
     private AnthropicHttpFixture http;
+
+    @Test
+    void contextBudgetsAndSizersAreOptInBorrowedAndCapturedWithoutCallingThem()
+    {
+        ModelContextSizer firstSizer = context -> { throw new AssertionError("No eager sizing"); };
+        ModelContextSizer secondSizer = context -> Optional.empty();
+        var budget = new ContextBudget(128, true);
+        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        assertThat(builder.build().contextBudget).isEmpty();
+        assertThat(builder.build().contextSizer).isEmpty();
+        var first = builder.contextBudget(budget).contextSizer(firstSizer).build();
+        builder.contextSizer(secondSizer).contextBudget(new ContextBudget(0, false));
+        assertThat(first.contextBudget).containsSame(budget);
+        assertThat(first.contextSizer).containsSame(firstSizer);
+        assertThat(builder.build().contextSizer).containsSame(secondSizer);
+        assertThatThrownBy(() -> builder.contextBudget(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder.contextSizer(null)).isInstanceOf(NullPointerException.class);
+    }
 
     @Test
     void auditPoliciesAreOptionalBorrowedAndSnapshotBuilderState()

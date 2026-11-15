@@ -13,10 +13,12 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextSizer;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
@@ -78,6 +80,8 @@ public final class DeepSeekApi
         private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
         private int maximumSummaryInputCharacters = 65536;
         private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
+        private Optional<ContextBudget> contextBudget = Optional.empty();
+        private Optional<ModelContextSizer> contextSizer = Optional.empty();
 
         private Builder() {}
 
@@ -317,6 +321,31 @@ public final class DeepSeekApi
         }
 
         /**
+         * Enables provider-aware preflight of actual input plus reserved output and a safety margin.
+         * Disabled by default; sizing never adds inference calls or changes tool authority.
+         *
+         * @param budget immutable policy, including explicit handling of unknown sizes
+         * @return this builder
+         */
+        public Builder contextBudget(ContextBudget budget)
+        {
+            contextBudget = Optional.of(requireNonNull(budget, "contextBudget is null"));
+            return this;
+        }
+
+        /**
+         * Borrows a local provider-specific sizing service. No model limits or token heuristics are inferred.
+         *
+         * @param sizer thread-safe service receiving private, adapter-projected active input
+         * @return this builder
+         */
+        public Builder contextSizer(ModelContextSizer sizer)
+        {
+            contextSizer = Optional.of(requireNonNull(sizer, "contextSizer is null"));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -338,6 +367,8 @@ public final class DeepSeekApi
             contextSummarization.ifPresent(settings::contextSummarization);
             settings.maximumSummaryInputCharacters(maximumSummaryInputCharacters);
             auditRetention.ifPresent(settings::auditRetention);
+            contextBudget.ifPresent(settings::contextBudget);
+            contextSizer.ifPresent(settings::contextSizer);
             return DriverAgent.deepSeekApi(settings.build(), state, profile);
         }
     }

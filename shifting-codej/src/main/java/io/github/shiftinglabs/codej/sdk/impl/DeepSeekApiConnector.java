@@ -59,6 +59,7 @@ public final class DeepSeekApiConnector
             config.contextSummarization.ifPresent(engine::contextSummarization);
             engine.maximumSummaryInputCharacters(config.maximumSummaryInputCharacters);
             config.auditRetention.ifPresent(engine::auditRetention);
+            config.contextBudget.ifPresent(engine::contextBudget);
             return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {

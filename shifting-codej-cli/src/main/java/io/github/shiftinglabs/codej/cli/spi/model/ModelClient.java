@@ -54,6 +54,16 @@ public interface ModelClient
     }
 
     /**
+     * Optional local assessment of the actual active input and provider limits. Empty means unknown;
+     * existing clients retain their defaults. Never performs inference, metadata HTTP or tool effects.
+     */
+    default Optional<ModelContextAssessment> contextBudget(ModelRequest request)
+    {
+        requireNonNull(request, "request is null");
+        return Optional.empty();
+    }
+
+    /**
      * Explicit opt-in for engine-generated summaries. The default does not change existing local
      * compact implementations; adapters supporting the new mode must also implement compact safely.
      */

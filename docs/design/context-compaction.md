@@ -11,15 +11,19 @@ Separately installed [audit retention](audit-retention.md) can discard covered a
 unreferenced staged attachments; compaction alone continues to preserve them.
 It proposes a bounded `ModelCompaction` containing summary text and a retained exchange count.
 The callback performs no inference or tool effects. An alternative `ContextSummarizationPolicy`
-explicitly opts into an engine-budgeted LLM summary. Token estimation remains a separate follow-up;
+explicitly opts into an engine-budgeted LLM summary. [Provider-aware context budgeting](context-budgeting.md)
+adds optional input sizing without guessing token counts;
 audit/storage retention is a separate opt-in policy. No policy is installed by default.
 
-The engine runs proposals once per new public turn, after reconciling pending tools and before
+The engine runs proactive proposals once per new public turn, after reconciling pending tools and before
 capturing fresh prompts. Empty sessions skip the callback. Incomplete legacy history cannot be
 compacted. A boundary must summarize at least one settled exchange and cannot split tool calls from
 their ordered results; retained context starts with a user exchange and ends without pending calls.
 The immutable full history remains the `ModelRequest.history()` and prompt-contributor view unless
 the host explicitly enables retention, which exposes a retained suffix and validated summary anchor.
+With context budgeting enabled, a measured oversized fresh request can invoke the installed policy
+again with `contextAssessment()` metadata, then be rechecked before submission. Contributors are not
+recaptured, and pending tool-result batches are never compacted by this path.
 
 `ModelClient.compact(ModelCompactionRequest)` is an additive default returning unsupported. Provider
 adapters own the replay rewrite, preserve retained private blocks/signatures, and encode the summary
@@ -189,6 +193,7 @@ summaries can lose facts; neither this algorithm nor fake-client tests establish
 - [x] Verify incremental engine, provider, packaged consumer and compatibility tests; record results and commit.
 - [x] Add independent opt-in [audit/storage retention](audit-retention.md), summary-backed history anchors
       and post-commit owned attachment cleanup.
+- [x] Add opt-in [provider-aware context budgets](context-budgeting.md) and pressure-triggered sizing.
 
 ## Local-compaction validation (preceding stage)
 

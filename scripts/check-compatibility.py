@@ -220,6 +220,16 @@ def verify(args, report):
             (output / "retained-checkpoint.json").write_bytes((fixture_root / "claude-retained-checkpoint.json").read_bytes())
             report["passed"].append("Audit retention: Claude/DeepSeek pruned format-3 history and durable resume; JDK + jar only")
 
+        with zipfile.ZipFile(candidate) as artifact:
+            has_context_budget = PREFIX + "cli/spi/context/ContextBudget.class" in artifact.namelist()
+        if has_context_budget:
+            fixture = Path(__file__).parent / "compatibility" / "ContextBudgetConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "ContextBudgetConsumer", str(Path(folder) / "context-budget-api")])
+            (output / "context-budget-consumer.txt").write_text(result)
+            report["passed"].append("Context budgets: provider sizing, output caps, pressured compaction and resume; JDK + jar only")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

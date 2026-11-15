@@ -14,10 +14,12 @@
 package io.github.shiftinglabs.codej.sdk.impl;
 
 import io.github.shiftinglabs.codej.CodingTools;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextSizer;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
@@ -56,6 +58,8 @@ public final class DeepSeekApiConfig
     final Optional<ContextSummarizationPolicy> contextSummarization;
     final int maximumSummaryInputCharacters;
     final Optional<AuditRetentionPolicy> auditRetention;
+    final Optional<ContextBudget> contextBudget;
+    final Optional<ModelContextSizer> contextSizer;
 
     private DeepSeekApiConfig(Builder builder)
     {
@@ -75,6 +79,8 @@ public final class DeepSeekApiConfig
         contextSummarization = builder.contextSummarization;
         maximumSummaryInputCharacters = builder.maximumSummaryInputCharacters;
         auditRetention = builder.auditRetention;
+        contextBudget = builder.contextBudget;
+        contextSizer = builder.contextSizer;
         checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
@@ -99,6 +105,8 @@ public final class DeepSeekApiConfig
         private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
         private int maximumSummaryInputCharacters = 65536;
         private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
+        private Optional<ContextBudget> contextBudget = Optional.empty();
+        private Optional<ModelContextSizer> contextSizer = Optional.empty();
 
         private Builder(String model, Supplier<String> key)
         {
@@ -236,6 +244,31 @@ public final class DeepSeekApiConfig
         public Builder auditRetention(AuditRetentionPolicy policy)
         {
             auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
+            return this;
+        }
+
+        /**
+         * Enables provider-aware preflight of actual input plus reserved output and a safety margin.
+         * Disabled by default; sizing never adds inference calls or changes tool authority.
+         *
+         * @param budget immutable policy, including explicit handling of unknown sizes
+         * @return this builder
+         */
+        public Builder contextBudget(ContextBudget budget)
+        {
+            contextBudget = Optional.of(requireNonNull(budget, "contextBudget is null"));
+            return this;
+        }
+
+        /**
+         * Borrows a local provider-specific sizing service. No model limits or token heuristics are inferred.
+         *
+         * @param sizer thread-safe service receiving private, adapter-projected active input
+         * @return this builder
+         */
+        public Builder contextSizer(ModelContextSizer sizer)
+        {
+            contextSizer = Optional.of(requireNonNull(sizer, "contextSizer is null"));
             return this;
         }
 

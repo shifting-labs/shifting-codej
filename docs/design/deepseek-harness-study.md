@@ -123,6 +123,8 @@ format-1 read migration. The version-1 layout described above records the initia
       see [context compaction](context-compaction.md#engine-budgeted-llm-summaries).
 - [x] Add bounded incremental summary chunks, durable progress and provider-owned memory recovery.
 - [x] Add opt-in [audit/storage retention](audit-retention.md) without changing default persistence.
+- [x] Add opt-in [provider-aware context budgeting](context-budgeting.md), pressure-triggered compaction
+      and bounded summary sizing without mandatory adapter changes.
 - [ ] Evaluate an opt-in DSH connector with pinned runtime, per-session cancellation, approval/event
       mapping and focused connector contract tests before any default-route change.
 

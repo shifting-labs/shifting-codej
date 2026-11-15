@@ -17,6 +17,7 @@ import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
@@ -74,6 +75,7 @@ public final class ApiEngineConfig
     final Optional<ContextSummarizationPolicy> contextSummarization;
     final int maximumSummaryInputCharacters;
     final Optional<AuditRetentionPolicy> auditRetention;
+    final Optional<ContextBudget> contextBudget;
 
     private ApiEngineConfig(Builder b)
     {
@@ -106,6 +108,7 @@ public final class ApiEngineConfig
         contextSummarization = b.contextSummarization;
         maximumSummaryInputCharacters = b.maximumSummaryInputCharacters;
         auditRetention = b.auditRetention;
+        contextBudget = b.contextBudget;
         checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
@@ -147,6 +150,7 @@ public final class ApiEngineConfig
         private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
         private int maximumSummaryInputCharacters = 65536;
         private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
+        private Optional<ContextBudget> contextBudget = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -362,6 +366,19 @@ public final class ApiEngineConfig
         public Builder auditRetention(AuditRetentionPolicy policy)
         {
             auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
+            return this;
+        }
+
+        /**
+         * Enables provider-aware preflight of actual input plus reserved output and a safety margin.
+         * Disabled by default; sizing never adds inference calls or changes tool authority.
+         *
+         * @param budget immutable policy, including explicit handling of unknown sizes
+         * @return this builder
+         */
+        public Builder contextBudget(ContextBudget budget)
+        {
+            contextBudget = Optional.of(requireNonNull(budget, "contextBudget is null"));
             return this;
         }
 

@@ -186,3 +186,9 @@ facades to prune summary-covered history between bounded summary chunks, reopens
 checkpoints, and continues with retention disabled. It verifies raw audit removal and retained
 memory through the JDK and shaded jar only. Its synthetic Claude checkpoint is copied to the
 report directory as `retained-checkpoint.json` for checking explicit rejection by older readers.
+
+`ContextBudgetConsumer` is guarded by `ContextBudget`. It installs both public facades' sizing and
+budget options, triggers compaction from measured pressure, verifies the provider output cap and
+resumes the compacted replay. Four conversation requests plus one summary request per provider
+confirm that sizing itself adds no inference. Its character counts deliberately simulate token
+counts for the loopback fixture; they are not a production tokenizer or provider limit table.

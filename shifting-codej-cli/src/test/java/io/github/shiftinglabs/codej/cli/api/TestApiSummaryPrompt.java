@@ -49,6 +49,8 @@ class TestApiSummaryPrompt
                 new ModelHistory.Exchange("three", "fake", "model", new ModelInput.ToolResults(List.of(new ModelInput.ToolResult("call", "result", false))),
                         "decision", List.of(), ModelResponse.StopReason.COMPLETED), exchange("four", "retained", List.of())));
         int bound = ApiSummaryPrompt.encode(history, 2, 10000).length();
+        assertThat(ApiSummaryPrompt.smallerBoundary(history, 0, 3)).isEqualTo(1);
+        assertThat(ApiSummaryPrompt.smallerBoundary(history, 1, 3)).isEqualTo(3);
         assertThat(ApiSummaryPrompt.chunk(history, 0, 3, "", bound).throughExchanges()).isEqualTo(1);
         var chain = new ModelHistory(true, history.exchanges().subList(1, 3));
         int partial = ApiSummaryPrompt.encode(chain, 1, 10000).length();

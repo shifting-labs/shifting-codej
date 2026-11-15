@@ -13,6 +13,7 @@
  */
 package io.github.shiftinglabs.codej.cli.spi.context;
 
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextAssessment;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 
 import java.time.Instant;
@@ -33,4 +34,7 @@ public interface ContextCompactionContext
     Optional<Instant> deadline();
 
     boolean cancelled();
+
+    /** Present only when a fully projected fresh request exceeded its provider-aware context budget. */
+    default Optional<ModelContextAssessment> contextAssessment() { return Optional.empty(); }
 }

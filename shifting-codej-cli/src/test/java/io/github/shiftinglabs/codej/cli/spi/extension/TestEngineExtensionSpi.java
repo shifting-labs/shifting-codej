@@ -13,6 +13,7 @@
  */
 package io.github.shiftinglabs.codej.cli.spi.extension;
 
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextAssessment;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 import org.junit.jupiter.api.Test;
 
@@ -116,6 +117,30 @@ class TestEngineExtensionSpi
         assertThatThrownBy(() -> new EngineObservation.AuditPruned("turn", -1, 0, 0)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new EngineObservation.AuditPruned("turn", 0, -1, 0)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new EngineObservation.AuditPruned("turn", 0, 0, -1)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void contextObservationsDistinguishKnownAndUnknownSizingWithoutContent()
+    {
+        var assessment = new ModelContextAssessment(100, 40, 20, ModelContextAssessment.Accuracy.EXACT);
+        var value = new EngineObservation.ContextAssessed("turn", "request", Optional.of(assessment), 20, 10, EngineObservation.ContextDecision.FIT);
+        assertThat(value.turnId()).isEqualTo("turn");
+        assertThat(value.requestId()).isEqualTo("request");
+        assertThat(value.assessment()).containsSame(assessment);
+        assertThat(value.reservedOutputTokens()).isEqualTo(20);
+        assertThat(value.safetyMarginTokens()).isEqualTo(10);
+        assertThat(value.decision()).isEqualTo(EngineObservation.ContextDecision.FIT);
+        assertThatThrownBy(() -> new EngineObservation.ContextAssessed(" ", "request", Optional.empty(), 1, 0, EngineObservation.ContextDecision.UNKNOWN_ALLOWED))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextAssessed("turn", "request", null, 1, 0, EngineObservation.ContextDecision.FIT))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextAssessed("turn", "request", Optional.empty(), 1, 0, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextAssessed("turn", "request", Optional.empty(), 0, 0, EngineObservation.ContextDecision.UNKNOWN_ALLOWED))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextAssessed("turn", "request", Optional.empty(), 1, -1, EngineObservation.ContextDecision.UNKNOWN_ALLOWED))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EngineObservation.ContextAssessed("turn", "request", Optional.empty(), 1, 0, EngineObservation.ContextDecision.FIT))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     private static EngineExtensionProvider<String> provider(String id, java.util.function.BiFunction<String, EngineExtensionContext, EngineExtension> factory)

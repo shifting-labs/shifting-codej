@@ -34,6 +34,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextAssessment;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
@@ -257,7 +258,9 @@ final class ApiTurn
         return new ApiRequestSetup(model, instructions, effort, command.serviceTier(), session.tools.definitions(), Optional.of(session.tools.contracts()));
     }
 
-    private void compact()
+    private void compact() { compact(Optional.empty()); }
+
+    private void compact(Optional<ModelContextAssessment> assessment)
     {
         if ((config.contextCompactor.isEmpty() && config.contextSummarization.isEmpty()) || session.store.state().replay().isEmpty()) {
             return;
@@ -279,6 +282,9 @@ final class ApiTurn
 
             @Override
             public int replayCharacters() { return before.replay().orElseThrow().payload().length(); }
+
+            @Override
+            public Optional<ModelContextAssessment> contextAssessment() { return assessment; }
 
             @Override
             public Optional<Instant> deadline()
@@ -362,17 +368,13 @@ final class ApiTurn
         int limit = Math.min(config.maximumSummaryInputCharacters, config.maximumTextChars);
         while (from < target) {
             checkStop();
-            ApiSummaryPrompt.Chunk chunk = ApiSummaryPrompt.chunk(history, from, target, summary, limit);
-            String transcript = config.redactor().redact(chunk.text());
-            if (transcript.length() > limit) {
-                throw new IllegalArgumentException("Redacted summary input exceeds its budget");
-            }
-            summary = summaryCall(transcript, plan.maximumOutputTokens(), deadline);
-            var proposal = new ModelCompaction(summary, history.exchanges().size() - chunk.throughExchanges());
+            GeneratedSummary generated = summaryChunk(history, from, target, summary, limit, plan.maximumOutputTokens(), deadline);
+            summary = generated.text();
+            var proposal = new ModelCompaction(summary, history.exchanges().size() - generated.throughExchanges());
             if (!rewrite(session.store.state(), proposal, deadline)) {
                 throw new IllegalArgumentException("Incremental compaction made no progress");
             }
-            from = chunk.throughExchanges();
+            from = generated.throughExchanges();
             retainAudit(true);
         }
     }
@@ -459,21 +461,51 @@ final class ApiTurn
         checkStop();
     }
 
-    private String summaryCall(String transcript, int maximumOutputTokens, Optional<Instant> deadline)
+    private record GeneratedSummary(String text, int throughExchanges)
     {
-        int outputTokens = reserveRequest(maximumOutputTokens, true);
+        @Override
+        public String toString() { return "GeneratedSummary[redacted]"; }
+    }
+
+    private GeneratedSummary summaryChunk(ModelHistory history, int from, int target, String memory, int limit,
+            int maximumOutputTokens, Optional<Instant> deadline)
+    {
         String id = UUID.randomUUID().toString();
-        var builder = ModelRequest.builder(id, model, new ModelInput.UserMessage(transcript, List.of()), outputTokens)
-                .instructions(ApiSummaryPrompt.INSTRUCTIONS).history(new ModelHistory(true, List.of()));
-        deadline.ifPresent(builder::deadline);
-        effort.ifPresent(builder::effort);
-        command.serviceTier().ifPresent(builder::serviceTier);
+        ApiSummaryPrompt.Chunk chunk;
+        ModelRequest request;
+        int end = target;
+        while (true) {
+            checkStop();
+            chunk = ApiSummaryPrompt.chunk(history, from, end, memory, limit);
+            String transcript = config.redactor().redact(chunk.text());
+            if (transcript.length() > limit) {
+                throw new IllegalArgumentException("Redacted summary input exceeds its budget");
+            }
+            var builder = ModelRequest.builder(id, model, new ModelInput.UserMessage(transcript, List.of()), availableOutput(maximumOutputTokens, true))
+                    .instructions(ApiSummaryPrompt.INSTRUCTIONS).history(new ModelHistory(true, List.of()));
+            deadline.ifPresent(builder::deadline);
+            effort.ifPresent(builder::effort);
+            command.serviceTier().ifPresent(builder::serviceTier);
+            BudgetedRequest checked = assess(builder.build());
+            if (checked.fits()) {
+                request = checked.request();
+                break;
+            }
+            if (!canReduceInput(checked)) {
+                throw contextFailure("Output reservation and safety margin leave no provider input capacity");
+            }
+            end = ApiSummaryPrompt.smallerBoundary(history, from, chunk.throughExchanges());
+            if (end >= chunk.throughExchanges()) {
+                throw contextFailure("The next complete summary group exceeds its provider context budget");
+            }
+        }
+        reserveRequest(request.maximumOutputTokens(), true);
         int maximum = Math.min(ModelCompaction.MAX_SUMMARY_CHARACTERS, config.maximumTextChars - textChars);
         if (maximum <= 0) {
             throw new Stopped("API turn text budget exhausted");
         }
         int previousText = textChars;
-        ModelResponse response = generate(builder.build(), new StreamText(id, false, maximum));
+        ModelResponse response = generate(request, new StreamText(id, false, maximum));
         recordUsage(id, response);
         observe(() -> new EngineObservation.ContextSummaryCompleted(observedTurnId(), id, response.stopReason(), response.usage()));
         checkStop();
@@ -488,18 +520,119 @@ final class ApiTurn
         if (!config.redactor().redact(response.text()).equals(response.text())) {
             throw new IllegalArgumentException("Context summary contains a known credential");
         }
-        return response.text();
+        return new GeneratedSummary(response.text(), chunk.throughExchanges());
     }
 
-    private int reserveRequest(int requestedOutputTokens, boolean continuation)
+    private int availableOutput(int requestedOutputTokens, boolean continuation)
     {
         checkStop();
         int reserve = continuation ? 1 : 0;
         if (config.maximumRequests - requests <= reserve || config.maximumTokens - tokens <= reserve) {
             throw new Stopped("API turn request or token budget exhausted");
         }
-        requests++;
         return (int) Math.min(requestedOutputTokens, Math.min(config.maximumOutputTokens, config.maximumTokens - tokens - reserve));
+    }
+
+    private int reserveRequest(int requestedOutputTokens, boolean continuation)
+    {
+        int output = availableOutput(requestedOutputTokens, continuation);
+        requests++;
+        return output;
+    }
+
+    private record BudgetedRequest(ModelRequest request, Optional<ModelContextAssessment> assessment, boolean fits)
+    {
+        @Override
+        public String toString() { return "BudgetedRequest[redacted]"; }
+    }
+
+    private static ModelClientException contextFailure(String message)
+    {
+        return new ModelClientException(ModelClientException.Kind.INVALID_REQUEST, message, false);
+    }
+
+    private BudgetedRequest assess(ModelRequest request)
+    {
+        if (config.contextBudget.isEmpty()) {
+            return new BudgetedRequest(request, Optional.empty(), true);
+        }
+        Optional<ModelContextAssessment> assessment;
+        try {
+            interruptible = true;
+            checkStop();
+            assessment = requireNonNull(session.engine.client.contextBudget(request), "adapter returned null context assessment");
+            checkStop();
+        }
+        catch (CancellationException cancelled) {
+            throw new Stopped(stopping.get() == null ? "Context assessment cancelled" : stopping.get());
+        }
+        finally {
+            interruptible = false;
+            Thread.interrupted();
+        }
+        var policy = config.contextBudget.orElseThrow();
+        int output = assessment.map(value -> Math.min(request.maximumOutputTokens(), value.maximumOutputTokens())).orElse(request.maximumOutputTokens());
+        boolean fits = assessment.map(value -> value.fits(output, policy.safetyMarginTokens())).orElse(!policy.requireKnownSize());
+        var decision = assessment.isPresent() ? fits ? EngineObservation.ContextDecision.FIT : EngineObservation.ContextDecision.OVER_LIMIT
+                : fits ? EngineObservation.ContextDecision.UNKNOWN_ALLOWED : EngineObservation.ContextDecision.UNKNOWN_REJECTED;
+        observe(() -> new EngineObservation.ContextAssessed(observedTurnId(), request.requestId(), assessment, output, policy.safetyMarginTokens(), decision));
+        checkStop();
+        if (assessment.isEmpty() && !fits) {
+            throw contextFailure("Provider context sizing is required but unavailable");
+        }
+        return new BudgetedRequest(output == request.maximumOutputTokens() ? request : copyRequest(request, output), assessment, fits);
+    }
+
+    private ModelRequest copyRequest(ModelRequest original, int output)
+    {
+        var builder = ModelRequest.builder(original.requestId(), original.model(), original.input(), output)
+                .instructions(original.instructions()).tools(original.tools());
+        original.history().ifPresent(builder::history);
+        original.replayState().ifPresent(builder::replayState);
+        original.effort().ifPresent(builder::effort);
+        original.serviceTier().ifPresent(builder::serviceTier);
+        original.deadline().ifPresent(builder::deadline);
+        return builder.build();
+    }
+
+    private ModelRequest request(String id, ApiRequestSetup setup, ModelInput nextInput)
+    {
+        var before = session.store.state();
+        var builder = ModelRequest.builder(id, setup.model(), nextInput, availableOutput(config.maximumOutputTokens, false))
+                .instructions(setup.instructions()).tools(setup.tools()).history(before.history());
+        before.replay().ifPresent(builder::replayState);
+        setup.effort().ifPresent(builder::effort);
+        setup.tier().ifPresent(builder::serviceTier);
+        if (!command.maximumRuntime().isZero()) {
+            builder.deadline(started.plus(command.maximumRuntime()));
+        }
+        return builder.build();
+    }
+
+    private boolean canReduceInput(BudgetedRequest checked)
+    {
+        if (checked.assessment().isEmpty()) {
+            return false;
+        }
+        long window = checked.assessment().orElseThrow().contextWindowTokens();
+        long margin = config.contextBudget.orElseThrow().safetyMarginTokens();
+        return margin < window && checked.request().maximumOutputTokens() < window - margin;
+    }
+
+    private ModelRequest prepareRequest(String id, ApiRequestSetup setup, ModelInput nextInput)
+    {
+        BudgetedRequest checked = assess(request(id, setup, nextInput));
+        ApiCheckpoint before = session.store.state();
+        if (!checked.fits() && canReduceInput(checked) && nextInput instanceof ModelInput.UserMessage && before.phase() == ApiCheckpoint.Phase.READY
+                && before.replay().isPresent() && (config.contextCompactor.isPresent() || config.contextSummarization.isPresent())) {
+            compact(checked.assessment());
+            retainAudit(true);
+            checked = assess(request(id, setup, nextInput));
+        }
+        if (!checked.fits()) {
+            throw contextFailure("Provider context budget exceeded; no model request was submitted");
+        }
+        return checked.request();
     }
 
     private ModelResponse generate(ModelRequest request, StreamText stream)
@@ -580,18 +713,10 @@ final class ApiTurn
         ModelInput nextInput = initial;
         while (true) {
             checkStop();
-            int outputTokens = reserveRequest(config.maximumOutputTokens, false);
             String requestId = UUID.randomUUID().toString();
+            ModelRequest request = prepareRequest(requestId, setup, nextInput);
+            reserveRequest(request.maximumOutputTokens(), false);
             ApiCheckpoint before = session.store.state();
-            ModelRequest.Builder builder = ModelRequest.builder(requestId, setup.model(), nextInput,
-                    outputTokens).instructions(setup.instructions()).tools(setup.tools()).history(before.history());
-            before.replay().ifPresent(builder::replayState);
-            setup.effort().ifPresent(builder::effort);
-            setup.tier().ifPresent(builder::serviceTier);
-            if (!command.maximumRuntime().isZero()) {
-                builder.deadline(started.plus(command.maximumRuntime()));
-            }
-            ModelRequest request = builder.build();
             save(before.submitting(requestId, setup, nextInput));
             ModelResponse response;
             try {

@@ -47,6 +47,7 @@ import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorContext;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPlan;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtension;
@@ -62,6 +63,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompaction;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextAssessment;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
@@ -115,6 +117,261 @@ class TestApiAgentDriver
 {
     @TempDir
     Path directory;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"off", "unknown-allow", "unknown-reject", "null", "throw", "overflow"})
+    void contextPreflightKeepsDefaultsAndUnknownOutcomesExplicitWithoutPoisoningReplay(String mode)
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        client.assessor = request -> switch (mode) {
+            case "off" -> throw new AssertionError("Sizing must be disabled");
+            case "null" -> null;
+            case "throw" -> throw new IllegalArgumentException("private sizing diagnostic");
+            case "overflow" -> Optional.of(new ModelContextAssessment(100, Long.MAX_VALUE, 32, ModelContextAssessment.Accuracy.EXACT));
+            default -> Optional.empty();
+        };
+        var settings = config(client);
+        if (!mode.equals("off")) {
+            settings.contextBudget(new ContextBudget(0, !mode.equals("unknown-allow")));
+        }
+        boolean allowed = mode.equals("off") || mode.equals("unknown-allow");
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings.build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            var result = done(session.start(command("private input")));
+            assertThat(result.state()).isEqualTo(allowed ? AgentTurnResult.State.COMPLETED : AgentTurnResult.State.FAILED);
+            assertThat(client.requests).hasSize(allowed ? 1 : 0);
+            assertThat(client.sizedRequests).hasSize(mode.equals("off") ? 0 : 1);
+            assertThat(readCheckpoint(session.reference()).phase()).isEqualTo(ApiCheckpoint.Phase.READY);
+            assertThat(session.resumable()).isTrue();
+            assertThat(result.terminalReason().orElse("")).doesNotContain("private input", "private sizing diagnostic");
+        }
+    }
+
+    @Test
+    void contextBudgetCapsProviderOutputAndPreservesTheCapturedRequestSettings()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        var probeRequest = ModelRequest.builder("probe", "model", new ModelInput.UserMessage("input", List.of()), 32).build();
+        assertThat(client.contextBudget(probeRequest)).isEmpty();
+        assertThatThrownBy(() -> client.contextBudget(null)).isInstanceOf(NullPointerException.class);
+        client.sizedRequests.clear();
+        client.assessor = request -> Optional.of(new ModelContextAssessment(30, 10, 15, ModelContextAssessment.Accuracy.EXACT));
+        var builder = config(client).maximumOutputTokens(128);
+        assertThat(builder.build().contextBudget).isEmpty();
+        var budget = new ContextBudget(5, true);
+        var settings = builder.contextBudget(budget).build();
+        builder.contextBudget(new ContextBudget(99, true));
+        assertThat(settings.contextBudget).containsSame(budget);
+        assertThatThrownBy(() -> builder.contextBudget(null)).isInstanceOf(NullPointerException.class);
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {})) {
+            var command = new AgentTurnCommand("turn", "input", List.of(), Duration.ofSeconds(1), Optional.of("model"), Optional.of("high"), Optional.of("standard"));
+            assertThat(done(session.start(command)).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            ModelRequest request = client.requests.getFirst();
+            assertThat(request.maximumOutputTokens()).isEqualTo(15);
+            assertThat(request.effort()).contains("high");
+            assertThat(request.serviceTier()).contains("standard");
+            assertThat(request.deadline()).isPresent();
+            assertThat(request.instructions()).contains("Host instructions");
+            assertThat(request.history().orElseThrow().exchanges()).isEmpty();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"success", "decline", "ineffective"})
+    void freshContextPressureCanCompactOnceAndIsRecheckedBeforeRequestIntent(String mode)
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        FakeClient client = new FakeClient();
+        client.assessor = request -> Optional.of(new ModelContextAssessment(100, request.replayState().orElseThrow().payload().length() > 64 ? 200 : 10,
+                32, ModelContextAssessment.Accuracy.ESTIMATED));
+        AtomicInteger pressured = new AtomicInteger();
+        client.compactor = request -> Optional.of(new ModelReplayState("fake-api", 2, mode.equals("ineffective") ? "c".repeat(11000) : "compact"));
+        var settings = config(client).contextBudget(new ContextBudget(0, true)).contextCompactor(context -> {
+            if (context.contextAssessment().isEmpty()) {
+                return Optional.empty();
+            }
+            pressured.incrementAndGet();
+            assertThat(context.contextAssessment().orElseThrow().inputTokens()).isEqualTo(200);
+            return mode.equals("decline") ? Optional.empty() : Optional.of(new ModelCompaction("summary", 0));
+        }).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            var result = done(session.start(command("fresh")));
+            assertThat(result.state()).isEqualTo(mode.equals("success") ? AgentTurnResult.State.COMPLETED : AgentTurnResult.State.FAILED);
+            assertThat(pressured).hasValue(1);
+            assertThat(client.sizedRequests).hasSize(2);
+            assertThat(client.requests).hasSize(mode.equals("success") ? 1 : 0);
+            assertThat(session.resumable()).isTrue();
+            assertThat(readCheckpoint(reference).phase()).isEqualTo(ApiCheckpoint.Phase.READY);
+            if (!mode.equals("success")) {
+                assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+                assertThat(readCheckpoint(reference).replay().orElseThrow().payload()).hasSize(mode.equals("decline") ? 12000 : 11000);
+            }
+        }
+    }
+
+    @Test
+    void summaryChunksShrinkToProviderLimitsWithoutSpendingRequestsOnSizingProbes()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        FakeClient client = new FakeClient();
+        client.summarySupport = true;
+        client.assessor = request -> {
+            boolean summary = request.instructions().equals(ApiSummaryPrompt.INSTRUCTIONS);
+            long inputTokens = summary ? ((ModelInput.UserMessage) request.input()).text().length() + 100
+                    : request.replayState().orElseThrow().payload().length() > 9000 ? 1000 : 100;
+            return Optional.of(new ModelContextAssessment(700, inputTokens, 32, ModelContextAssessment.Accuracy.ESTIMATED));
+        };
+        client.compactor = request -> Optional.of(new ModelReplayState("fake-api", 2, "c".repeat(request.replay().payload().length() - 1000)));
+        for (int index = 0; index < 3; index++) {
+            client.script.add((request, sink) -> {
+                assertThat(request.instructions()).isEqualTo(ApiSummaryPrompt.INSTRUCTIONS);
+                assertThat(request.tools()).isEmpty();
+                return completed(response("small memory", "discarded", List.of(), ModelResponse.StopReason.COMPLETED));
+            });
+        }
+        var settings = config(client).maximumRequests(4).contextBudget(new ContextBudget(0, true))
+                .contextSummarization(context -> context.contextAssessment().isPresent() ? Optional.of(new ContextSummarizationPlan(0, 32)) : Optional.empty()).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(client.requests).hasSize(4);
+            assertThat(client.compactions).hasSize(3);
+            assertThat(client.sizedRequests.size()).isGreaterThan(client.requests.size());
+            assertThat(client.requests.getLast().replayState().orElseThrow().payload()).hasSize(9000);
+        }
+    }
+
+    @Test
+    void impossibleOutputReservationsDoNotTriggerLossyCompaction()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        FakeClient client = new FakeClient();
+        client.assessor = request -> Optional.of(new ModelContextAssessment(100, 1, 100, ModelContextAssessment.Accuracy.EXACT));
+        var settings = config(client).contextBudget(new ContextBudget(1, true)).contextCompactor(context -> {
+            assertThat(context.contextAssessment()).isEmpty();
+            return Optional.empty();
+        }).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(client.requests).isEmpty();
+            assertThat(client.compactions).isEmpty();
+            assertThat(client.sizedRequests).hasSize(1);
+            assertThat(readCheckpoint(reference).replay().orElseThrow().payload()).hasSize(12000);
+            assertThat(session.resumable()).isTrue();
+        }
+    }
+
+    @Test
+    void anIndivisibleOversizedSummaryGroupFailsLocallyWithoutRecursiveCompaction()
+            throws Exception
+    {
+        AgentSessionRef reference = seedSummaryHistory();
+        FakeClient client = new FakeClient();
+        client.summarySupport = true;
+        client.assessor = request -> Optional.of(new ModelContextAssessment(20, 100, 8, ModelContextAssessment.Accuracy.ESTIMATED));
+        AtomicInteger pressured = new AtomicInteger();
+        var settings = config(client).contextBudget(new ContextBudget(0, true)).contextSummarization(context -> {
+            if (context.contextAssessment().isEmpty()) {
+                return Optional.empty();
+            }
+            pressured.incrementAndGet();
+            return Optional.of(new ContextSummarizationPlan(2, 8));
+        }).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(client.requests).isEmpty();
+            assertThat(client.compactions).isEmpty();
+            assertThat(pressured).hasValue(1);
+            assertThat(readCheckpoint(reference).replay().orElseThrow().payload()).hasSize(12000);
+            assertThat(readCheckpoint(reference).history().exchanges()).hasSize(3);
+            assertThat(session.resumable()).isTrue();
+        }
+    }
+
+    @Test
+    void oversizedToolContinuationKeepsDurableResultsAndNeverCompactsOrReexecutesThem()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        AtomicInteger effects = new AtomicInteger();
+        Tool tool = Tool.withSchema("lookup", "Lookup", "{}", text -> {
+            effects.incrementAndGet();
+            return "saved result";
+        });
+        client.script.add((request, sink) -> completed(toolResponse("lookup", "{}")));
+        client.assessor = request -> Optional.of(new ModelContextAssessment(100, request.input() instanceof ModelInput.ToolResults ? 200 : 1,
+                32, ModelContextAssessment.Accuracy.EXACT));
+        AgentSessionRef reference;
+        var settings = config(client).contextBudget(new ContextBudget(0, true)).contextCompactor(context -> { throw new AssertionError("No pending compaction"); }).build();
+        try (ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+                AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
+            reference = session.reference();
+            assertThat(done(session.start(command("lookup"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(effects).hasValue(1);
+            assertThat(readCheckpoint(reference).phase()).isEqualTo(ApiCheckpoint.Phase.TOOLS);
+            assertThat(readCheckpoint(reference).receipts().getFirst().result()).isPresent();
+            assertThat(client.requests).hasSize(1);
+            assertThat(client.compactions).isEmpty();
+            assertThat(session.resumable()).isTrue();
+        }
+        FakeClient resumed = new FakeClient();
+        resumed.assessor = request -> Optional.of(new ModelContextAssessment(1000, 1, 32, ModelContextAssessment.Accuracy.EXACT));
+        try (ApiAgentDriver driver = new ApiAgentDriver(config(resumed).contextBudget(new ContextBudget(0, true)).build(), connectorContext());
+                AgentSession session = driver.open(context(Optional.of(reference), List.of(tool), allow()), event -> {})) {
+            assertThat(done(session.start(command("fresh after recovery"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(resumed.requests.getFirst().input()).isInstanceOf(ModelInput.ToolResults.class);
+            assertThat(effects).hasValue(1);
+        }
+    }
+
+    @Test
+    void cancellationWaitsForASizingCallbackToStopBeforeReleasingItsWriter()
+            throws Exception
+    {
+        FakeClient client = new FakeClient();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        client.assessor = request -> {
+            entered.countDown();
+            while (true) {
+                try {
+                    release.await();
+                    return Optional.empty();
+                }
+                catch (InterruptedException ignored) {
+                    // Deliberately uncooperative host service; ownership must remain held.
+                }
+            }
+        };
+        var settings = config(client).shutdownTimeout(Duration.ofMillis(20)).contextBudget(new ContextBudget(0, false)).build();
+        ApiAgentDriver driver = new ApiAgentDriver(settings, connectorContext());
+        AgentSession session = driver.open(context(Optional.empty(), List.of(), allow()), event -> {});
+        RunningTurn turn = session.start(command("fresh"));
+        try {
+            assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+            turn.cancel();
+            assertThatThrownBy(driver::close).isInstanceOf(AgentUnavailableException.class);
+            assertThat(turn.completion().toCompletableFuture()).isNotDone();
+            assertThatThrownBy(() -> ApiSessionStore.open(directory.resolve("profile"), session.reference().providerValue(), true, settings))
+                    .isInstanceOf(AgentUnavailableException.class);
+        }
+        finally {
+            release.countDown();
+            assertThat(done(turn).state()).isEqualTo(AgentTurnResult.State.CANCELLED);
+            session.close();
+            driver.close();
+        }
+        assertThat(client.requests).isEmpty();
+    }
 
     @Test
     void auditPruningCommitsBeforeFreshInferenceAndExposesAnExplicitRetainedPrefix()
@@ -2901,6 +3158,8 @@ class TestApiAgentDriver
         final List<ModelCompactionRequest> compactions = new CopyOnWriteArrayList<>();
         java.util.function.Function<ModelCompactionRequest, Optional<ModelReplayState>> compactor;
         java.util.function.Function<ModelReplayState, Optional<ModelCompactionMemory>> memoryReader;
+        java.util.function.Function<ModelRequest, Optional<ModelContextAssessment>> assessor;
+        final List<ModelRequest> sizedRequests = new CopyOnWriteArrayList<>();
 
         @Override
         public ModelCapabilities capabilities(String model) { return new ModelCapabilities(true, Set.of("image/png"), Set.of("low", "high"), Set.of("standard")); }
@@ -2917,6 +3176,13 @@ class TestApiAgentDriver
 
         @Override
         public ProviderQuotaSnapshot quota() { return ProviderQuotaSnapshot.unavailable("Unavailable"); }
+
+        @Override
+        public Optional<ModelContextAssessment> contextBudget(ModelRequest request)
+        {
+            sizedRequests.add(request);
+            return assessor == null ? ModelClient.super.contextBudget(request) : assessor.apply(request);
+        }
 
         @Override
         public boolean supportsContextCompaction() { return summarySupport; }

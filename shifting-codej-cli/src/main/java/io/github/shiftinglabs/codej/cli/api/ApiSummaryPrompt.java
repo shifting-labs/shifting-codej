@@ -146,6 +146,28 @@ final class ApiSummaryPrompt
         return new Chunk(boundary == best ? text : encode(history, from, boundary, memory, maximumCharacters), boundary);
     }
 
+    /** Halve the candidate range while retaining at least the first indivisible complete group. */
+    static int smallerBoundary(ModelHistory history, int from, int through)
+    {
+        int cut = from + Math.max(1, (through - from) / 2);
+        while (cut > from && !completeBoundary(history, cut)) {
+            cut--;
+        }
+        if (cut == from) {
+            cut = from + 1;
+            while (cut < through && !completeBoundary(history, cut)) {
+                cut++;
+            }
+        }
+        return cut;
+    }
+
+    private static boolean completeBoundary(ModelHistory history, int boundary)
+    {
+        return history.exchanges().get(boundary - 1).toolCalls().isEmpty()
+                && (boundary == history.exchanges().size() || history.exchanges().get(boundary).input() instanceof ModelInput.UserMessage);
+    }
+
     static String encode(ModelHistory history, int prefix, int maximumCharacters) { return encode(history, 0, prefix, "", maximumCharacters); }
 
     private static String encode(ModelHistory history, int from, int through, String memory, int maximumCharacters)

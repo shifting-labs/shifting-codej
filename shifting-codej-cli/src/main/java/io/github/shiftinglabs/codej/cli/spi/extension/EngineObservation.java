@@ -15,6 +15,7 @@ package io.github.shiftinglabs.codej.cli.spi.extension;
 
 import io.github.shiftinglabs.codej.cli.driver.AgentTurnResult;
 import io.github.shiftinglabs.codej.cli.driver.ProviderUsageSample;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextAssessment;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 
 import java.time.Duration;
@@ -119,6 +120,24 @@ public interface EngineObservation
             checkArgument(removedExchanges >= 0 && removedJournalEntries >= 0 && deletedAttachments >= 0, "invalid audit pruning counts");
         }
     }
+
+    /** Local preflight metadata; UNKNOWN is explicit and no projected content enters observations. */
+    record ContextAssessed(String turnId, String requestId, Optional<ModelContextAssessment> assessment,
+            int reservedOutputTokens, long safetyMarginTokens, ContextDecision decision)
+            implements EngineObservation
+    {
+        public ContextAssessed
+        {
+            checkText(turnId, "turnId");
+            checkText(requestId, "requestId");
+            requireNonNull(assessment, "assessment is null");
+            requireNonNull(decision, "decision is null");
+            checkArgument(reservedOutputTokens > 0 && safetyMarginTokens >= 0, "invalid context reservation");
+            checkArgument(assessment.isPresent() == (decision == ContextDecision.FIT || decision == ContextDecision.OVER_LIMIT), "invalid assessment decision");
+        }
+    }
+
+    enum ContextDecision { FIT, OVER_LIMIT, UNKNOWN_ALLOWED, UNKNOWN_REJECTED }
 
     enum Admission
     {
