@@ -1,6 +1,6 @@
 # Bounded command-tree execution
 
-Status: pure-Java host-backend integration implemented and verified; native enforcement remains a separate follow-up.
+Status: host-backend integration and opt-in built-in Linux backend implemented. Portable lifecycle tests pass; real Linux enforcement remains an explicit acceptance gate.
 Extends [tool resources](tool-spi.md) and [shared tool budgets](tool-scheduling.md).
 
 ## Compatibility and scope
@@ -111,12 +111,12 @@ compatibility and final-stage evidence follow below.
 
 ## Follow-up native enforcement
 
-- [ ] Implement a platform backend only when it can enforce the declared bounds and prove shutdown;
-      keep it optional and prefer JDK facilities where they supply the required guarantee.
+- [x] Implement an opt-in Linux backend using existing OS enforcement, with actual kernel checks before releasing a command.
+- [ ] Add another platform backend only when it can enforce every bound and prove shutdown.
 - [ ] Run that backend's real OS containment and crash-recovery tests separately from scripted contract tests.
 
-The current delivery is the Java integration framework and host-backend contract. It does not bundle
-a new native command-tree runtime or claim real OS enforcement from fake-backend tests.
+The contract milestone above delivered the Java integration framework and host-backend contract.
+The built-in implementation below adds an existing-OS backend; fake-service tests do not establish real OS enforcement.
 
 
 ## Host-backend integration validation
@@ -155,3 +155,138 @@ provider CLIs, broad/Bytequay suites, native builds or simulators ran. The exist
 single-process coding-tool checks remain part of compatibility verification. Scripted backend
 success does not establish real OS containment, hard resource enforcement or crash recovery for
 an application backend; those remain explicit backend responsibilities and require native tests.
+
+
+## Built-in Linux backend (no Docker)
+
+`BuiltinCommands.configuration(limits)` supplies the existing provider factory. An overload accepts
+`CodingTools` solely to bound workspace export: maximum individual file bytes, aggregate search
+bytes, visited entries and depth. Model requests/results, `CommandLimits`, existing facades,
+`ToolProvider`, process SPI, checkpoints and `shell_command` retain their previous shapes/behavior.
+Installation stays explicit and uses the same borrowed engine admission service:
+
+```java
+var commands = BuiltinCommands.configuration(CommandLimits.defaults());
+var builder = ClaudeApi.builder()
+        .toolExecutionBudget(ToolExecutionBudget.bounded(1))
+        .toolProvider(new CommandToolProvider(), commands);
+// DeepSeekApi uses exactly the same configuration and provider.
+```
+
+There is no Docker, downloaded runtime, JNI/native library, new Maven dependency, shell wrapper,
+external Java service or extra worker pool. Java handles typed framing, filesystem export,
+controller lifecycle, output and recovery. **OS prerequisites remain explicit**: Linux, existing
+`/usr/bin/systemd-run` and `systemctl`, a functioning non-root systemd user manager, systemd 257+
+private-PID support, unprivileged user namespaces and delegated cgroup v2 CPU/memory/PID controllers.
+The current JRE and standard Linux binaries/libraries are mounted read-only. A nonstandard JRE path
+containing service-property metacharacters is rejected. macOS, Windows, non-systemd Linux, missing
+permissions/features/controllers and unverifiable observations fail closed before model argv is
+released. There is no automatic installation or silent fallback. Small PID/memory settings may be
+insufficient for the trusted launcher JVM, whose overhead is included in the hard limits.
+
+### Isolation and launch gate
+
+- Export the dedicated workspace through descriptor-relative no-follow reads to a private,
+  bounded snapshot. Omit protected metadata, configured profile/runtime directories, this
+  invocation's artifacts, symlinks, multiply linked files and special files. A snapshot can
+  coexist with the existing coding-resource lease. File edits still use the existing patch tool.
+  The snapshot is bounded and race-checked per file; it is not an atomic multi-file filesystem snapshot.
+- Start one transient **user service** with read-only root/workspace/runtime, private user/PID,
+  mount, IPC, device and network namespaces, empty capabilities, `NoNewPrivileges`, seccomp,
+  cgroup quotas, no swap, runtime deadline and control-group termination. Only private `/tmp`
+  is writable; tmpfs size bounds scratch and memory quotas include tmpfs pages. Host home,
+  credentials, profile/runtime state, user bus and host workspace paths are absent from the root.
+- The JRE-only launcher emits a nonce-bound readiness header and waits for input. While gated,
+  inspect both the identified unit and the actual process: root inode, distinct namespaces,
+  privilege flags/capabilities, read-only mounts, tmpfs quota and actual `cpu.max`, `memory.max`,
+  `memory.swap.max` and `pids.max`. Unit configuration alone cannot substitute for kernel proof;
+  systemd can ignore unsupported features. Unsupported or incomplete proof closes the gate.
+- Deliver a bounded typed binary request over stdin only after validation. Persist release
+  intent, then send a separate commit byte and EOF. Missing/truncated/malformed requests, wrong
+  nonce, invalid UTF-8, trailing bytes or missing commit cannot start a payload. Model argv never
+  appears in systemd arguments or recovery files, so `$`/`%` and quoting remain literal. The
+  helper clears the environment again before `ProcessBuilder` starts the command.
+
+A single virtual worker belongs to each admitted invocation. Output is independently byte-bounded
+per stream and the readiness header is removed. No future cancellation can cancel the private
+owner completion. Cancellation/deadline closes the input gate and stops the service. A terminal
+result still requires inactive/absent owned unit, zero main PID, empty saved cgroup and verified
+controller shutdown before capacity can be released. Root exit/descendant polling is never proof.
+`stopAfterWorkFinished` is used only after authoritative unit/cgroup shutdown, or for a completed,
+trusted metadata controller. An unacknowledged creation with no observable unit remains uncertain;
+a missing unit alone cannot disprove a late queued creation. Unknown work retains ownership and
+cleanup can be retried; an uncertain outcome cannot be acknowledged as completed.
+
+### Private ownership and recovery
+
+Every service/controller intent is fsynced before start. Private version-1 typed records live in
+`profile/native-command-state/<owner-uuid>/`; a file lock fences each live backend. Records contain
+only opaque unit/launch identities, boot identity, artifact file identity and lifecycle facts,
+with bounded scans/decoding and atomic replacements. They contain no argv, environment values,
+model messages or tool output. Engine checkpoint schemas remain unchanged.
+
+Opening a backend skips locked owners and reconciles abandoned intents. On the same boot it
+recovers metadata controllers, stops the owned unit and checks the cgroup before cleaning artifacts.
+A different boot cannot signal recycled PIDs or unit identities. Cleanup checks the private temp
+root's parent and file identity and never follows links. Stopped crash receipts and uncommitted
+main launch markers remain private evidence: recovery never invents a result or permits tool replay.
+Normal `committed()` removes artifacts/receipt and acknowledges the launch only after the engine
+has durably stored the outcome. Successful close is idempotent; an unverified close is retryable.
+A large unreconciled crash archive fails with a bounded-reconciliation error rather than scanning
+without limit. Administrative reconciliation/retention of those receipts is a later operational feature.
+
+### Built-in checklist
+
+- [x] Add the opt-in factory through the existing provider and shared budget, without dependencies.
+- [x] Add bounded workspace export, typed JRE-only launch framing and kernel-validation gate.
+- [x] Add OS cgroup/namespace configuration, bounded output, cancellation and verified shutdown.
+- [x] Persist ownership before effects and retain uncertain crash outcomes without replay.
+- [x] Cover framing, quotas, mounts, protected paths, lifecycle, retries and abandoned ownership with fakes.
+- [x] Add explicit Linux acceptance tests for real child processes, read-only files, scratch, output and shutdown.
+- [ ] Run Linux acceptance on a prepared systemd host, including network, namespace-escape, quota exhaustion and crash injection.
+- [ ] Add portable hard-containment implementations for other platforms only with equivalent enforcement.
+
+Linux acceptance is intentionally opt-in:
+
+```sh
+# Prepared non-root Linux host; run only this suite, serially.
+mvn -o -T1 -pl shifting-codej-cli -am -Dtest=TestLinuxNativeCommands \
+  -Dsurefire.failIfNoSpecifiedTests=false -Dcodej.test.nativeCommands=true \
+  -Dcodej.test.forks=1 -Djunit.jupiter.execution.parallel.enabled=false test
+```
+
+This acceptance target fails if the advertised isolation is unavailable; it never accepts fake or
+weaker execution. The two real-Linux cases are skipped on this macOS development host. Broader
+Linux security/crash acceptance is still required before calling this backend production-validated.
+
+Primary OS references: [execution isolation](https://www.freedesktop.org/software/systemd/man/258/systemd.exec.html),
+[cgroup resource control](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html),
+and [transient service launching](https://www.freedesktop.org/software/systemd/man/258/systemd-run.html).
+
+
+### Built-in validation evidence — 2026-11-15
+
+The isolated snapshot based on `d0b252c` passed **79 distinct focused Java cases**, zero
+failures/errors: 71 CLI command/workspace/resource cases and eight fake-HTTP command integration
+cases through the existing public Claude/DeepSeek facades. Two explicit Linux-only acceptance
+cases were skipped on this macOS host. After the final shutdown-identity correction, the 20
+affected framing/registry/backend cases and eight facade cases passed again; unchanged focused
+results were reused. The backend fixture also exports its two-class launcher jar and runs it in
+a constrained JRE-only child: EOF rejects execution with the fixed failure status, with no
+application classpath or payload. The child is waited for and terminated in test cleanup.
+
+Checkstyle, licenses, strict Javadocs, sources and publish-profile shaded packaging passed.
+The final shaded artifact passed the published `0.164.0-1` descriptor/shape/shading/checksum gate
+and all existing packaged JDK-only consumers. A separate comparison against `d0b252c`'s verified
+artifact checked **148 existing engine/tool/SPI/SDK types**: every descriptor, record component,
+enum value/order and sealed shape is identical, with no additions to an existing interface.
+Only the new built-in factory and internal implementation are added.
+
+Final shaded artifact SHA-256: `db9b611824ecd091e3d2d13eec9d23c761165bb9c2bb4172e6bf614fa742cfec`.
+
+Maven ran offline, serially, at low priority, with one active CPU, one test fork, a 512 MiB heap,
+SerialGC and JUnit parallel execution disabled. No POM/dependency file changed. All four unrelated
+Claude CLI edits were excluded from the tested snapshot and verified byte-for-byte unchanged.
+No agents, Docker, downloads, live inference, provider CLIs, broad/stress or Bytequay suites,
+Xcode builds or simulators ran. The Linux enforcement and crash-injection acceptance gate remains
+open; fake-service tests and this macOS JRE smoke test do not prove real Linux containment.

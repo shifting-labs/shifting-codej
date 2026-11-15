@@ -585,3 +585,13 @@ Validation used one CPU, a 512 MiB heap, serial GC, low priority, one test fork 
 parallelism in an isolated snapshot excluding the four unrelated Claude CLI edits. No agents,
 broad/stress or Bytequay suites, live model calls, provider CLI, Xcode build or simulator ran.
 New logical tool features and hot replacement remain separate stages.
+
+
+## Built-in command resource
+
+`BuiltinCommands.configuration(CommandLimits)` now supplies an opt-in factory for the existing
+`CommandToolProvider` SPI. Both direct API facades reuse it without new builder/SPI methods.
+The implementation uses Java plus an existing Linux systemd user manager and cgroup/namespace
+enforcement; no Docker or Maven dependency is added. Unsupported hosts fail before releasing
+model argv. See [command execution](command-execution.md) for prerequisites, ownership, typed
+launch framing, kernel checks, workspace export and the separately gated Linux acceptance tests.

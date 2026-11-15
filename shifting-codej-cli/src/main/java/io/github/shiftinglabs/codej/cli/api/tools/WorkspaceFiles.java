@@ -79,6 +79,19 @@ final class WorkspaceFiles
     WorkspaceFiles(Path worktree, CodingTools limits, boolean writable, List<Path> excluded)
             throws IOException
     {
+        this(worktree, limits, writable, excluded, true);
+    }
+
+    /** Read-only export can coexist with a session's coding lease; every read still checks containment. */
+    static WorkspaceFiles snapshotSource(Path worktree, CodingTools limits, List<Path> excluded)
+            throws IOException
+    {
+        return new WorkspaceFiles(worktree, limits, false, excluded, false);
+    }
+
+    private WorkspaceFiles(Path worktree, CodingTools limits, boolean writable, List<Path> excluded, boolean lease)
+            throws IOException
+    {
         this.root = worktree.toRealPath();
         this.limits = limits;
         this.writable = writable;
@@ -93,6 +106,17 @@ final class WorkspaceFiles
         rootKey = Files.readAttributes(root, BasicFileAttributes.class, NOFOLLOW_LINKS).fileKey();
         if (rootKey == null) {
             throw new CodingToolException("UNSUPPORTED_FILESYSTEM", "Stable filesystem identities are required");
+        }
+        if (!lease) {
+            DirectoryStream<Path> opened = Files.newDirectoryStream(root);
+            if (!(opened instanceof SecureDirectoryStream<Path> secure)) {
+                opened.close();
+                throw new CodingToolException("UNSUPPORTED_FILESYSTEM", "Descriptor-relative workspace access is required");
+            }
+            directory = secure;
+            lock = null;
+            lockChannel = null;
+            return;
         }
         Path locks = Path.of(System.getProperty("java.io.tmpdir")).toRealPath().resolve("codej-workspace-locks");
         try {
@@ -201,6 +225,51 @@ final class WorkspaceFiles
     }
 
     Path root() { return root; }
+
+    /** Exports ordinary files into a fresh private directory. This is not a multi-file transaction. */
+    void snapshot(Path destination, ToolExecutionContext context)
+            throws IOException
+    {
+        context.checkActive();
+        verifyRoot();
+        long[] copied = new long[1];
+        boolean complete = walk(Path.of("."), new int[1], (relative, parent, attrs) -> {
+            context.checkActive();
+            if (denied(relative) || attrs.isSymbolicLink() || (!attrs.isDirectory() && !attrs.isRegularFile())) {
+                return true;
+            }
+            Path target = destination.resolve(relative);
+            if (attrs.isDirectory()) {
+                Files.createDirectory(target, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+            }
+            else {
+                try {
+                    identity(parent, relative);
+                }
+                catch (CodingToolException denied) {
+                    if (denied.failure().code().equals("PATH_DENIED")) {
+                        return true;
+                    }
+                    throw denied;
+                }
+                if (attrs.size() > limits.maximumSearchBytes() - copied[0]) {
+                    throw new CodingToolException("FILE_LIMIT", "Command workspace snapshot exceeds its byte budget");
+                }
+                byte[] content = bytes(parent, relative);
+                if (content.length > limits.maximumSearchBytes() - copied[0]) {
+                    throw new CodingToolException("FILE_LIMIT", "Command workspace snapshot exceeds its byte budget");
+                }
+                Files.write(target, content, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, NOFOLLOW_LINKS);
+                Files.setPosixFilePermissions(target, PosixFilePermissions.fromString(Files.isExecutable(root.resolve(relative)) ? "r-x------" : "r--------"));
+                copied[0] += content.length;
+            }
+            return true;
+        });
+        if (!complete) {
+            throw new CodingToolException("ENTRY_LIMIT", "Command workspace snapshot exceeds its entry budget");
+        }
+        verifyRoot();
+    }
 
     void verifyRoot()
             throws IOException
@@ -637,7 +706,9 @@ final class WorkspaceFiles
             throws IOException
     {
         directory.close();
-        lock.release();
-        lockChannel.close();
+        if (lock != null) {
+            lock.release();
+            lockChannel.close();
+        }
     }
 }

@@ -368,6 +368,8 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 - [x] Add opt-in summary-backed audit retention and post-commit staged-attachment cleanup.
 - [x] Add optional provider-aware input sizing and pre-submission context budgets.
 - [x] Add pure-Java registration and lifecycle contracts for host-supplied bounded commands; see [command execution](command-execution.md).
+- [x] Add an opt-in built-in Linux/systemd command-tree backend without Docker or new Maven dependencies.
+- [ ] Validate that backend on a prepared Linux host; other platforms continue to fail closed.
 - [ ] Evaluate provider-hosted tools and separate connector artifacts as needed.
 
 ## Second direct provider: DeepSeek
