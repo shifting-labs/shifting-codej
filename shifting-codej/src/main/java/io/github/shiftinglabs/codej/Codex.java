@@ -38,7 +38,7 @@ import static com.google.common.base.Preconditions.checkState;
 public final class Codex
 {
     /** The Codex release this library is built and tested against. */
-    public static final String VERSION = "0.164.0";
+    public static final String VERSION = "0.169.0";
 
     private Codex() {}
 
@@ -211,7 +211,7 @@ public final class Codex
 
         /**
          * Builds the agent. Starts no process. Without {@link #executable(Path)}, the first build on this Mac downloads OpenAI's
-         * Codex {@link #VERSION}, about 120 MB, from npm: from {@code https://registry.npmjs.org/}, or from the mirror the system
+         * Codex {@link #VERSION}, about 150 MB, from npm: from {@code https://registry.npmjs.org/}, or from the mirror the system
          * property {@code codej.codex.registry} or the environment variable {@code CODEJ_CODEX_REGISTRY} names. The download must
          * match the SHA-512 and file checksums this library records. It is kept in {@code ~/Library/Caches/shifting-codej/codex},
          * so later builds reuse it without a request; a release no build has used for thirty days is deleted. When the download

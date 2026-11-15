@@ -40,10 +40,10 @@ class TestBuilders
     void codexStatusReadsTheCliItRuns()
             throws IOException
     {
-        try (Agent codex = Codex.builder().executable(codex("0.164.0")).stateDirectory(folder.resolve("state")).build()) {
+        try (Agent codex = Codex.builder().executable(codex(Codex.VERSION)).stateDirectory(folder.resolve("state")).build()) {
             AgentStatus status = codex.status();
             assertThat(status.readiness()).as(status.detail()).isEqualTo(AgentStatus.Readiness.READY);
-            assertThat(status.version()).contains("0.164.0");
+            assertThat(status.version()).contains(Codex.VERSION);
             assertThat(status.capabilities().steering()).isTrue();
         }
         try (Agent old = Codex.builder().executable(codex("0.100.0")).stateDirectory(folder.resolve("state")).build()) {
@@ -60,10 +60,10 @@ class TestBuilders
     void codexNotesANewerExecutableIsUntested()
             throws IOException
     {
-        try (Agent codex = Codex.builder().executable(codex("0.170.0")).stateDirectory(folder.resolve("state")).build()) {
+        try (Agent codex = Codex.builder().executable(codex("99.0.0")).stateDirectory(folder.resolve("state")).build()) {
             AgentStatus status = codex.status();
             assertThat(status.readiness()).isEqualTo(AgentStatus.Readiness.READY);
-            assertThat(status.detail()).endsWith("This library is tested with Codex " + Codex.VERSION + "; 0.170.0 is newer and untested.");
+            assertThat(status.detail()).endsWith("This library is tested with Codex " + Codex.VERSION + "; 99.0.0 is newer and untested.");
         }
     }
 

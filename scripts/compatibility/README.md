@@ -6,7 +6,7 @@ built with the existing `publish` profile. No additional Python or Maven depende
 
 ```sh
 python3 scripts/check-compatibility.py \
-  --candidate /absolute/path/to/shifting-codej-0.164.0-1-SNAPSHOT.jar \
+  --candidate /absolute/path/to/shifting-codej-0.169.0-1-SNAPSHOT.jar \
   --output /tmp/codej-compat-final
 ```
 
@@ -22,9 +22,9 @@ The check inventories classes from the **baseline**, so new SPI types are additi
   the legacy `cli.driver` package, and `ToolServer` exposed by the builders.
 - Record component names/order/types, enum values/order, sealed status and permitted subclass names,
   and public runtime constants.
-- Relocated Jackson/Guava sentinel classes, and absence of unrelocated `com/google` or `com/fasterxml`
-  class entries (including multi-release entries), to catch unshaded dependency collisions.
-- Exact bytes at `io/github/shiftinglabs/codej/sdk/impl/codex-checksums.properties`, relative
+- Relocated Jackson/Guava sentinel classes, and absence of any class entries outside
+  `io/github/shiftinglabs/codej/` (including multi-release entries), matching the CI packaging gate.
+- Exact reviewed bytes at `io/github/shiftinglabs/codej/sdk/impl/codex-checksums.properties`, relative
   resource lookup from `CodexBinary`, archive/file checksum forms, and the existing release-version
   convention using the runtime `Codex.VERSION` field rather than its inlined value.
 - A legacy driver/session/turn implementation and public builder calls compiled **once against
@@ -44,6 +44,14 @@ new declaration/descriptor is filtered before comparison; all published members 
 exactly. Full candidate snapshots remain in `*-candidate-full.txt`. Controls prove that changed
 or removed existing members and unreviewed additions still fail. The named factory preserves
 source compatibility for existing `Tool.of(..., null, ...)` calls.
+
+The Codex pin exception permits only `Codex.VERSION` and its exact checksum resource to change
+to a reviewed pair in `CODEX_CHECKSUMS` in the checker. The version field keeps its declaration and descriptor;
+only its reviewed value is normalized to the baseline for signature and runtime comparisons.
+Every other constant still compares exactly. The checker records both resource hashes and the
+candidate's actual Codex version, and preserves unnormalized candidate snapshots as evidence.
+An unknown version, changed checksum bytes, moved resource or changed version-field declaration
+fails the gate. Verify a new resource with `scripts/codex-checksums.mjs` before recording its hash.
 
 When the candidate contains direct API facades, the checker also runs separate JDK-only HTTP
 fixtures for `ClaudeApi` and `DeepSeekApi`. These verify each protocol's tool continuation and
@@ -113,7 +121,9 @@ python3 scripts/compatibility/test_checker.py
 
 These standard-library tests cover descriptor mismatches, missing relocation sentinels, unrelocated
 dependency entries, the exact reviewed additive-member boundary, and an added sealed subtype
-that `javap -protected -s -constants` cannot see.
+that `javap -protected -s -constants` cannot see. They also verify that Codex pin normalization
+accepts only an explicitly reviewed version and exact resource bytes, preserving all other
+declarations, descriptors and runtime constants.
 The sealed control uses the cached baseline and JDK, with all compilation in temporary directories.
 
 Run the published jar as both baseline and candidate to test the checker/fixture independently of

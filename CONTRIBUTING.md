@@ -196,9 +196,9 @@ committing changes to shared HTTP behavior. No new dependency is needed by the D
 
 A release is `<Codex.VERSION>-<N>`:
 
-- `0.164.0-1` is the first release on Codex 0.164.0, and `0.164.0-2` a codej fix on the same Codex.
-- `0.164.0-1-rc1` is a release candidate.
-- There is never a plain `0.164.0`, which Maven would sort before the candidates.
+- `0.169.0-1` is the first release on Codex 0.169.0, and `0.169.0-2` a codej fix on the same Codex.
+- `0.169.0-1-rc1` is a release candidate.
+- There is never a plain `0.169.0`, which Maven would sort before the candidates.
 
 `TestVersion` fails the build when the version breaks this rule. The version cannot signal an API
 break, so an intended one is deprecated first and removed no sooner than two releases later, with

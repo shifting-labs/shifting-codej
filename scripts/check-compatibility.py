@@ -18,6 +18,12 @@ import zipfile
 PREFIX = "io/github/shiftinglabs/codej/"
 CHECKSUMS = PREFIX + "sdk/impl/codex-checksums.properties"
 BASE_VERSION = "0.164.0-1"
+BASE_CODEX_VERSION = "0.164.0"
+# Only reviewed runtime pins may change the version constant and download resource.
+CODEX_CHECKSUMS = {
+    "0.164.0": "3efc76605c40eb62fc34a805658319fba9448d85862fb08616bb0b1d2bc8cdc7",
+    "0.169.0": "0203a6692384a97dded1cc1267553c42c3d15ad040e4df0d7d7f5362d15182ce",
+}
 
 
 def run(command):
@@ -69,11 +75,42 @@ def published_surface(group, text):
     return text
 
 
+def codex_version(jar):
+    declaration = run([jdk_tool("javap"), "-constants", "-classpath", str(jar), "io.github.shiftinglabs.codej.Codex"])
+    version = re.search(r'^  public static final java\.lang\.String VERSION = "([^"]+)";$', declaration, re.MULTILINE)
+    if not version or version.group(1) not in CODEX_CHECKSUMS:
+        raise RuntimeError("Unreviewed Codex version constant")
+    return version.group(1)
+
+
+def check_codex_checksums(data, version):
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != CODEX_CHECKSUMS.get(version):
+        raise RuntimeError(f"Codex {version} checksum resource does not match the reviewed pin")
+    return digest
+
+
+def normalize_codex_version(group, text, version):
+    if version not in CODEX_CHECKSUMS:
+        raise RuntimeError("Unreviewed Codex version constant")
+    if group == "public-api":
+        prefix = "public final class io.github.shiftinglabs.codej.Codex {\n  public static final java.lang.String VERSION = "
+        before, after = prefix + f'"{version}";', prefix + f'"{BASE_CODEX_VERSION}";'
+    elif group == "records-enums-runtime-constants":
+        prefix = "io.github.shiftinglabs.codej.Codex.VERSION="
+        before, after = prefix + version + "\n", prefix + BASE_CODEX_VERSION + "\n"
+    else:
+        return text
+    if text.count(before) != 1:
+        raise RuntimeError("Codex version declaration changed or missing")
+    return text.replace(before, after)
+
+
 def check_shading(names):
     for sentinel in ("internal/jackson/databind/ObjectMapper.class", "internal/google/common/base/Preconditions.class"):
         if PREFIX + sentinel not in names:
             raise RuntimeError(f"Missing relocated dependency class: {PREFIX + sentinel}")
-    unrelocated = sorted(n for n in names if re.match(r"^(?:META-INF/versions/\d+/)?com/(google|fasterxml)/.*\.class$", n))
+    unrelocated = sorted(n for n in names if n.endswith(".class") and not n.startswith(PREFIX))
     if unrelocated:
         raise RuntimeError(f"Unrelocated dependency classes in candidate: {unrelocated[:5]}")
 
@@ -85,7 +122,7 @@ def verify(args, report):
                   baseline_sha256=sha256(baseline), candidate_sha256=sha256(candidate))
     with zipfile.ZipFile(baseline) as old, zipfile.ZipFile(candidate) as new:
         check_shading(new.namelist())
-        report["passed"].append("relocated Jackson/Guava sentinels; no unrelocated dependency classes")
+        report["passed"].append("relocated Jackson/Guava sentinels; all classes under the SDK package")
         names = old.namelist()
         groups = {
             "public-api": sorted(n[:-6].replace("/", ".") for n in names
@@ -96,10 +133,14 @@ def verify(args, report):
         }
         if not all(groups.values()):
             raise RuntimeError("Baseline is missing the expected compatibility surface")
+        old_codex, new_codex = codex_version(baseline), codex_version(candidate)
+        if old_codex != BASE_CODEX_VERSION:
+            raise RuntimeError("Baseline has an unexpected Codex version")
         # Bytequay reads this exact path directly from the shaded artifact.
-        if old.read(CHECKSUMS) != new.read(CHECKSUMS):
-            raise RuntimeError("Codex checksum resource changed or moved")
-        report["passed"].append("exact Codex checksum resource bytes/path")
+        report["baseline_codex_checksums_sha256"] = check_codex_checksums(old.read(CHECKSUMS), old_codex)
+        report["candidate_codex_checksums_sha256"] = check_codex_checksums(new.read(CHECKSUMS), new_codex)
+        report["candidate_codex_version"] = new_codex
+        report["passed"].append("exact reviewed Codex version/checksum resource bytes/path")
         manifest = new.read("META-INF/MANIFEST.MF").decode().replace("\r\n ", "")
         version = re.search(r"^Implementation-Version: (.+)$", manifest, re.MULTILINE)
         if not version:
@@ -113,7 +154,7 @@ def verify(args, report):
             before = run(options + ["-classpath", str(baseline), *classes])
             after = run(options + ["-classpath", str(candidate), *classes])
             (output / f"{group}-candidate-full.txt").write_text(after)
-            compare(output, group, before, published_surface(group, after))
+            compare(output, group, before, normalize_codex_version(group, published_surface(group, after), new_codex))
             report["passed"].append(f"{group}: {len(classes)} class signatures/constructors/constants")
 
     fixture = Path(__file__).parent / "compatibility" / "LegacyConsumer.java"
@@ -129,8 +170,10 @@ def verify(args, report):
                         "LegacyConsumer", *arguments])
 
         inventory = sorted({name for group in groups.values() for name in group})
-        compare(output, "records-enums-runtime-constants",
-                consumer(baseline, "surface", *inventory), consumer(candidate, "surface", *inventory))
+        runtime_surface = consumer(candidate, "surface", *inventory)
+        (output / "records-enums-runtime-constants-candidate-full.txt").write_text(runtime_surface)
+        compare(output, "records-enums-runtime-constants", consumer(baseline, "surface", *inventory),
+                normalize_codex_version("records-enums-runtime-constants", runtime_surface, new_codex))
         report["passed"].append("record components, enum order, sealed status/permitted subclasses, runtime constants")
         for label, jar in (("baseline", baseline), ("candidate", candidate)):
             state = Path(folder) / label

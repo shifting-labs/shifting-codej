@@ -1490,9 +1490,15 @@ class TestCodexCliDriver
                 "permissions":{"network":{"enabled":true}},
                 "startedAtMs":1786884871468,"threadId":"thread-1","turnId":"%s"}}
                 """.formatted(server.activeTurn));
+        // The client does not advertise requiredHumanApproval; an unexpected checkpoint cannot use automatic approval.
+        server.emit("""
+                {"id":105,"method":"item/commandExecution/requestApproval","params":{
+                "command":"echo checkpoint","itemId":"exec-human","kind":"humanCommand",
+                "startedAtMs":1786884871469,"threadId":"thread-1","turnId":"%s"}}
+                """.formatted(server.activeTurn));
 
         // Every response is written on the dispatch thread, so wait for all before asserting.
-        List<Long> rejected = ImmutableList.of(92L, 94L, 95L, 97L, 102L);
+        List<Long> rejected = ImmutableList.of(92L, 94L, 95L, 97L, 102L, 105L);
         List<Long> approved = ImmutableList.of(93L, 96L, 99L, 100L, 103L, 104L);
         awaitCondition(() -> rejected.stream().allMatch(id -> server.error(id) != null)
                 && approved.stream().allMatch(id -> server.result(id) != null));
@@ -1500,6 +1506,7 @@ class TestCodexCliDriver
         assertThat(server.error(94).path("message").asText()).contains("no active thread");
         assertThat(server.error(95).path("message").asText()).contains("no active thread");
         assertThat(server.error(97).path("message").asText()).contains("approval kind");
+        assertThat(server.error(105).path("message").asText()).contains("approval kind");
         // A question with nothing to choose from shows no card; the agent goes on without an answer.
         assertThat(server.result(103).path("answers")).isEqualTo(objectMapper.createObjectNode());
         assertThat(server.error(102).path("message").asText()).contains("blank write root");
