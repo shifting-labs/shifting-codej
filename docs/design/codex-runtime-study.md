@@ -207,8 +207,8 @@ Source:
 - [x] Adapt the selected behavior into focused fake-client/store tests for engine validation.
 - [x] Implement the session/store, text loop, host-tool dispatch and execution receipts behind existing interfaces.
 - [x] Complete focused verification: 92 selected engine/store/SPI/connector cases passed; results are recorded in the main plan.
-- [ ] Implement the Anthropic adapter and public facade.
-- [ ] Add a second native provider adapter to exercise provider independence.
+- [x] Implement the Anthropic adapter and public facade; see [direct API connectors](direct-api-connectors.md).
+- [x] Add the direct DeepSeek adapter to exercise provider independence; see [direct API connectors](direct-api-connectors.md).
 
 Initial test scenarios to adapt from the reviewed behavior:
 

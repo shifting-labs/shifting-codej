@@ -1196,7 +1196,7 @@ final class CodexProtocol
      *
      * <p>Declared true for exactly one reason: {@code thread/backgroundTerminals/list} is
      * experimental, and it is the only inventory that can prove a thread owns no live process.
-     * Measured against codex-cli 0.164.0, the only experimental methods this client calls are
+     * Measured against codex-cli 0.169.0, the only experimental methods this client calls are
      * that one and its {@code terminate} sibling; every other method the SDK calls answers
      * either way.
      */

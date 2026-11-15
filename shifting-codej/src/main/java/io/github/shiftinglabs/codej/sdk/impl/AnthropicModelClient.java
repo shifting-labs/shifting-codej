@@ -25,6 +25,7 @@ import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.RawMessageStreamEvent;
 import com.anthropic.models.models.ModelListParams;
 import com.anthropic.models.models.ModelRetrieveParams;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -41,6 +42,9 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextAssessment;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
@@ -170,6 +174,84 @@ public final class AnthropicModelClient
         }
     }
 
+    private record SummaryText(String type, String text)
+    {
+        SummaryText
+        {
+            if (!"text".equals(type)) {
+                throw invalid("Invalid summary content type");
+            }
+            requireNonNull(text, "text is null");
+        }
+    }
+
+    private record SummaryMessage(String role, List<SummaryText> content)
+    {
+        SummaryMessage
+        {
+            if (!"user".equals(role)) {
+                throw invalid("Invalid summary role");
+            }
+            content = List.copyOf(content);
+        }
+    }
+
+    @Override
+    public Optional<ModelContextAssessment> contextBudget(ModelRequest request)
+    {
+        requireNonNull(request, "request is null");
+        requireOpen();
+        capabilities(request.model());
+        return ContextSizing.assess(config.contextSizer, "anthropic", request, () -> {
+            try {
+                return JSON.writeValueAsString(inputBody(request, history(request)));
+            }
+            catch (IOException failure) {
+                throw invalid("Context input could not be read");
+            }
+        });
+    }
+
+    @Override
+    public boolean supportsContextCompaction() { return true; }
+
+    @Override
+    public Optional<ModelCompactionMemory> compactionMemory(ModelReplayState replay)
+    {
+        requireOpen();
+        return ContextReplay.memory(replay, "anthropic", this::summaryText);
+    }
+
+    private String summaryText(JsonNode node)
+    {
+        try {
+            SummaryMessage message = JSON.treeToValue(node, SummaryMessage.class);
+            if (message.content().size() != 1) {
+                throw invalid("Invalid summary message");
+            }
+            return message.content().getFirst().text();
+        }
+        catch (IOException | IllegalArgumentException failure) {
+            throw invalid("Invalid summary message");
+        }
+    }
+
+    @Override
+    public Optional<ModelReplayState> compact(ModelCompactionRequest request)
+    {
+        requireNonNull(request, "request is null");
+        requireOpen();
+        capabilities(request.model());
+        ArrayNode messages = history(ContextReplay.nativeReplay(request.replay()), true);
+        String text = ContextReplay.SUMMARY_PREFIX + request.compaction().summary();
+        ModelReplayState compacted = ContextReplay.compact(request, messages, JSON.valueToTree(new SummaryMessage("user", List.of(new SummaryText("text", text)))),
+                exchange -> 2);
+        if (!redactor().redact(compacted.payload()).equals(compacted.payload())) {
+            throw invalid("Compaction summary contains a known credential");
+        }
+        return Optional.of(compacted);
+    }
+
     @Override
     public ModelCall generate(ModelRequest request, ModelEventSink events)
     {
@@ -200,13 +282,19 @@ public final class AnthropicModelClient
         if (request.replayState().isEmpty()) {
             return JSON.createArrayNode();
         }
-        ModelReplayState state = request.replayState().orElseThrow();
+        return history(ContextReplay.nativeReplay(request.replayState().orElseThrow()));
+    }
+
+    private ArrayNode history(ModelReplayState state) { return history(state, false); }
+
+    private ArrayNode history(ModelReplayState state, boolean compacting)
+    {
         if (!state.providerId().equals("anthropic") || state.formatVersion() != 1 || state.payload().length() > MAX_REPLAY) {
             throw invalid("Foreign, incompatible or oversized Claude replay");
         }
         try {
             JsonNode root = JSON.readTree(state.payload());
-            if (root == null || !root.isObject() || !root.path("messages").isArray()) {
+            if (root == null || !root.isObject() || (compacting && root.size() != 1) || !root.path("messages").isArray()) {
                 throw invalid("Invalid Claude replay");
             }
             ArrayNode messages = (ArrayNode) root.path("messages");
@@ -240,6 +328,42 @@ public final class AnthropicModelClient
         else if (!pending.isEmpty()) {
             throw invalid("Pending Claude tool results must be supplied before new user input");
         }
+    }
+
+    private record ContextTool(String name, String description, JsonNode input_schema)
+    {
+        ContextTool
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(description, "description is null");
+            requireNonNull(input_schema, "schema is null");
+        }
+    }
+
+    private record InputBody(List<JsonNode> messages, String system, @JsonInclude(JsonInclude.Include.NON_EMPTY) List<ContextTool> tools)
+    {
+        InputBody
+        {
+            messages = List.copyOf(messages);
+            requireNonNull(system, "system is null");
+            tools = List.copyOf(tools);
+        }
+    }
+
+    private record RequestBody(String model, int max_tokens, List<JsonNode> messages, String system,
+            @JsonInclude(JsonInclude.Include.NON_EMPTY) List<ContextTool> tools) {}
+
+    private InputBody inputBody(ModelRequest request, ArrayNode history)
+            throws IOException
+    {
+        history.add(input(request.input()));
+        List<ContextTool> tools = new ArrayList<>();
+        for (var tool : request.tools()) {
+            tools.add(new ContextTool(tool.name(), tool.description(), JSON.readTree(tool.inputSchema())));
+        }
+        List<JsonNode> messages = new ArrayList<>();
+        history.forEach(messages::add);
+        return new InputBody(messages, request.instructions(), tools);
     }
 
     private ObjectNode input(ModelInput input)
@@ -397,17 +521,9 @@ public final class AnthropicModelClient
                 if (cancelled) {
                     throw new CancellationException();
                 }
-                history.add(input(request.input()));
-                ObjectNode body = JSON.createObjectNode().put("model", request.model()).put("max_tokens", request.maximumOutputTokens());
-                body.set("messages", history);
-                body.put("system", request.instructions());
-                if (!request.tools().isEmpty()) {
-                    ArrayNode tools = body.putArray("tools");
-                    for (var tool : request.tools()) {
-                        tools.addObject().put("name", tool.name()).put("description", tool.description()).set("input_schema", JSON.readTree(tool.inputSchema()));
-                    }
-                }
-                var params = MessageCreateParams.builder().body(WIRE.convertValue(body, MessageCreateParams.Body.class))
+                InputBody input = inputBody(request, history);
+                var body = new RequestBody(request.model(), request.maximumOutputTokens(), input.messages(), input.system(), input.tools());
+                var params = MessageCreateParams.builder().body(WIRE.convertValue(JSON.valueToTree(body), MessageCreateParams.Body.class))
                         .putAdditionalHeader("Authorization", "Bearer " + key()).build();
                 Duration timeout = config.timeout;
                 if (request.deadline().isPresent()) {
@@ -433,7 +549,7 @@ public final class AnthropicModelClient
                             break;
                         }
                     }
-                    response = assembled.finish(history);
+                    response = ContextReplay.carry(request.replayState(), assembled.finish(history));
                     if (!redactor().redact(response.replayState().payload()).equals(response.replayState().payload())) {
                         throw protocol();
                     }

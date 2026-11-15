@@ -19,21 +19,21 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const contract = {
-  version: "0.164.0",
+  version: "0.169.0",
   schemaCommand:
     "codex app-server generate-json-schema --experimental --out <temporary-directory>",
   experimentalBundleSha256:
-    "92fe055424a3709999a05baae615be9e1e1e0b127e033cace6849b2ea785ea07",
+    "d2d0612646b0739dd264067ef944442a5485e44529c793bebf3985e9a9df6cfc",
   experimentalV2BundleSha256:
-    "72b1afcdb14b4880cff9faccdfca1f73f7288ff3a0cb80b7a4bd400a5c4e574c",
+    "2e34d83c42ed8b8672d44255501c9198ff4000f48a59d23457620c5d05b53fcd",
   stableBundleSha256:
-    "5f633ad1f0a07459a5f63ed5604f8a61e0366ac5c36a15d648b44c8de4ffafb1",
+    "96ad5012f080b182a7ecfe2a0179ef04a8f9be80ff5e680f28afb37d9b4cf995",
   stableV2BundleSha256:
-    "705a08b903fecb9457a6c888040b16ff20be4bc74682ee3896c61cb27ce43060",
+    "3532041bb3d56639a8e3fd41254daff6e3f0be67893d585c7ceb0f57b1bfc57d",
 };
 
 const referenceBindingsPath = fileURLToPath(new URL(
-  "../shifting-codej-cli/src/test/resources/io/github/shiftinglabs/codej/cli/codex/app-server-v0.164.0-bindings.json",
+  "../shifting-codej-cli/src/test/resources/io/github/shiftinglabs/codej/cli/codex/app-server-v0.169.0-bindings.json",
   import.meta.url,
 ));
 
@@ -1088,6 +1088,7 @@ function checkSchema(directory, experimental) {
   requireProperties(initialize.definitions.InitializeCapabilities, [
     "experimentalApi",
     "requestAttestation",
+    "requiredHumanApproval",
   ]);
 
   const modelList = readJson(join(directory, "v2", "ModelListResponse.json"));
@@ -1233,8 +1234,8 @@ function checkSchema(directory, experimental) {
     "turnId",
   ], ["itemId", "startedAtMs", "threadId", "turnId"]);
   assert.deepEqual(
-    commandApprovalParams.definitions.CommandExecutionApprovalKind.enum,
-    ["command", "writeStdin"],
+    enumValues(commandApprovalParams.definitions.CommandExecutionApprovalKind, commandApprovalParams),
+    ["command", "humanCommand", "writeStdin"],
   );
 
   const fileApprovalParams = readJson(

@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 final class TestVersion
 {
-    /** A release is the Codex release it runs, then its own number: 0.164.0-1, 0.164.0-2, 0.164.0-1-rc1. */
+    /** A release is the Codex release it runs, then its own number: 0.169.0-1, 0.169.0-2, 0.169.0-1-rc1. */
     @Test
     void theVersionStartsWithTheCodexReleaseItRuns()
     {

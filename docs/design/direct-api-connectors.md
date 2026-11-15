@@ -4,6 +4,49 @@ Status: option 2 selected: own the Java engine and selectively adopt Codex runti
 The model SPI, shared engine, Anthropic Java SDK and direct DeepSeek adapters, additive
 `ClaudeApi` / `DeepSeekApi` facades, and opt-in contained coding tools are implemented. Validation uses fake clients and loopback HTTP; no live account was exercised.
 
+The [DeepSeek Harness study and separation plan](deepseek-harness-study.md) records the first
+internal refactor. `ApiAgentDriver` remains the compatible public facade; package-private
+`ApiEngine`, `ApiSession` and `ApiTurn` separate runtime ownership, session resources and execution.
+`ApiSessionRepository` and `ApiPromptAssembler` are internal substitution boundaries.
+`ApiCheckpoint`, `ApiRequestSetup`, `ApiToolReceipt` and `ApiJournal` carry validated immutable
+state; `ApiCheckpointCodec` alone binds the checkpoint wire format. These types remain
+in `io.github.shiftinglabs.codej.cli.api` and do not change the published artifact layout.
+The [conversation history and migration plan](conversation-history.md) adds optional
+`ModelRequest.history()` through `ModelHistory`, with no new mandatory adapter method. New
+checkpoints use format 2; format 1 migrates in memory and retains native replay and pending-tool
+receipts. Public session-reference versions remain unchanged, and incomplete legacy prefixes are
+explicit rather than reconstructed from opaque provider data.
+
+The [scoped prompt/context contributor plan](prompt-contributors.md) adds explicit `PromptProvider`
+installation through engine and API facade builders. Each underlying driver session owns its sources;
+new public turns capture ordered instructions and user-role context without changing permissions,
+tool definitions, pending-batch setup, checkpoint version or native replay ownership.
+
+The [scoped policy/observer plan](policy-extensions.md) adds `EngineExtensionProvider` installation
+through those same builders. `ToolPolicy` restricts fresh tool admission after validation and static
+permissions, while `EngineObserver` receives metadata-only lifecycle notifications. Policies cannot
+grant authority or bypass approval; observers cannot rewrite requests, results or checkpoint state.
+
+The [tool scheduling plan](tool-scheduling.md) adds an optional borrowed `ToolExecutionBudget` shared
+across API drivers. Capacity is reserved after approval, before durable admission, and retained until
+execution/resource cleanup confirms release. Explicit `maximumParallelTools` opt-in adds asynchronous
+batch overlap for declared safe pure/read tools, with exclusive effect barriers and provider-order
+results. Defaults remain serial, and the scheduler introduces no additional worker pool.
+
+The [context compaction plan](context-compaction.md) adds an optional borrowed `ContextCompactor`
+and provider-owned local replay rewrites. Full canonical history, execution receipts and journal
+remain durable; summaries cannot change instructions, tools, approvals or permissions.
+Its optional `ContextSummarizationPolicy` selects isolated LLM summaries using the same engine
+request/token/text/deadline budgets. The default local compactor still performs no inference.
+Growing histories use bounded complete-group chunks and provider-recovered summary memory;
+`maximumSummaryInputCharacters` bounds each encoded input without removing canonical history.
+The separate [audit retention plan](audit-retention.md) opts into summary-covered audit removal,
+explicit retained history and bounded owned attachment cleanup after checkpoint commit.
+The [context budgeting plan](context-budgeting.md) adds optional provider sizing, input/output
+reservations and measured compaction pressure through the same model-client boundary. Opt-in
+budgeting includes built-in local text estimates for a reviewed Claude/DeepSeek catalog; custom
+sizers override them and unsupported inputs remain explicitly unknown.
+
 ## Boundaries
 
 Keep the existing `Agent`, `Session`, `Turn`, `AgentConnector`, `ConnectorDriver`, `AgentDriver`,
@@ -117,8 +160,9 @@ Visible events are not the authoritative transcript. For Claude, tool workflows 
 the previous assistant content, including thinking blocks and signatures, unchanged. Checkpoint
 formats are independently versioned from the existing public session-reference contract.
 
-Context-window limits must produce an explicit outcome initially. Later compaction must preserve
-complete tool-call/result groups and required provider blocks; never silently truncate history.
+Context-window limits produce an explicit outcome. Opt-in [context compaction](context-compaction.md)
+preserves complete tool-call/result groups and retained provider blocks; full canonical history
+remains available rather than being silently truncated.
 
 ## Tool loop, permissions and recovery
 
@@ -267,7 +311,8 @@ Observed input/output token usage is counted once per model response and emitted
 through existing events. It is an observed budget, not a pre-submission guarantee about provider
 input tokens or billing. Output tokens, request count, tool count, text, attachments, tool output
 and checkpoint size have separate bounds. The checkpoint-size limit stops growth explicitly;
-compaction and retention remain separate follow-ups. No hidden replay data is sent through events.
+opt-in context compaction reduces active provider replay, while full audit retention remains a
+separate follow-up. No hidden replay data is sent through events.
 
 ### Step 3: Direct Claude API
 
@@ -317,7 +362,15 @@ No agents, native CLI/process-stress, live-provider, broad SDK or Bytequay suite
 - [x] Run affected Bytequay tests using the unchanged downstream API/dependency conventions.
 - [x] Add another direct API provider through the same contracts to validate engine reuse.
 - [x] Add opt-in shared file/search/patch and contained single-process shell tools with permission tests.
-- [ ] Evaluate optional compaction, provider-hosted tools and separate connector artifacts as needed.
+- [x] Add opt-in local [context compaction](context-compaction.md) with full durable history preserved.
+- [x] Add explicitly selected engine-budgeted LLM summaries, isolated from tools and conversation history.
+- [x] Bound incremental summary inputs and recover committed memory across sessions.
+- [x] Add opt-in summary-backed audit retention and post-commit staged-attachment cleanup.
+- [x] Add optional provider-aware input sizing and pre-submission context budgets.
+- [x] Add pure-Java registration and lifecycle contracts for host-supplied bounded commands; see [command execution](command-execution.md).
+- [x] Add an opt-in built-in Linux/systemd command-tree backend without Docker or new Maven dependencies.
+- [ ] Validate that backend on a prepared Linux host; other platforms continue to fail closed.
+- [ ] Evaluate provider-hosted tools and separate connector artifacts as needed.
 
 ## Second direct provider: DeepSeek
 

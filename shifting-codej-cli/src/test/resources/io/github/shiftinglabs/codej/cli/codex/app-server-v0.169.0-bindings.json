@@ -1,11 +1,11 @@
 {
   "formatVersion": 1,
-  "codexVersion": "0.164.0",
+  "codexVersion": "0.169.0",
   "bundleSha256": {
-    "stable": "5f633ad1f0a07459a5f63ed5604f8a61e0366ac5c36a15d648b44c8de4ffafb1",
-    "stableV2": "705a08b903fecb9457a6c888040b16ff20be4bc74682ee3896c61cb27ce43060",
-    "experimental": "92fe055424a3709999a05baae615be9e1e1e0b127e033cace6849b2ea785ea07",
-    "experimentalV2": "72b1afcdb14b4880cff9faccdfca1f73f7288ff3a0cb80b7a4bd400a5c4e574c"
+    "stable": "96ad5012f080b182a7ecfe2a0179ef04a8f9be80ff5e680f28afb37d9b4cf995",
+    "stableV2": "3532041bb3d56639a8e3fd41254daff6e3f0be67893d585c7ceb0f57b1bfc57d",
+    "experimental": "d2d0612646b0739dd264067ef944442a5485e44529c793bebf3985e9a9df6cfc",
+    "experimentalV2": "2e34d83c42ed8b8672d44255501c9198ff4000f48a59d23457620c5d05b53fcd"
   },
   "records": [
     {

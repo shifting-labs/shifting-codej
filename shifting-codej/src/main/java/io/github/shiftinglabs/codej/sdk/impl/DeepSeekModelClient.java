@@ -13,13 +13,13 @@
  */
 package io.github.shiftinglabs.codej.sdk.impl;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.shiftinglabs.codej.cli.driver.AgentCapabilities;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.driver.AgentProviderStatus;
@@ -29,8 +29,12 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextAssessment;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelResponse;
 
@@ -164,6 +168,69 @@ public final class DeepSeekModelClient
         }
     }
 
+    private record SummaryMessage(String role, String content)
+    {
+        SummaryMessage
+        {
+            if (!"user".equals(role)) {
+                throw invalid("Invalid summary role");
+            }
+            requireNonNull(content, "content is null");
+        }
+    }
+
+    @Override
+    public Optional<ModelContextAssessment> contextBudget(ModelRequest request)
+    {
+        requireNonNull(request, "request is null");
+        requireOpen();
+        capabilities(request.model());
+        return ContextSizing.assess(config.contextSizer, "deepseek", request, () -> {
+            try {
+                return JSON.writeValueAsString(inputBody(request, history(request)));
+            }
+            catch (IOException failure) {
+                throw invalid("Context input could not be read");
+            }
+        });
+    }
+
+    @Override
+    public boolean supportsContextCompaction() { return true; }
+
+    @Override
+    public Optional<ModelCompactionMemory> compactionMemory(ModelReplayState replay)
+    {
+        requireOpen();
+        return ContextReplay.memory(replay, "deepseek", this::summaryText);
+    }
+
+    private String summaryText(JsonNode node)
+    {
+        try {
+            return JSON.treeToValue(node, SummaryMessage.class).content();
+        }
+        catch (IOException | IllegalArgumentException failure) {
+            throw invalid("Invalid summary message");
+        }
+    }
+
+    @Override
+    public Optional<ModelReplayState> compact(ModelCompactionRequest request)
+    {
+        requireNonNull(request, "request is null");
+        requireOpen();
+        capabilities(request.model());
+        ArrayNode messages = history(ContextReplay.nativeReplay(request.replay()));
+        String text = ContextReplay.SUMMARY_PREFIX + request.compaction().summary();
+        ModelReplayState compacted = ContextReplay.compact(request, messages, JSON.valueToTree(new SummaryMessage("user", text)),
+                exchange -> exchange.input() instanceof ModelInput.ToolResults results ? results.results().size() + 1 : 2);
+        if (!redactor().redact(compacted.payload()).equals(compacted.payload())) {
+            throw invalid("Compaction summary contains a known credential");
+        }
+        return Optional.of(compacted);
+    }
+
     @Override
     public ModelCall generate(ModelRequest request, ModelEventSink events)
     {
@@ -190,12 +257,94 @@ public final class DeepSeekModelClient
         return call;
     }
 
+    private record FunctionTool(String name, String description, JsonNode parameters)
+    {
+        FunctionTool
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(description, "description is null");
+            requireNonNull(parameters, "parameters is null");
+        }
+    }
+
+    private record ContextTool(String type, FunctionTool function)
+    {
+        ContextTool
+        {
+            requireNonNull(type, "type is null");
+            requireNonNull(function, "function is null");
+        }
+    }
+
+    private record TextMessage(String role, String content)
+    {
+        TextMessage
+        {
+            requireNonNull(role, "role is null");
+            requireNonNull(content, "content is null");
+        }
+    }
+
+    private record ToolMessage(String role, String tool_call_id, String content)
+    {
+        ToolMessage
+        {
+            requireNonNull(role, "role is null");
+            requireNonNull(tool_call_id, "tool_call_id is null");
+            requireNonNull(content, "content is null");
+        }
+    }
+
+    private record InputBody(List<JsonNode> messages, @JsonInclude(JsonInclude.Include.NON_EMPTY) List<ContextTool> tools,
+            @JsonInclude(JsonInclude.Include.NON_NULL) String reasoning_effort)
+    {
+        InputBody
+        {
+            messages = List.copyOf(messages);
+            tools = List.copyOf(tools);
+        }
+    }
+
+    private record StreamOptions(boolean include_usage) {}
+
+    private record RequestBody(String model, int max_tokens, boolean stream, StreamOptions stream_options, List<JsonNode> messages,
+            @JsonInclude(JsonInclude.Include.NON_EMPTY) List<ContextTool> tools, @JsonInclude(JsonInclude.Include.NON_NULL) String reasoning_effort) {}
+
+    private InputBody inputBody(ModelRequest request, ArrayNode history)
+            throws IOException
+    {
+        if (request.input() instanceof ModelInput.UserMessage user) {
+            if (!user.attachments().isEmpty()) {
+                throw invalid("Unsupported DeepSeek attachments");
+            }
+            history.add(JSON.valueToTree(new TextMessage("user", user.text())));
+        }
+        else if (request.input() instanceof ModelInput.ToolResults results) {
+            results.results().forEach(tool -> history.add(JSON.valueToTree(new ToolMessage("tool", tool.callId(),
+                    tool.error() ? "Host tool error: " + tool.text() : tool.text()))));
+        }
+        List<JsonNode> messages = new ArrayList<>();
+        if (!request.instructions().isEmpty()) {
+            messages.add(JSON.valueToTree(new TextMessage("system", request.instructions())));
+        }
+        history.forEach(messages::add);
+        List<ContextTool> tools = new ArrayList<>();
+        for (var tool : request.tools()) {
+            tools.add(new ContextTool("function", new FunctionTool(tool.name(), tool.description(), JSON.readTree(tool.inputSchema()))));
+        }
+        return new InputBody(messages, tools, request.effort().orElse(null));
+    }
+
     private ArrayNode history(ModelRequest request)
     {
         if (request.replayState().isEmpty()) {
             return JSON.createArrayNode();
         }
-        var replay = request.replayState().orElseThrow();
+        return history(ContextReplay.nativeReplay(request.replayState().orElseThrow()));
+    }
+
+    private ArrayNode history(ModelReplayState replay)
+    {
         if (!replay.providerId().equals("deepseek") || replay.formatVersion() != 1 || replay.payload().length() > 8 * 1024 * 1024) {
             throw invalid("Foreign, incompatible or oversized DeepSeek replay");
         }
@@ -375,28 +524,9 @@ public final class DeepSeekModelClient
                 if (cancelled) {
                     throw new CancellationException();
                 }
-                if (request.input() instanceof ModelInput.UserMessage user) {
-                    history.addObject().put("role", "user").put("content", user.text());
-                }
-                else if (request.input() instanceof ModelInput.ToolResults tools) {
-                    tools.results().forEach(tool -> history.addObject().put("role", "tool").put("tool_call_id", tool.callId())
-                            .put("content", tool.error() ? "Host tool error: " + tool.text() : tool.text()));
-                }
-                ObjectNode body = JSON.createObjectNode().put("model", request.model()).put("max_tokens", request.maximumOutputTokens()).put("stream", true);
-                ArrayNode messages = body.putArray("messages");
-                if (!request.instructions().isEmpty()) {
-                    messages.addObject().put("role", "system").put("content", request.instructions());
-                }
-                messages.addAll(history);
-                body.putObject("stream_options").put("include_usage", true);
-                request.effort().ifPresent(value -> body.put("reasoning_effort", value));
-                if (!request.tools().isEmpty()) {
-                    ArrayNode tools = body.putArray("tools");
-                    for (var tool : request.tools()) {
-                        tools.addObject().put("type", "function").putObject("function").put("name", tool.name()).put("description", tool.description())
-                                .set("parameters", JSON.readTree(tool.inputSchema()));
-                    }
-                }
+                InputBody input = inputBody(request, history);
+                var body = new RequestBody(request.model(), request.maximumOutputTokens(), true, new StreamOptions(true),
+                        input.messages(), input.tools(), input.reasoning_effort());
                 byte[] bytes = JSON.writeValueAsBytes(body);
                 if (bytes.length > 16 * 1024 * 1024) {
                     throw invalid("DeepSeek request exceeds its body limit");
@@ -426,7 +556,8 @@ public final class DeepSeekModelClient
                     if (!type.toLowerCase(java.util.Locale.ROOT).startsWith("text/event-stream")) {
                         throw protocol();
                     }
-                    response = new DeepSeekStream(events, DeepSeekModelClient.this::redactor, () -> cancelled).read(reply.body(), history);
+                    response = ContextReplay.carry(request.replayState(),
+                            new DeepSeekStream(events, DeepSeekModelClient.this::redactor, () -> cancelled).read(reply.body(), history));
                     if (!redactor().redact(response.replayState().payload()).equals(response.replayState().payload())) {
                         throw protocol();
                     }

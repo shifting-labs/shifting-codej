@@ -16,7 +16,7 @@ Both use the shared API engine and keep conversation replay locally.
 - Java 25 or newer, the current LTS release.
 - macOS 14 or newer on Apple silicon. Intel Macs and Linux are planned.
 - Codex: nothing to install. The first time you build a Codex agent, the SDK downloads Codex
-  0.164.0, the release it's tested against, from OpenAI's npm package: about 120 MB, exactly as
+  0.169.0, the release it's tested against, from OpenAI's npm package: about 150 MB, exactly as
   OpenAI built and signed it. To run your own Codex instead, pass `Codex.builder().executable(path)`.
 - Internet access the first time, unless you pass `executable(path)`.
 - Claude Code 2.1.200 or newer, installed as `claude`.
@@ -29,13 +29,13 @@ Both use the shared API engine and keep conversation replay locally.
 <dependency>
     <groupId>io.github.shifting-labs</groupId>
     <artifactId>shifting-codej</artifactId>
-    <version>0.164.0-1</version>
+    <version>0.169.0-1</version>
 </dependency>
 ```
 
 - The SDK has no dependencies of its own on your classpath.
-- The SDK's version starts with the Codex release it runs: `0.164.0-1` runs Codex 0.164.0, and
-  `0.164.0-2` would be a fix on the same Codex. `Codex.VERSION` names it.
+- The SDK's version starts with the Codex release it runs: `0.169.0-1` runs Codex 0.169.0, and
+  `0.169.0-2` would be a fix on the same Codex. `Codex.VERSION` names it.
 - The first `Codex.builder().build()` downloads Codex into `~/Library/Caches/shifting-codej/codex/`
   and checks it against hashes recorded in the SDK; anything else is refused. Later builds reuse that
   copy without a network request. Versions no build has used for 30 days are deleted.
@@ -52,11 +52,11 @@ export CODEJ_CODEX_REGISTRY=https://artifactory.example.com/artifactory/api/npm/
 java -Dcodej.codex.registry=https://artifactory.example.com/artifactory/api/npm/npm-remote/ -jar my-app.jar
 ```
 
-The SDK then downloads `<mirror>/@openai/codex/-/codex-0.164.0-darwin-arm64.tgz` from the mirror only,
+The SDK then downloads `<mirror>/@openai/codex/-/codex-0.169.0-darwin-arm64.tgz` from the mirror only,
 with the same checks. To see whether your mirror has it:
 
 ```bash
-curl -I https://artifactory.example.com/artifactory/api/npm/npm-remote/@openai/codex/-/codex-0.164.0-darwin-arm64.tgz
+curl -I https://artifactory.example.com/artifactory/api/npm/npm-remote/@openai/codex/-/codex-0.169.0-darwin-arm64.tgz
 ```
 
 A mirror that needs a login isn't supported; install Codex with your own tools and pass

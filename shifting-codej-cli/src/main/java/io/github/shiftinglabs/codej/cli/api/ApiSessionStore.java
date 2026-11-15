@@ -13,15 +13,9 @@
  */
 package io.github.shiftinglabs.codej.cli.api;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.shiftinglabs.codej.cli.driver.AgentAttachment;
 import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
-import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -30,28 +24,32 @@ import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SecureDirectoryStream;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
+
 /** One acquired writer. Checkpoints are private, size-bounded, atomically replaced and fsynced before acknowledgement. */
 final class ApiSessionStore
-        implements AutoCloseable
+        implements ApiSessionRepository
 {
-    static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
-
     private final Path directory;
     private final Path file;
     private final FileChannel channel;
     private final FileLock lock;
     private final ApiEngineConfig config;
-    private ObjectNode state;
+    private ApiCheckpoint state;
     private boolean closed;
 
     private ApiSessionStore(Path directory, FileChannel channel, FileLock lock, ApiEngineConfig config)
@@ -96,20 +94,11 @@ final class ApiSessionStore
                 if (bytes.length > config.maximumCheckpointBytes) {
                     throw new IOException("oversized checkpoint");
                 }
-                JsonNode parsed = JSON.readTree(bytes);
-                if (!(parsed instanceof ObjectNode node)) {
-                    throw new IOException("invalid checkpoint");
-                }
-                store.state = node;
-                store.validate(id);
+                store.state = ApiCheckpointCodec.decode(bytes);
+                store.validate(store.state, id);
             }
             else {
-                ObjectNode state = JSON.createObjectNode().put("version", 1).put("id", id)
-                        .put("connector", config.identity.connectorId()).put("profile", config.identity.profileId()).put("lane", config.lane.value())
-                        .put("phase", "ready");
-                state.putArray("journal");
-                state.putArray("receipts");
-                store.save(state);
+                store.save(ApiCheckpoint.initial(id, config.identity, config.lane));
             }
             return store;
         }
@@ -130,47 +119,27 @@ final class ApiSessionStore
         }
     }
 
-    private void validate(String id)
+    private void validate(ApiCheckpoint candidate, String id)
             throws IOException
     {
-        if (state.path("version").asInt() != 1 || !state.path("id").asText().equals(id)
-                || !state.path("connector").asText().equals(config.identity.connectorId())
-                || !state.path("profile").asText().equals(config.identity.profileId()) || !state.path("lane").asText().equals(config.lane.value())
-                || !Set.of("ready", "request", "tools", "blocked").contains(state.path("phase").asText())
-                || !state.path("journal").isArray() || !state.path("receipts").isArray()) {
+        if (!candidate.id().equals(id) || !candidate.identity().equals(config.identity) || !candidate.lane().equals(config.lane)) {
             throw new IOException("checkpoint ownership or version mismatch");
-        }
-        if (state.has("replay")) {
-            replay(state);
-        }
-        for (JsonNode receipt : state.path("receipts")) {
-            if (!receipt.path("id").isTextual() || !receipt.path("name").isTextual() || !receipt.path("arguments").isTextual()
-                    || !receipt.path("started").isBoolean()) {
-                throw new IOException("invalid tool receipt");
-            }
-            new io.github.shiftinglabs.codej.cli.spi.model.ModelResponse.ToolCall(
-                    receipt.path("id").textValue(), receipt.path("name").textValue(), receipt.path("arguments").textValue());
-            if (receipt.has("result") && (!receipt.path("result").path("text").isTextual() || !receipt.path("result").path("error").isBoolean())) {
-                throw new IOException("invalid tool result");
-            }
-        }
-        if (state.path("phase").asText().equals("tools") && (!state.has("replay") || state.path("receipts").isEmpty()
-                || !state.path("setup").path("model").isTextual() || !state.path("setup").path("instructions").isTextual()
-                || !state.path("setup").path("tools").isArray())) {
-            throw new IOException("incomplete tool checkpoint");
         }
     }
 
-    synchronized ObjectNode state() { return state.deepCopy(); }
+    @Override
+    public synchronized ApiCheckpoint state() { return state; }
 
-    synchronized void save(ObjectNode next)
+    @Override
+    public synchronized void save(ApiCheckpoint next)
     {
         if (closed) {
             throw new AgentUnavailableException("API session writer is closed");
         }
         Path temporary = directory.resolve("checkpoint-" + UUID.randomUUID() + ".tmp");
         try {
-            byte[] bytes = JSON.writeValueAsBytes(next);
+            validate(next, directory.getFileName().toString());
+            byte[] bytes = ApiCheckpointCodec.encode(next);
             if (bytes.length > config.maximumCheckpointBytes) {
                 throw new IOException("checkpoint budget exceeded");
             }
@@ -186,7 +155,7 @@ final class ApiSessionStore
             try (FileChannel parent = FileChannel.open(directory, StandardOpenOption.READ)) {
                 parent.force(true);
             }
-            state = next.deepCopy();
+            state = next;
         }
         catch (IOException failure) {
             throw new AgentUnavailableException("Cannot persist API session checkpoint");
@@ -201,7 +170,8 @@ final class ApiSessionStore
         }
     }
 
-    ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments)
+    @Override
+    public ModelInput.UserMessage stage(String text, List<AgentAttachment> attachments)
     {
         List<AgentAttachment> staged = new ArrayList<>();
         long total = 0;
@@ -256,35 +226,79 @@ final class ApiSessionStore
         }
     }
 
-    static void replay(ObjectNode node, ModelReplayState replay)
+    @Override
+    public synchronized int pruneAttachments(int maximumDeletions, List<AgentAttachment> protectedAttachments, Runnable checkStop)
     {
-        node.putObject("replay").put("provider", replay.providerId()).put("version", replay.formatVersion()).put("payload", replay.payload());
-    }
-
-    static ModelReplayState replay(ObjectNode node)
-    {
-        JsonNode replay = node.path("replay");
-        if (!replay.path("provider").isTextual() || !replay.path("version").isIntegralNumber() || !replay.path("payload").isTextual()) {
-            throw new AgentUnavailableException("Invalid API replay checkpoint");
+        checkArgument(maximumDeletions >= 0 && maximumDeletions <= 1024, "invalid attachment deletion limit");
+        requireNonNull(checkStop, "checkStop is null");
+        var keep = new HashSet<Path>();
+        protectedAttachments.forEach(attachment -> keep.add(attachment.path().toAbsolutePath().normalize()));
+        if (closed) {
+            throw new AgentUnavailableException("API session writer is closed");
         }
-        return new ModelReplayState(replay.path("provider").textValue(), replay.path("version").intValue(), replay.path("payload").textValue());
+        if (maximumDeletions == 0 || state.phase() != ApiCheckpoint.Phase.READY || !state.recoverable() || !state.receipts().isEmpty()) {
+            return 0;
+        }
+        state.history().exchanges().forEach(exchange -> attachments(exchange.input(), keep));
+        state.input().ifPresent(input -> attachments(input, keep));
+        state.journal().forEach(entry -> {
+            if (entry instanceof ApiJournal.User user) {
+                attachments(user.input(), keep);
+            }
+        });
+        int removed = 0;
+        try (var opened = Files.newDirectoryStream(directory)) {
+            requireDirectory(directory);
+            if (!(opened instanceof SecureDirectoryStream<Path> root)) {
+                throw new IOException("secure cleanup is unavailable");
+            }
+            try (var folder = root.newDirectoryStream(Path.of("attachments"), LinkOption.NOFOLLOW_LINKS)) {
+                for (Path path : folder) {
+                    checkStop.run();
+                    Path name = path.getFileName();
+                    if (!canonicalUuid(name.toString()) || keep.contains(directory.resolve("attachments").resolve(name).toAbsolutePath().normalize())) {
+                        continue;
+                    }
+                    var attributes = folder.getFileAttributeView(name, BasicFileAttributeView.class, LinkOption.NOFOLLOW_LINKS).readAttributes();
+                    if (!attributes.isRegularFile()) {
+                        continue;
+                    }
+                    folder.deleteFile(name);
+                    if (++removed == maximumDeletions) {
+                        break;
+                    }
+                }
+            }
+            catch (NoSuchFileException missing) {
+                // No staged attachment directory, or an already absent unreferenced file.
+            }
+            if (removed > 0) {
+                try (var parent = FileChannel.open(directory.resolve("attachments"), StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+                    parent.force(true);
+                }
+            }
+            return removed;
+        }
+        catch (IOException failure) {
+            throw new AgentUnavailableException("Cannot safely clean unreferenced API attachments; committed checkpoint remains authoritative");
+        }
     }
 
-    static ObjectNode input(ModelInput input)
+    private static boolean canonicalUuid(String value)
     {
-        ObjectNode node = JSON.createObjectNode();
+        try {
+            return UUID.fromString(value).toString().equals(value);
+        }
+        catch (IllegalArgumentException failure) {
+            return false;
+        }
+    }
+
+    private static void attachments(ModelInput input, Set<Path> paths)
+    {
         if (input instanceof ModelInput.UserMessage user) {
-            node.put("kind", "user").put("text", user.text());
-            var attachments = node.putArray("attachments");
-            user.attachments().forEach(item -> attachments.addObject().put("id", item.id()).put("name", item.name())
-                    .put("mediaType", item.mediaType()).put("path", item.path().toString()));
+            user.attachments().forEach(attachment -> paths.add(attachment.path().toAbsolutePath().normalize()));
         }
-        else if (input instanceof ModelInput.ToolResults batch) {
-            node.put("kind", "results");
-            var results = node.putArray("results");
-            batch.results().forEach(item -> results.addObject().put("id", item.callId()).put("text", item.text()).put("error", item.error()));
-        }
-        return node;
     }
 
     private static void privateDirectory(Path path)

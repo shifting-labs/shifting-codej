@@ -23,6 +23,7 @@ import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelEventSink;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelHistory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelReplayState;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelRequest;
@@ -79,7 +80,7 @@ class TestModelClientSpi
         ModelRequest.ToolDefinition definition = new ModelRequest.ToolDefinition(tool.name(), tool.description(), tool.inputSchema());
         try (ScriptedClient client = new ScriptedClient()) {
             ModelRequest first = ModelRequest.builder("tools", "fixture-model", new ModelInput.UserMessage("Read the issue", List.of()), 128)
-                    .instructions("Use the supplied host tools.").tools(List.of(definition)).effort("low").serviceTier("standard")
+                    .history(new ModelHistory(true, List.of())).instructions("Use the supplied host tools.").tools(List.of(definition)).effort("low").serviceTier("standard")
                     .deadline(Instant.parse("2100-01-01T00:00:00Z")).build();
             ModelResponse response = client.generate(first, text -> {}).completion().toCompletableFuture().get(1, TimeUnit.SECONDS);
             assertThat(response.stopReason()).isEqualTo(ModelResponse.StopReason.TOOL_CALLS);
@@ -91,7 +92,9 @@ class TestModelClientSpi
             ModelReplayState loaded = new ModelReplayState(response.replayState().providerId(),
                     response.replayState().formatVersion(), response.replayState().payload());
             ModelInput input = new ModelInput.ToolResults(List.of(new ModelInput.ToolResult(call.id(), result, false)));
-            ModelRequest next = ModelRequest.builder("continued", "fixture-model", input, 128)
+            ModelHistory prefix = first.history().orElseThrow().append(new ModelHistory.Exchange(first.requestId(), response.replayState().providerId(),
+                    first.model(), first.input(), response.text(), response.toolCalls(), response.stopReason()));
+            ModelRequest next = ModelRequest.builder("continued", "fixture-model", input, 128).history(prefix)
                     .instructions(first.instructions()).tools(first.tools()).replayState(loaded).build();
             List<String> text = new ArrayList<>();
             ModelResponse finalResponse = client.generate(next, text::add).completion().toCompletableFuture().get(1, TimeUnit.SECONDS);
@@ -101,6 +104,10 @@ class TestModelClientSpi
             assertThat(executions).hasValue(1);
             assertThat(client.requests).containsExactly(first, next);
             assertThat(next.replayState().orElseThrow().payload()).isEqualTo("private pending call: call-1");
+            assertThat(next.history()).contains(prefix);
+            assertThat(prefix.complete()).isTrue();
+            assertThat(prefix.exchanges()).hasSize(1);
+            assertThat(prefix.exchanges().getFirst().toolCalls()).containsExactly(call);
             assertThat(((ModelInput.ToolResults) next.input()).results())
                     .containsExactly(new ModelInput.ToolResult("call-1", "Issue is open", false));
         }

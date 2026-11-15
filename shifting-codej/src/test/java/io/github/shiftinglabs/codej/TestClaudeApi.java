@@ -13,7 +13,13 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineObservation;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.sdk.testing.AnthropicHttpFixture;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredExtensions;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredLookupTools;
+import io.github.shiftinglabs.codej.sdk.testing.ConfiguredPrompts;
+import io.github.shiftinglabs.codej.sdk.testing.ParallelLookupTools;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -61,6 +67,137 @@ class TestClaudeApi
     private SessionOptions options()
     {
         return SessionOptions.in(directory).access(Access.TOOLS_ONLY).build();
+    }
+
+    @Test
+    void optInParallelBatchesPreserveProviderResultOrderAcrossFakeHttp()
+            throws Exception
+    {
+        var provider = new ParallelLookupTools();
+        try (Agent agent = builder().toolProvider(provider, true).toolExecutionBudget(ToolExecutionBudget.bounded(2)).maximumParallelTools(2).build();
+                Session session = agent.startSession(SessionOptions.in(directory).access(Access.TOOLS_ONLY)
+                        .approvals(request -> java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE)).build())) {
+            http.reply(200, AnthropicHttpFixture.parallelToolStream());
+            Turn turn = session.start(Input.text("Parallel lookup"), TurnOptions.defaults().withTimeLimit(Duration.ofSeconds(2)), event -> {});
+            assertThat(turn.result().toCompletableFuture().get(5, TimeUnit.SECONDS)).isInstanceOf(TurnResult.Completed.class);
+            assertThat(provider.settled).containsExactly("second", "first");
+            String body = http.requests().getLast().body().toString();
+            assertThat(body).contains("first value", "second value");
+            assertThat(body.indexOf("\"tool_use_id\":\"call-1\"")).isLessThan(body.indexOf("\"tool_use_id\":\"call-2\""));
+        }
+        assertThatThrownBy(() -> builder().maximumParallelTools(2).build()).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> builder().maximumParallelTools(0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> builder().maximumParallelTools(65)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void facadeForwardsBorrowedToolBudgetsWithoutEagerAdmission()
+            throws Exception
+    {
+        AtomicInteger acquired = new AtomicInteger();
+        AtomicInteger released = new AtomicInteger();
+        AtomicInteger executed = new AtomicInteger();
+        ToolExecutionBudget budget = request -> {
+            assertThat(request.invocationId()).isNotBlank();
+            assertThat(request.cancellationRequested()).isFalse();
+            acquired.incrementAndGet();
+            return released::incrementAndGet;
+        };
+        Tool tool = Tool.of("contract_lookup", "Lookup", Lookup.class, input -> {
+            assertThat(acquired).hasValue(1);
+            assertThat(released).hasValue(0);
+            executed.incrementAndGet();
+            return input.key();
+        });
+        var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).tool(tool)
+                .approvals(request -> java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE)).build();
+        try (Agent agent = builder().toolExecutionBudget(budget).build()) {
+            assertThat(acquired).hasValue(0);
+            try (Session session = agent.startSession(options)) {
+                assertThat(acquired).hasValue(0);
+                assertThat(session.run(Input.text("Lookup"))).isInstanceOf(TurnResult.Completed.class);
+            }
+            assertThat(acquired).hasValue(1);
+            assertThat(released).hasValue(1);
+            assertThat(executed).hasValue(1);
+        }
+        assertThatThrownBy(() -> builder().toolExecutionBudget(null)).isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void extensionsFlowThroughTheFacadeAndDenyBeforeApprovalsOrExecution()
+            throws Exception
+    {
+        var provider = new ConfiguredExtensions("project-policy");
+        AtomicInteger asked = new AtomicInteger();
+        AtomicInteger executed = new AtomicInteger();
+        Tool tool = Tool.of("contract_lookup", "Lookup", Lookup.class, args -> {
+            executed.incrementAndGet();
+            return args.key();
+        });
+        var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).tool(tool).approvals(request -> {
+            asked.incrementAndGet();
+            return java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE);
+        }).build();
+        SessionRef saved;
+        try (Agent agent = builder().extension(provider, true).build()) {
+            assertThat(provider.opened).hasValue(0);
+            try (Session session = agent.startSession(options)) {
+                assertThat(session.run(Input.text("Lookup"))).isInstanceOf(TurnResult.Completed.class);
+                saved = session.ref().orElseThrow();
+            }
+        }
+        assertThat(provider.evaluated).hasValue(1);
+        assertThat(asked).hasValue(0);
+        assertThat(executed).hasValue(0);
+        assertThat(provider.observations.stream().filter(EngineObservation.ToolDecision.class::isInstance).map(EngineObservation.ToolDecision.class::cast))
+                .extracting(EngineObservation.ToolDecision::admission).containsExactly(EngineObservation.Admission.POLICY_DENIED);
+        try (Agent agent = builder().extension(provider, false).build(); Session session = agent.resumeSession(saved, options)) {
+            assertThat(session.run(Input.text("Lookup again"))).isInstanceOf(TurnResult.Completed.class);
+        }
+        assertThat(provider.opened).hasValue(2);
+        assertThat(provider.closed).hasValue(2);
+        assertThat(provider.evaluated).hasValue(2);
+        assertThat(asked).hasValue(1);
+        assertThat(executed).hasValue(1);
+        assertThat(provider.observations.stream().filter(EngineObservation.TurnFinished.class::isInstance)).hasSize(2);
+        assertThatThrownBy(() -> builder().extension(null, true)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().extension(provider, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().extension(provider, true).extension(provider, false).build()).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void scopedPromptsFlowThroughTheFacadeWithoutTurningContextIntoSystemInstructions()
+            throws Exception
+    {
+        var provider = new ConfiguredPrompts("project");
+        SessionRef saved;
+        try (Agent agent = builder().promptProvider(provider, "alpha").build()) {
+            assertThat(provider.opened).hasValue(0);
+            try (Session session = agent.startSession(options())) {
+                assertThat(provider.opened).hasValue(1);
+                assertThat(provider.captured).hasValue(0);
+                assertThat(session.run(Input.text("Hello"))).isInstanceOf(TurnResult.Completed.class);
+                saved = session.ref().orElseThrow();
+            }
+            assertThat(provider.closed).hasValue(1);
+        }
+        try (Agent agent = builder().promptProvider(provider, "beta").build();
+                Session session = agent.resumeSession(saved, options())) {
+            assertThat(session.run(Input.text("Continue"))).isInstanceOf(TurnResult.Completed.class);
+        }
+        assertThat(provider.opened).hasValue(2);
+        assertThat(provider.captured).hasValue(2);
+        assertThat(provider.closed).hasValue(2);
+        var post = http.requests().stream().filter(request -> request.method().equals("POST")).toList().getLast().body();
+        assertThat(post.path("system").toString()).contains("beta rules").doesNotContain("beta facts", "alpha facts");
+        assertThat(post.path("messages").get(0).toString()).contains("alpha facts", "Hello");
+        assertThat(post.path("messages").get(2).path("role").textValue()).isEqualTo("user");
+        assertThat(post.path("messages").get(2).toString()).contains("beta facts", "Continue");
+        assertThatThrownBy(() -> builder().promptProvider(null, "value")).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().promptProvider(provider, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().promptProvider(provider, "one").promptProvider(provider, "two").build())
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -126,6 +263,36 @@ class TestClaudeApi
             }
             assertThat(callbacks.isShutdown()).isFalse();
         }
+    }
+
+    @Test
+    void configuredToolProviderRunsThroughThePublicFacadeAndOwnsItsSessionResources()
+            throws Exception
+    {
+        var provider = new ConfiguredLookupTools();
+        AtomicInteger approvals = new AtomicInteger();
+        var options = SessionOptions.in(directory).access(Access.TOOLS_ONLY).approvals(approval -> {
+            approvals.incrementAndGet();
+            return java.util.concurrent.CompletableFuture.completedStage(Decision.ALLOW_ONCE);
+        }).build();
+        try (ExecutorService callbacks = Executors.newSingleThreadExecutor()) {
+            try (Agent agent = builder().callbackExecutor(callbacks).toolProvider(provider, new ConfiguredLookupTools.Configuration("typed:")).build()) {
+                assertThat(provider.opened).hasValue(0);
+                try (Session session = agent.startSession(options)) {
+                    assertThat(provider.opened).hasValue(1);
+                    assertThat(session.run(Input.text("Lookup"))).isInstanceOf(TurnResult.Completed.class);
+                    assertThat(provider.opened).hasValue(1);
+                    assertThat(provider.context.executor()).isSameAs(callbacks);
+                    assertThat(provider.called).hasValue(1);
+                    assertThat(approvals).hasValue(1);
+                    assertThat(http.requests().getLast().body().toString()).contains("typed:CONTRACT-1");
+                }
+                assertThat(provider.closed).hasValue(1);
+            }
+            assertThat(callbacks.isShutdown()).isFalse();
+        }
+        assertThatThrownBy(() -> builder().toolProvider(null, new ConfiguredLookupTools.Configuration("value"))).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> builder().toolProvider(provider, null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test

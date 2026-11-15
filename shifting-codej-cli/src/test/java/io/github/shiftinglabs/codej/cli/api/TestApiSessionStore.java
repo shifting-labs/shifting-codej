@@ -37,6 +37,77 @@ class TestApiSessionStore
     Path directory;
 
     @Test
+    void attachmentCleanupUsesCommittedReferencesAndProtectsCurrentInputWithABoundedDeletionCount()
+            throws Exception
+    {
+        String id = UUID.randomUUID().toString();
+        Path source = Files.writeString(directory.resolve("source"), "image");
+        try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, builder().build())) {
+            var saved = store.stage("saved", List.of(new AgentAttachment("saved", "image/png", source)));
+            var pending = store.stage("pending", List.of(new AgentAttachment("pending", "image/png", source)));
+            var orphan = store.stage("orphan", List.of(new AgentAttachment("orphan", "image/png", source)));
+            store.save(store.state().append(new ApiJournal.User("saved", saved)));
+            Path folder = orphan.attachments().getFirst().path().getParent();
+            Path external = Files.writeString(directory.resolve("external"), "keep outside");
+            Path symlink = Files.createSymbolicLink(folder.resolve(UUID.randomUUID().toString()), external);
+            Path unexpected = Files.writeString(folder.resolve("notes.txt"), "keep unexpected");
+            Path nested = Files.createDirectory(folder.resolve(UUID.randomUUID().toString()));
+            assertThat(store.pruneAttachments(1, pending.attachments(), () -> {})).isEqualTo(1);
+            assertThat(orphan.attachments().getFirst().path()).doesNotExist();
+            assertThat(saved.attachments().getFirst().path()).exists();
+            assertThat(pending.attachments().getFirst().path()).exists();
+            assertThat(external).hasContent("keep outside");
+            assertThat(symlink).isSymbolicLink();
+            assertThat(unexpected).hasContent("keep unexpected");
+            assertThat(nested).isDirectory();
+            assertThat(store.pruneAttachments(0, List.of(), () -> {})).isZero();
+            assertThat(store.pruneAttachments(1, List.of(), () -> {})).isEqualTo(1);
+            assertThat(pending.attachments().getFirst().path()).doesNotExist();
+            assertThat(saved.attachments().getFirst().path()).exists();
+            assertThat(source).hasContent("image");
+            assertThatThrownBy(() -> store.pruneAttachments(1025, List.of(), () -> {})).isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test
+    void cleanupDoesNotFollowReplacedAttachmentDirectoryOrRunPastCancellation()
+            throws Exception
+    {
+        String id = UUID.randomUUID().toString();
+        Path source = Files.writeString(directory.resolve("source"), "image");
+        try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, builder().build())) {
+            var staged = store.stage("orphan", List.of(new AgentAttachment("image", "image/png", source)));
+            Path folder = staged.attachments().getFirst().path().getParent();
+            assertThatThrownBy(() -> store.pruneAttachments(1, List.of(), () -> { throw new java.util.concurrent.CancellationException(); }))
+                    .isInstanceOf(java.util.concurrent.CancellationException.class);
+            assertThat(staged.attachments().getFirst().path()).exists();
+            Path moved = folder.resolveSibling("saved-attachments");
+            Files.move(folder, moved);
+            Path external = Files.createDirectory(directory.resolve("outside"));
+            Path outsideFile = Files.writeString(external.resolve(UUID.randomUUID().toString()), "keep outside");
+            Files.createSymbolicLink(folder, external);
+            assertThatThrownBy(() -> store.pruneAttachments(1, List.of(), () -> {})).isInstanceOf(AgentUnavailableException.class);
+            assertThat(outsideFile).hasContent("keep outside");
+            assertThat(moved.resolve(staged.attachments().getFirst().path().getFileName())).exists();
+        }
+    }
+
+    @Test
+    void saveRejectsAnotherOwnerWithoutChangingTheCommittedSnapshot()
+            throws Exception
+    {
+        String id = UUID.randomUUID().toString();
+        try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, builder().build())) {
+            ApiCheckpoint committed = store.state();
+            var foreign = ApiCheckpoint.initial(id, new ConnectorIdentity("fake-api", "other"), committed.lane());
+            assertThatThrownBy(() -> store.save(foreign)).isInstanceOf(AgentUnavailableException.class);
+            assertThat(store.state()).isSameAs(committed);
+            assertThat(ApiCheckpointCodec.decode(Files.readAllBytes(directory.resolve("api-sessions").resolve(id).resolve("checkpoint.json"))))
+                    .isEqualTo(committed);
+        }
+    }
+
+    @Test
     void writerAcquisitionLoadsAuthoritativePrivateCheckpointAndClosePreservesIt()
             throws Exception
     {
@@ -44,17 +115,16 @@ class TestApiSessionStore
         ApiEngineConfig config = builder().build();
         try (ApiSessionStore first = ApiSessionStore.open(directory, id, false, config)) {
             var old = first.state();
-            var next = first.state();
-            ApiSessionStore.replay(next, new ModelReplayState("fake-api", 1, "signed opaque payload"));
+            var next = first.state().withReplay(new ModelReplayState("fake-api", 1, "signed opaque payload"));
             first.save(next);
-            assertThat(old.has("replay")).isFalse();
+            assertThat(old.replay().isPresent()).isFalse();
             assertThatThrownBy(() -> ApiSessionStore.open(directory, id, true, config)).isInstanceOf(AgentUnavailableException.class);
             Path checkpoint = directory.resolve("api-sessions").resolve(id).resolve("checkpoint.json");
             assertThat(Files.getPosixFilePermissions(checkpoint)).isEqualTo(PosixFilePermissions.fromString("rw-------"));
             assertThat(Files.getPosixFilePermissions(checkpoint.getParent())).isEqualTo(PosixFilePermissions.fromString("rwx------"));
         }
         try (ApiSessionStore resumed = ApiSessionStore.open(directory, id, true, config)) {
-            assertThat(ApiSessionStore.replay(resumed.state()).payload()).isEqualTo("signed opaque payload");
+            assertThat(resumed.state().replay().orElseThrow().payload()).isEqualTo("signed opaque payload");
             resumed.close();
             resumed.close();
             assertThatThrownBy(() -> resumed.save(resumed.state())).isInstanceOf(AgentUnavailableException.class);
@@ -71,14 +141,13 @@ class TestApiSessionStore
         Path checkpoint = directory.resolve("api-sessions").resolve(id).resolve("checkpoint.json");
         try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, config)) {
             original = Files.readString(checkpoint);
-            var oversized = store.state();
-            ApiSessionStore.replay(oversized, new ModelReplayState("fake-api", 1, "x".repeat(1024)));
+            var oversized = store.state().withReplay(new ModelReplayState("fake-api", 1, "x".repeat(1024)));
             assertThatThrownBy(() -> store.save(oversized)).isInstanceOf(AgentUnavailableException.class);
             assertThat(Files.readString(checkpoint)).isEqualTo(original);
-            assertThat(store.state().has("replay")).isFalse();
+            assertThat(store.state().replay().isPresent()).isFalse();
         }
         try (ApiSessionStore resumed = ApiSessionStore.open(directory, id, true, config)) {
-            assertThat(resumed.state().has("replay")).isFalse();
+            assertThat(resumed.state().replay().isPresent()).isFalse();
         }
         try (var files = Files.list(checkpoint.getParent())) {
             assertThat(files.map(path -> path.getFileName().toString())).doesNotContainAnyElementsOf(List.of("checkpoint.tmp"));
@@ -92,20 +161,18 @@ class TestApiSessionStore
         String id = UUID.randomUUID().toString();
         ApiEngineConfig original = builder().build();
         try (ApiSessionStore store = ApiSessionStore.open(directory, id, false, original)) {
-            assertThat(store.state().path("version").asInt()).isEqualTo(1);
+            assertThat(store.state().version()).isEqualTo(ApiCheckpoint.CURRENT_VERSION);
         }
         ApiEngineConfig wrong = ApiEngineConfig.builder(new ConnectorIdentity("fake-api", "other"), new AgentLaneId("fake-api"), "model",
                 () -> { throw new AssertionError("No client construction"); }).build();
         assertThatThrownBy(() -> ApiSessionStore.open(directory, id, true, wrong)).isInstanceOf(AgentUnavailableException.class);
-        try (ApiSessionStore store = ApiSessionStore.open(directory, id, true, original)) {
-            store.save(store.state().put("version", 2));
-        }
-        assertThatThrownBy(() -> ApiSessionStore.open(directory, id, true, original)).isInstanceOf(AgentUnavailableException.class);
         Path file = directory.resolve("api-sessions").resolve(id).resolve("checkpoint.json");
-        var fixed = (com.fasterxml.jackson.databind.node.ObjectNode) ApiSessionStore.JSON.readTree(Files.readString(file));
-        Files.writeString(file, ApiSessionStore.JSON.writeValueAsString(fixed.put("version", 1)));
+        var fixed = (com.fasterxml.jackson.databind.node.ObjectNode) ApiCheckpointCodec.JSON.readTree(Files.readString(file));
+        Files.writeString(file, ApiCheckpointCodec.JSON.writeValueAsString(fixed.put("version", 999)));
+        assertThatThrownBy(() -> ApiSessionStore.open(directory, id, true, original)).isInstanceOf(AgentUnavailableException.class);
+        Files.writeString(file, ApiCheckpointCodec.JSON.writeValueAsString(fixed.put("version", ApiCheckpoint.CURRENT_VERSION)));
         try (ApiSessionStore store = ApiSessionStore.open(directory, id, true, original)) {
-            assertThat(store.state().path("version").asInt()).isEqualTo(1);
+            assertThat(store.state().version()).isEqualTo(ApiCheckpoint.CURRENT_VERSION);
         }
     }
 

@@ -13,12 +13,26 @@
  */
 package io.github.shiftinglabs.codej;
 
+import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
+import io.github.shiftinglabs.codej.cli.spi.model.ModelContextSizer;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 import io.github.shiftinglabs.codej.sdk.impl.ClaudeApiConfig;
 import io.github.shiftinglabs.codej.sdk.impl.DriverAgent;
 
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
@@ -57,6 +71,17 @@ public final class ClaudeApi
         private int maximumOutputTokens = 4096;
         private Optional<Executor> callbacks = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
+        private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
+        private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
+        private final List<EngineExtensionBinding> extensions = new ArrayList<>();
+        private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
+        private int maximumParallelTools = 1;
+        private Optional<ContextCompactor> contextCompactor = Optional.empty();
+        private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
+        private int maximumSummaryInputCharacters = 65536;
+        private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
+        private Optional<ContextBudget> contextBudget = Optional.empty();
+        private Optional<ModelContextSizer> contextSizer = Optional.empty();
 
         private Builder() {}
 
@@ -171,6 +196,156 @@ public final class ClaudeApi
         }
 
         /**
+         * Installs a configured tool family in non-text sessions. Every typed call requires approval.
+         *
+         * @param <C> configuration type, bound explicitly without reflection
+         * @param provider tool family; owns cleanup if open fails
+         * @param configuration immutable provider configuration
+         * @return this builder
+         */
+        public <C> Builder toolProvider(ToolProvider<C> provider, C configuration)
+        {
+            toolProviders.add(ToolProviderBinding.of(provider, configuration));
+            return this;
+        }
+
+        /**
+         * Installs session-owned prompt/context contributors in the shared API engine.
+         *
+         * @param <C> provider configuration type
+         * @param provider thread-safe factory; each session owns its returned contributor
+         * @param configuration immutable provider configuration
+         * @return this builder
+         */
+        public <C> Builder promptProvider(PromptProvider<C> provider, C configuration)
+        {
+            promptProviders.add(PromptProviderBinding.of(provider, configuration));
+            return this;
+        }
+
+        /**
+         * Installs a session-owned restrictive tool policy and/or metadata observer.
+         *
+         * @param <C> provider configuration type
+         * @param provider thread-safe factory; each session owns its returned extension
+         * @param configuration immutable provider configuration
+         * @return this builder
+         */
+        public <C> Builder extension(EngineExtensionProvider<C> provider, C configuration)
+        {
+            extensions.add(EngineExtensionBinding.of(provider, configuration));
+            return this;
+        }
+
+        /**
+         * Borrows a tool admission budget; share one instance across drivers for an aggregate limit.
+         * No additional tool workers are created; batch overlap requires a separate explicit opt-in.
+         *
+         * @param budget thread-safe host service; failed acquisition must release its capacity
+         * @return this builder
+         */
+        public Builder toolExecutionBudget(ToolExecutionBudget budget)
+        {
+            toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
+            return this;
+        }
+
+        /**
+         * Enables a bounded batch window for explicitly eligible asynchronous tools. Defaults to one.
+         * Writes, opaque effects, legacy tools and built-ins remain exclusive.
+         *
+         * @param value maximum active tools per batch, from 1 to 64; greater than one requires a shared budget
+         * @return this builder
+         */
+        public Builder maximumParallelTools(int value)
+        {
+            if (value < 1 || value > 64) {
+                throw new IllegalArgumentException("parallel tool window must be between 1 and 64");
+            }
+            maximumParallelTools = value;
+            return this;
+        }
+
+        /**
+         * Borrows a bounded local summary policy. Compaction is opt-in and preserves durable history.
+         *
+         * @param compactor thread-safe host service; it performs no inference or tool effects
+         * @return this builder
+         */
+        public Builder contextCompactor(ContextCompactor compactor)
+        {
+            contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
+            return this;
+        }
+
+        /**
+         * Borrows a policy enabling bounded tool-free summary inferences charged to the current turn.
+         * Cannot be combined with a local context compactor. Disabled by default.
+         *
+         * @param policy thread-safe selector; the engine performs inference with its existing budgets
+         * @return this builder
+         */
+        public Builder contextSummarization(ContextSummarizationPolicy policy)
+        {
+            contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
+            return this;
+        }
+
+        /**
+         * Bounds each encoded summary input, including prior memory and complete new tool groups.
+         * The engine text limit also applies; an indivisible oversized group fails without truncation.
+         *
+         * @param value positive maximum UTF-16 character count; defaults to 65,536, not a token estimate
+         * @return this builder
+         */
+        public Builder maximumSummaryInputCharacters(int value)
+        {
+            if (value <= 0) {
+                throw new IllegalArgumentException("summary input limit must be positive");
+            }
+            maximumSummaryInputCharacters = value;
+            return this;
+        }
+
+        /**
+         * Borrows an opt-in audit retention policy. Covered history is irreversibly removed;
+         * physical staged-attachment cleanup requires a separately positive deletion bound.
+         *
+         * @param policy thread-safe host selector; the engine performs safe commits and owned cleanup
+         * @return this builder
+         */
+        public Builder auditRetention(AuditRetentionPolicy policy)
+        {
+            auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
+            return this;
+        }
+
+        /**
+         * Enables provider-aware preflight of actual input plus reserved output and a safety margin.
+         * Disabled by default; uses built-in text estimates unless a custom sizer is installed.
+         *
+         * @param budget immutable policy, including explicit handling of unknown sizes
+         * @return this builder
+         */
+        public Builder contextBudget(ContextBudget budget)
+        {
+            contextBudget = Optional.of(requireNonNull(budget, "contextBudget is null"));
+            return this;
+        }
+
+        /**
+         * Borrows a local provider-specific sizing service, overriding built-in estimates even when it returns unknown.
+         *
+         * @param sizer thread-safe service receiving private, adapter-projected active input
+         * @return this builder
+         */
+        public Builder contextSizer(ModelContextSizer sizer)
+        {
+            contextSizer = Optional.of(requireNonNull(sizer, "contextSizer is null"));
+            return this;
+        }
+
+        /**
          * Builds the agent without sending a request or starting a CLI.
          *
          * @return the agent; close it to stop its sessions and HTTP workers
@@ -183,6 +358,17 @@ public final class ClaudeApi
                     .baseUrl(baseUrl).requestTimeout(timeout).maximumOutputTokens(maximumOutputTokens);
             callbacks.ifPresent(settings::callbackExecutor);
             codingTools.ifPresent(settings::codingTools);
+            toolProviders.forEach(settings::toolProvider);
+            promptProviders.forEach(settings::promptProvider);
+            extensions.forEach(settings::extension);
+            toolExecutionBudget.ifPresent(settings::toolExecutionBudget);
+            settings.maximumParallelTools(maximumParallelTools);
+            contextCompactor.ifPresent(settings::contextCompactor);
+            contextSummarization.ifPresent(settings::contextSummarization);
+            settings.maximumSummaryInputCharacters(maximumSummaryInputCharacters);
+            auditRetention.ifPresent(settings::auditRetention);
+            contextBudget.ifPresent(settings::contextBudget);
+            contextSizer.ifPresent(settings::contextSizer);
             return DriverAgent.claudeApi(settings.build(), state, profile);
         }
     }

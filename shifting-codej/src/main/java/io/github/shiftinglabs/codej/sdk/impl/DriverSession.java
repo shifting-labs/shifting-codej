@@ -85,7 +85,7 @@ final class DriverSession
         this.options = requireNonNull(options, "options is null");
         this.directory = agent.state().sessionDirectory(id, options.workingDirectory());
         SessionAccess access = switch (options.access()) {
-            case TOOLS_ONLY -> options.tools().isEmpty() ? SessionAccess.TEXT_ONLY : SessionAccess.TOOLS_ONLY;
+            case TOOLS_ONLY -> options.tools().isEmpty() && !agent.hasToolProviders() ? SessionAccess.TEXT_ONLY : SessionAccess.TOOLS_ONLY;
             case READ_ONLY -> SessionAccess.READ_ONLY;
             case WORKSPACE_WRITE -> SessionAccess.FULL;
         };

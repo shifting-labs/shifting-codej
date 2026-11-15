@@ -6,7 +6,7 @@ built with the existing `publish` profile. No additional Python or Maven depende
 
 ```sh
 python3 scripts/check-compatibility.py \
-  --candidate /absolute/path/to/shifting-codej-0.164.0-1-SNAPSHOT.jar \
+  --candidate /absolute/path/to/shifting-codej-0.169.0-1-SNAPSHOT.jar \
   --output /tmp/codej-compat-final
 ```
 
@@ -22,9 +22,9 @@ The check inventories classes from the **baseline**, so new SPI types are additi
   the legacy `cli.driver` package, and `ToolServer` exposed by the builders.
 - Record component names/order/types, enum values/order, sealed status and permitted subclass names,
   and public runtime constants.
-- Relocated Jackson/Guava sentinel classes, and absence of unrelocated `com/google` or `com/fasterxml`
-  class entries (including multi-release entries), to catch unshaded dependency collisions.
-- Exact bytes at `io/github/shiftinglabs/codej/sdk/impl/codex-checksums.properties`, relative
+- Relocated Jackson/Guava sentinel classes, and absence of any class entries outside
+  `io/github/shiftinglabs/codej/` (including multi-release entries), matching the CI packaging gate.
+- Exact reviewed bytes at `io/github/shiftinglabs/codej/sdk/impl/codex-checksums.properties`, relative
   resource lookup from `CodexBinary`, archive/file checksum forms, and the existing release-version
   convention using the runtime `Codex.VERSION` field rather than its inlined value.
 - A legacy driver/session/turn implementation and public builder calls compiled **once against
@@ -39,6 +39,19 @@ missing executables. It does not probe providers, run model turns, read credenti
 Codex, touch a database, or prove all provider behavior. Signature/source compatibility alone
 does not prove behavioral compatibility. The surface snapshot is intentionally strict: edits
 within existing types (even compatible additions/reordering) need review; new types are allowed.
+The explicit additive-member allowlist currently contains only `Tool.withParameters`. Its exact
+new declaration/descriptor is filtered before comparison; all published members still compare
+exactly. Full candidate snapshots remain in `*-candidate-full.txt`. Controls prove that changed
+or removed existing members and unreviewed additions still fail. The named factory preserves
+source compatibility for existing `Tool.of(..., null, ...)` calls.
+
+The Codex pin exception permits only `Codex.VERSION` and its exact checksum resource to change
+to a reviewed pair in `CODEX_CHECKSUMS` in the checker. The version field keeps its declaration and descriptor;
+only its reviewed value is normalized to the baseline for signature and runtime comparisons.
+Every other constant still compares exactly. The checker records both resource hashes and the
+candidate's actual Codex version, and preserves unnormalized candidate snapshots as evidence.
+An unknown version, changed checksum bytes, moved resource or changed version-field declaration
+fails the gate. Verify a new resource with `scripts/codex-checksums.mjs` before recording its hash.
 
 When the candidate contains direct API facades, the checker also runs separate JDK-only HTTP
 fixtures for `ClaudeApi` and `DeepSeekApi`. These verify each protocol's tool continuation and
@@ -107,7 +120,10 @@ python3 scripts/compatibility/test_checker.py
 ```
 
 These standard-library tests cover descriptor mismatches, missing relocation sentinels, unrelocated
-dependency entries, and an added sealed subtype that `javap -protected -s -constants` cannot see.
+dependency entries, the exact reviewed additive-member boundary, and an added sealed subtype
+that `javap -protected -s -constants` cannot see. They also verify that Codex pin normalization
+accepts only an explicitly reviewed version and exact resource bytes, preserving all other
+declarations, descriptors and runtime constants.
 The sealed control uses the cached baseline and JDK, with all compilation in temporary directories.
 
 Run the published jar as both baseline and candidate to test the checker/fixture independently of
@@ -119,3 +135,82 @@ file through record-bound built-in tools, performs the contained command startup
 resumes the same conversation from the shaded artifact. Its classpath contains only the JDK and
 candidate jar; no CLI download or live provider is used. Existing baseline-compiled consumer
 checks continue unchanged.
+
+`ToolSpiConsumer` is a candidate-only usage example of the new tool SPI. It implements parameter
+binding without Class tokens, installs a configured provider, invokes a typed tool through a
+wildcard registry entry, encodes the result, and verifies shutdown. Those direct tool examples
+start no background work and depend only on the JDK and shaded candidate jar. It also uses
+`RecordToolParameters`, the additive `Tool.withParameters` factory and `LegacyToolAdapter` to
+run an existing facade tool through the SPI, with explicit host-invocation authority.
+
+The same consumer now injects an alternate WorkspaceReader into the production ReadFileTool.
+It binds the existing optional record parameters, supplies an explicit scoped read grant and
+encodes the typed FileContent result. This checks the exported handler/resource boundary from
+the shaded jar without filesystem access, provider execution or changes to the shared engine.
+
+The provider-installation example also calls ApiEngineConfig.Builder.toolProvider and opens the
+real shared engine with a fake ModelClient. It approves and executes the configured greeting tool,
+checks its result returns to the model boundary, and closes the session/tool set. This example
+uses one bounded engine worker and temporary checkpoint state, with no subprocess, network or
+live model request. Configured providers remain separate from model/agent connectors.
+
+That model client also consumes the additive `ModelRequest.history()` SPI: it verifies a complete
+empty prefix on the first request, then validates ordered tool continuation against the settled
+assistant exchange and its provider/model provenance. Native replay remains separate from this
+provider-neutral prefix. This example runs from the shaded artifact with only the JDK on its classpath.
+
+The configured engine example also installs a session-owned `PromptProvider`. The model client
+checks that its instruction section reaches the prompt and its contextual section reaches user
+input, while tool continuation remains a typed result batch. The example starts no extra executor.
+
+The same engine example installs an `EngineExtensionProvider` implementing separate `ToolPolicy`
+and `EngineObserver` ports. It checks prepared requirements, passes admission through the existing
+approval path, receives typed metadata notifications, and verifies scope cleanup. No raw model
+arguments, prompt text or result content is supplied to the observer.
+
+That engine also borrows `ToolExecutionBudget.bounded(2)` and opts into `maximumParallelTools(2)`.
+Its pure greeting handler declares `parallelSafe()`. A two-call batch exercises admission, ordered
+typed results/history, observer delivery and lease release from the shaded jar, without another executor.
+
+`ContextCompactionConsumer` is enabled when the candidate exposes `ContextCompactor`. With only the
+JDK and shaded jar, it installs a borrowed policy through each public API facade, compacts native
+replay twice, and resumes across agents with the policy later disabled. The policy still sees full
+canonical history while outgoing requests contain the compacted active context. Loopback HTTP
+counts prove that compaction adds no hidden inference calls; no live model or provider CLI is used.
+Older candidates skip this additive fixture and keep the existing baseline consumer checks.
+
+`ContextSummarizationConsumer` is enabled separately when `ContextSummarizationPolicy` is present.
+It reuses that loopback fixture to opt both public facades into engine-owned LLM summaries. Five
+conversation inferences plus two selected summary inferences are counted per provider, with repeated
+compaction, full audit-prefix visibility and durable resume after disabling the policy. Summary
+generation uses the existing model client; no live provider or separate summary backend is used.
+
+`IncrementalSummaryConsumer` is guarded separately by `ModelCompactionMemory`. It configures both
+public API builders with a 2,000-character input bound, summarizes a growing prefix in two chunks,
+then restarts and reuses committed memory for the next new group. Request counts and outgoing bodies
+check that earlier raw prefixes are not repeated. It uses only the JDK, shaded jar and loopback HTTP;
+older candidates continue to skip this additive fixture.
+
+`AuditRetentionConsumer` is guarded by the new `AuditRetentionPolicy`. It enables both public
+facades to prune summary-covered history between bounded summary chunks, reopens their format-3
+checkpoints, and continues with retention disabled. It verifies raw audit removal and retained
+memory through the JDK and shaded jar only. Its synthetic Claude checkpoint is copied to the
+report directory as `retained-checkpoint.json` for checking explicit rejection by older readers.
+
+`ContextBudgetConsumer` is guarded by `ContextBudget`. It installs both public facades' sizing and
+budget options, triggers compaction from measured pressure, verifies the provider output cap and
+resumes the compacted replay. Four conversation requests plus one summary request per provider
+confirm that sizing itself adds no inference. Its character counts deliberately simulate token
+counts for the loopback fixture; they are not a production tokenizer or provider limit table.
+
+The context-budget packaged consumer also enables `contextBudget(...)` without a custom sizer for
+`claude-sonnet-4-5` and `deepseek-flash`. Strict admission must succeed locally and cap the outgoing
+output reservation to the smaller of the built-in provider limit and the existing engine turn budget. Each fixture receives exactly one inference;
+no token-count or metadata endpoint is needed. These are conservative local estimates, not tokenizer
+accuracy tests or a live model-availability check.
+
+`CommandToolsConsumer` compiles with only the JDK and candidate shaded artifact. It verifies the
+legacy command executor's unsupported default, then registers `CommandToolProvider` through both
+public API facades. A scripted Java backend exercises approval, shared-budget wiring, prepared
+resource journaling, typed command/result codecs and stop-before-acknowledgement. No command tree
+or external execution runtime is launched; real platform containment requires backend-specific tests.

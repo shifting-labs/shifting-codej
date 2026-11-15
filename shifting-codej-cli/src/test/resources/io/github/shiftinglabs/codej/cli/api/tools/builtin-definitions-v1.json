@@ -1,0 +1,27 @@
+[
+  {
+    "name": "read_file",
+    "description": "Read one bounded UTF-8 workspace file and its SHA-256 preimage",
+    "schema": "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"startLine\":{\"type\":\"integer\"},\"maximumCharacters\":{\"type\":\"integer\"}},\"required\":[\"path\"],\"additionalProperties\":false}"
+  },
+  {
+    "name": "list_files",
+    "description": "List one workspace directory; protected metadata is omitted",
+    "schema": "{\"type\":\"object\",\"properties\":{\"directory\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"directory\",\"limit\"],\"additionalProperties\":false}"
+  },
+  {
+    "name": "search_files",
+    "description": "Bounded literal text search in UTF-8 workspace files; no regular expressions",
+    "schema": "{\"type\":\"object\",\"properties\":{\"directory\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"caseSensitive\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"directory\",\"text\",\"caseSensitive\",\"limit\"],\"additionalProperties\":false}"
+  },
+  {
+    "name": "apply_patch",
+    "description": "Create, update or delete one workspace file; updates/deletes require expectedSha256. Exact replacements must match once",
+    "schema": "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"action\":{\"type\":\"string\",\"enum\":[\"CREATE\",\"UPDATE\",\"DELETE\"]},\"expectedSha256\":{\"type\":\"string\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"before\":{\"type\":\"string\"},\"after\":{\"type\":\"string\"}},\"required\":[\"before\",\"after\"],\"additionalProperties\":false}}},\"required\":[\"path\",\"action\",\"edits\"],\"additionalProperties\":false}"
+  },
+  {
+    "name": "shell_command",
+    "description": "Run absolute argv in a fixed macOS sandbox: read-only workspace, private scratch, no network, no child processes",
+    "schema": "{\"type\":\"object\",\"properties\":{\"argv\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"directory\":{\"type\":\"string\"},\"timeoutSeconds\":{\"type\":\"integer\"}},\"required\":[\"argv\",\"directory\",\"timeoutSeconds\"],\"additionalProperties\":false}"
+  }
+]

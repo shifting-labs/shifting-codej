@@ -168,6 +168,20 @@ public final class AnthropicHttpFixture
         return body.append(end("tool_use")).toString();
     }
 
+    private record ParallelBlock(String type, String id, String name, Map<String, String> input) {}
+
+    public static String parallelToolStream()
+            throws com.fasterxml.jackson.core.JsonProcessingException
+    {
+        StringBuilder body = new StringBuilder(start());
+        for (int index = 0; index < 2; index++) {
+            var block = new ParallelBlock("tool_use", "call-" + (index + 1), "contract_lookup", Map.of("key", index == 0 ? "first" : "second"));
+            body.append(event("content_block_start", "\"index\":" + index + ",\"content_block\":" + JSON.writeValueAsString(block)))
+                    .append(event("content_block_stop", "\"index\":" + index));
+        }
+        return body.append(end("tool_use")).toString();
+    }
+
     @Override
     public void close()
     {

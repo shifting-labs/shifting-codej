@@ -50,6 +50,16 @@ public final class ClaudeApiConnector
                     .maximumOutputTokens(config.maximumOutputTokens).redactorSupplier(client::redactor)
                     .toolExecutor(config.callbacks.orElse(command -> Thread.ofVirtual().start(command)));
             config.codingTools.ifPresent(engine::codingTools);
+            config.toolProviders.forEach(engine::toolProvider);
+            config.promptProviders.forEach(engine::promptProvider);
+            config.extensions.forEach(engine::extension);
+            config.toolExecutionBudget.ifPresent(engine::toolExecutionBudget);
+            engine.maximumParallelTools(config.maximumParallelTools);
+            config.contextCompactor.ifPresent(engine::contextCompactor);
+            config.contextSummarization.ifPresent(engine::contextSummarization);
+            engine.maximumSummaryInputCharacters(config.maximumSummaryInputCharacters);
+            config.auditRetention.ifPresent(engine::auditRetention);
+            config.contextBudget.ifPresent(engine::contextBudget);
             return new ApiConnector(id()).create(engine.build(), context);
         }
         catch (RuntimeException failure) {

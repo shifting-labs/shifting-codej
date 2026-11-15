@@ -20,10 +20,14 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderQuotaSnapshot;
 import java.util.List;
 import java.util.Optional;
 
+import static java.util.Objects.requireNonNull;
+
 /**
  * Provider adapter for individual inference requests, below the agent connector SPI. A shared
  * agent engine owns sessions, persistence, permissions and tool execution. This adapter never
  * invokes host tools or runs an agent loop. Provider SDK objects do not cross this boundary.
+ * Requests may additionally carry a provider-neutral history prefix. Existing adapters can ignore
+ * it and continue using their lossless private replay; partial histories must never replace replay.
  *
  * <p>A client is thread-safe and may serve independent calls concurrently. Construction makes no
  * inference request. Credentials belong to its configuration, never to requests or replay state.
@@ -47,6 +51,45 @@ public interface ModelClient
     default ProviderQuotaSnapshot quota()
     {
         return ProviderQuotaSnapshot.unavailable("This model provider does not report account limits.");
+    }
+
+    /**
+     * Optional local assessment of the actual active input and provider limits. Empty means unknown;
+     * existing clients retain their defaults. Never performs inference, metadata HTTP or tool effects.
+     */
+    default Optional<ModelContextAssessment> contextBudget(ModelRequest request)
+    {
+        requireNonNull(request, "request is null");
+        return Optional.empty();
+    }
+
+    /**
+     * Explicit opt-in for engine-generated summaries. The default does not change existing local
+     * compact implementations; adapters supporting the new mode must also implement compact safely.
+     */
+    default boolean supportsContextCompaction() { return false; }
+
+    /**
+     * Recover committed summary memory locally for incremental generation. Empty means no known
+     * memory; existing clients retain full-prefix behavior. Validate replay ownership/version and
+     * reject malformed summaries without exposing native data or performing inference.
+     */
+    default Optional<ModelCompactionMemory> compactionMemory(ModelReplayState replay)
+    {
+        requireNonNull(replay, "replay is null");
+        return Optional.empty();
+    }
+
+    /**
+     * Optional bounded local replay compaction, without inference or tool execution. Preserve retained
+     * native blocks/signatures exactly and reject unsupported/unsafe boundaries. Empty means unsupported;
+     * the default preserves existing adapters. Return the exact original state for an already-covered
+     * proposal. Otherwise the engine requires a smaller replacement owned by this provider.
+     */
+    default Optional<ModelReplayState> compact(ModelCompactionRequest request)
+    {
+        requireNonNull(request, "request is null");
+        return Optional.empty();
     }
 
     /**

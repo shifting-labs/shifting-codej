@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "id": "11111111-1111-4111-8111-111111111111",
+  "connector": "fake-api",
+  "profile": "work",
+  "lane": "fake-api-work",
+  "phase": "tools",
+  "journal": [
+    {"kind": "user", "turn": "turn", "input": {"kind": "user", "text": "Hello", "attachments": [
+      {"id": "image", "name": "image.png", "mediaType": "image/png", "path": "/tmp/image.png"}
+    ]}},
+    {"kind": "request", "id": "request-1"},
+    {"kind": "response", "id": "request-1", "stop": "TOOL_CALLS"},
+    {"kind": "tool-start", "id": "call-1"},
+    {"kind": "coding-launch", "launchId": "launch-1"},
+    {"kind": "tool-resource", "id": "call-1", "resource": {"kind": "process", "id": "launch-1"}},
+    {"kind": "tool-result", "id": "call-1", "text": "Saved", "error": false}
+  ],
+  "receipts": [
+    {"id": "call-1", "name": "example", "arguments": "{}", "eventId": "request-1:call-1", "started": true,
+      "result": {"text": "Saved", "error": false}},
+    {"id": "call-2", "name": "example", "arguments": "{}", "eventId": "request-1:call-2", "started": false}
+  ],
+  "replay": {"provider": "fake-api", "version": 1, "payload": "opaque signed replay"},
+  "setup": {"model": "model", "instructions": "Host instructions", "effort": "high", "tier": "standard",
+    "tools": [{"name": "example", "description": "Example", "schema": " {} "}]},
+  "input": {"kind": "results", "results": [{"id": "previous-call", "text": "Previous", "error": false}]}
+}

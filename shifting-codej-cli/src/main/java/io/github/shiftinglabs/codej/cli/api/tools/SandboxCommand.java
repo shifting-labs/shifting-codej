@@ -20,6 +20,11 @@ import io.github.shiftinglabs.codej.cli.process.ProcessOwner;
 import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
 import io.github.shiftinglabs.codej.cli.process.ProcessStream;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecution;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionContext;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolOutcome;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolResource;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolStopResult;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -31,7 +36,10 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -40,7 +48,7 @@ import static io.github.shiftinglabs.codej.cli.api.tools.ToolMessages.ShellComma
 
 /** Seatbelt enforces read/write/network/process boundaries; the borrowed supervisor owns process lifecycle. */
 final class SandboxCommand
-        implements AutoCloseable
+        implements CommandExecutor, AutoCloseable
 {
     private final WorkspaceFiles files;
     private final CodingTools limits;
@@ -49,8 +57,8 @@ final class SandboxCommand
     private final Consumer<String> prepared;
     private final Path scratch;
     private final String profile;
-    private ManagedProcess active;
-    private boolean stopped;
+    private volatile ManagedProcess active;
+    private volatile boolean stopped;
 
     SandboxCommand(WorkspaceFiles files, CodingTools limits, ProcessSupervisor supervisor, String owner, Consumer<String> prepared)
             throws IOException
@@ -105,6 +113,12 @@ final class SandboxCommand
     CommandResult run(ShellCommand command)
             throws IOException
     {
+        return run(command, launch -> {});
+    }
+
+    private CommandResult run(ShellCommand command, Consumer<String> invocationPrepared)
+            throws IOException
+    {
         if (active != null) {
             throw new CodingToolException("PROCESS_UNCERTAIN", "Previous command requires reconciliation", true);
         }
@@ -120,6 +134,7 @@ final class SandboxCommand
         var launch = supervisor.prepare(spec);
         try {
             prepared.accept(launch.launchId());
+            invocationPrepared.accept(launch.launchId());
         }
         catch (RuntimeException failure) {
             supervisor.acknowledge(launch.launchId());
@@ -160,6 +175,99 @@ final class SandboxCommand
                 exit.stdoutTruncated(), exit.stderrTruncated());
     }
 
+    @Override
+    public ToolExecution<CommandResult> start(ShellCommand request, ToolExecutionContext context)
+    {
+        CodingToolSupport.check(CodingToolSupport.command(), context);
+        ManagedProcess previous = active;
+        ToolOutcome<CommandResult> outcome;
+        try {
+            outcome = ToolOutcome.completed(run(request, launch -> {
+                context.checkActive();
+                context.recordPrepared(new ToolResource("process.launch", launch));
+                context.checkActive();
+            }));
+        }
+        catch (CodingToolException failure) {
+            outcome = CodingToolSupport.failure(failure);
+        }
+        catch (IOException failure) {
+            outcome = CodingToolSupport.ioFailure();
+        }
+        Optional<ManagedProcess> owned = active == previous ? Optional.empty() : Optional.ofNullable(active);
+        return new CommandExecution(outcome, owned, owned.isEmpty() || stopped);
+    }
+
+    private final class CommandExecution
+            implements ToolExecution<CommandResult>
+    {
+        private final ToolOutcome<CommandResult> outcome;
+        private final CompletionStage<ToolOutcome<CommandResult>> completion;
+        private final Optional<ManagedProcess> owned;
+        private volatile boolean verified;
+
+        CommandExecution(ToolOutcome<CommandResult> outcome, Optional<ManagedProcess> owned, boolean verified)
+        {
+            this.outcome = outcome;
+            this.completion = CompletableFuture.completedStage(outcome);
+            this.owned = owned;
+            this.verified = verified;
+        }
+
+        @Override
+        public CompletionStage<ToolOutcome<CommandResult>> completion() { return completion; }
+
+        @Override
+        public void cancel()
+        {
+            if (!verified) {
+                owned.ifPresent(ManagedProcess::cancel);
+            }
+        }
+
+        @Override
+        public CompletionStage<ToolStopResult> stopAndVerify()
+        {
+            if (verified) {
+                return CompletableFuture.completedStage(ToolStopResult.verifiedStopped());
+            }
+            ManagedProcess process = owned.orElseThrow();
+            boolean interrupted = Thread.interrupted();
+            try {
+                verified = process.stopAndVerify().toCompletableFuture().get(3, TimeUnit.SECONDS) == ProcessExit.TreeTermination.VERIFIED_STOPPED;
+                if (verified && active == process) {
+                    stopped = true;
+                }
+            }
+            catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                return CompletableFuture.completedStage(ToolStopResult.unverified("Command termination could not be verified"));
+            }
+            catch (Exception failure) {
+                return CompletableFuture.completedStage(ToolStopResult.unverified("Command termination could not be verified"));
+            }
+            finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return CompletableFuture.completedStage(verified ? ToolStopResult.verifiedStopped() : ToolStopResult.unverified("Command termination could not be verified"));
+        }
+
+        @Override
+        public void committed()
+        {
+            if (!verified || outcome.state() == ToolOutcome.State.UNCERTAIN) {
+                throw new CodingToolException("PROCESS_UNCERTAIN", "Command outcome requires reconciliation", true);
+            }
+            synchronized (SandboxCommand.this) {
+                if (owned.filter(process -> active == process).isPresent()) {
+                    SandboxCommand.this.committed();
+                }
+            }
+        }
+    }
+
     private void verifyStop()
     {
         boolean interrupted = Thread.interrupted();
@@ -176,6 +284,20 @@ final class SandboxCommand
         }
         if (!stopped) {
             throw new CodingToolException("PROCESS_UNCERTAIN", "Command termination could not be verified", true);
+        }
+    }
+
+    ToolStopResult stopAndVerify()
+    {
+        if (active == null || stopped) {
+            return ToolStopResult.verifiedStopped();
+        }
+        try {
+            verifyStop();
+            return ToolStopResult.verifiedStopped();
+        }
+        catch (CodingToolException failure) {
+            return ToolStopResult.unverified("Command termination could not be verified");
         }
     }
 

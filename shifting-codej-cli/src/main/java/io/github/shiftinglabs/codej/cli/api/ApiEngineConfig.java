@@ -17,9 +17,22 @@ import io.github.shiftinglabs.codej.CodingTools;
 import io.github.shiftinglabs.codej.cli.driver.AgentLaneId;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
+import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
+import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
+import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
+import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
+import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -53,6 +66,16 @@ public final class ApiEngineConfig
     final Supplier<SecretRedactor> redactors;
     final Optional<Executor> toolExecutor;
     final Optional<CodingTools> codingTools;
+    final List<ToolProviderBinding> toolProviders;
+    final List<PromptProviderBinding> promptProviders;
+    final List<EngineExtensionBinding> extensions;
+    final Optional<ToolExecutionBudget> toolExecutionBudget;
+    final int maximumParallelTools;
+    final Optional<ContextCompactor> contextCompactor;
+    final Optional<ContextSummarizationPolicy> contextSummarization;
+    final int maximumSummaryInputCharacters;
+    final Optional<AuditRetentionPolicy> auditRetention;
+    final Optional<ContextBudget> contextBudget;
 
     private ApiEngineConfig(Builder b)
     {
@@ -76,6 +99,18 @@ public final class ApiEngineConfig
         redactors = b.redactors.orElse(() -> redactor);
         toolExecutor = b.toolExecutor;
         codingTools = b.codingTools;
+        toolProviders = List.copyOf(b.toolProviders);
+        promptProviders = PromptProviderBinding.snapshot(b.promptProviders);
+        extensions = EngineExtensionBinding.snapshot(b.extensions);
+        toolExecutionBudget = b.toolExecutionBudget;
+        maximumParallelTools = b.maximumParallelTools;
+        contextCompactor = b.contextCompactor;
+        contextSummarization = b.contextSummarization;
+        maximumSummaryInputCharacters = b.maximumSummaryInputCharacters;
+        auditRetention = b.auditRetention;
+        contextBudget = b.contextBudget;
+        checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
+        checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
     SecretRedactor redactor() { return requireNonNull(redactors.get(), "redactor supplier returned null"); }
@@ -106,6 +141,16 @@ public final class ApiEngineConfig
         private Optional<Supplier<SecretRedactor>> redactors = Optional.empty();
         private Optional<Executor> toolExecutor = Optional.empty();
         private Optional<CodingTools> codingTools = Optional.empty();
+        private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
+        private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
+        private final List<EngineExtensionBinding> extensions = new ArrayList<>();
+        private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
+        private int maximumParallelTools = 1;
+        private Optional<ContextCompactor> contextCompactor = Optional.empty();
+        private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
+        private int maximumSummaryInputCharacters = 65536;
+        private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
+        private Optional<ContextBudget> contextBudget = Optional.empty();
         private SecretRedactor redactor = SecretRedactor.fromEnvironment(Map.of());
 
         private Builder(ConnectorIdentity identity, AgentLaneId lane, String model, Supplier<ModelClient> clients)
@@ -220,6 +265,120 @@ public final class ApiEngineConfig
         public Builder codingTools(CodingTools value)
         {
             codingTools = Optional.of(requireNonNull(value, "codingTools is null"));
+            return this;
+        }
+
+        /** Installs a provider in non-text sessions; configuration must be immutable. Typed calls always require approval. */
+        public <C> Builder toolProvider(ToolProvider<C> provider, C configuration)
+        {
+            return toolProvider(ToolProviderBinding.of(provider, configuration));
+        }
+
+        /** Adds an explicitly bound provider; the session owns and verifies every returned tool set. */
+        public Builder toolProvider(ToolProviderBinding binding)
+        {
+            toolProviders.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Installs a fresh scoped contributor for every session, including text-only sessions. */
+        public <C> Builder promptProvider(PromptProvider<C> provider, C configuration)
+        {
+            return promptProvider(PromptProviderBinding.of(provider, configuration));
+        }
+
+        public Builder promptProvider(PromptProviderBinding binding)
+        {
+            promptProviders.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Installs a fresh session-owned restrictive policy and/or metadata observer. */
+        public <C> Builder extension(EngineExtensionProvider<C> provider, C configuration)
+        {
+            return extension(EngineExtensionBinding.of(provider, configuration));
+        }
+
+        public Builder extension(EngineExtensionBinding binding)
+        {
+            extensions.add(requireNonNull(binding, "binding is null"));
+            return this;
+        }
+
+        /** Borrows a shared admission budget; the engine never closes the host service. */
+        public Builder toolExecutionBudget(ToolExecutionBudget budget)
+        {
+            toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
+            return this;
+        }
+
+        /** Opts into a bounded asynchronous batch window; values greater than one require a shared budget. */
+        public Builder maximumParallelTools(int value)
+        {
+            checkArgument(value >= 1 && value <= 64, "parallel tool window must be between 1 and 64");
+            maximumParallelTools = value;
+            return this;
+        }
+
+        /** Borrows an opt-in summary policy; no hidden inference or tool work is permitted. */
+        public Builder contextCompactor(ContextCompactor compactor)
+        {
+            contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
+            return this;
+        }
+
+        /**
+         * Borrows a policy enabling bounded tool-free summary inferences charged to the current turn.
+         * Cannot be combined with a local context compactor. Disabled by default.
+         *
+         * @param policy thread-safe selector; the engine performs inference with its existing budgets
+         * @return this builder
+         */
+        public Builder contextSummarization(ContextSummarizationPolicy policy)
+        {
+            contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
+            return this;
+        }
+
+        /**
+         * Bounds each encoded summary input, including prior memory and complete new tool groups.
+         * The engine text limit also applies; an indivisible oversized group fails without truncation.
+         *
+         * @param value positive maximum UTF-16 character count; defaults to 65,536, not a token estimate
+         * @return this builder
+         */
+        public Builder maximumSummaryInputCharacters(int value)
+        {
+            if (value <= 0) {
+                throw new IllegalArgumentException("summary input limit must be positive");
+            }
+            maximumSummaryInputCharacters = value;
+            return this;
+        }
+
+        /**
+         * Borrows an opt-in audit retention policy. Covered history is irreversibly removed;
+         * physical staged-attachment cleanup requires a separately positive deletion bound.
+         *
+         * @param policy thread-safe host selector; the engine performs safe commits and owned cleanup
+         * @return this builder
+         */
+        public Builder auditRetention(AuditRetentionPolicy policy)
+        {
+            auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
+            return this;
+        }
+
+        /**
+         * Enables provider-aware preflight of actual input plus reserved output and a safety margin.
+         * Disabled by default; sizing never adds inference calls or changes tool authority.
+         *
+         * @param budget immutable policy, including explicit handling of unknown sizes
+         * @return this builder
+         */
+        public Builder contextBudget(ContextBudget budget)
+        {
+            contextBudget = Optional.of(requireNonNull(budget, "contextBudget is null"));
             return this;
         }
 

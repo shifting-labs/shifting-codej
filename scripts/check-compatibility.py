@@ -18,6 +18,12 @@ import zipfile
 PREFIX = "io/github/shiftinglabs/codej/"
 CHECKSUMS = PREFIX + "sdk/impl/codex-checksums.properties"
 BASE_VERSION = "0.164.0-1"
+BASE_CODEX_VERSION = "0.164.0"
+# Only reviewed runtime pins may change the version constant and download resource.
+CODEX_CHECKSUMS = {
+    "0.164.0": "3efc76605c40eb62fc34a805658319fba9448d85862fb08616bb0b1d2bc8cdc7",
+    "0.169.0": "0203a6692384a97dded1cc1267553c42c3d15ad040e4df0d7d7f5362d15182ce",
+}
 
 
 def run(command):
@@ -50,11 +56,61 @@ def compare(output, name, before, after):
         raise RuntimeError(f"Compatibility mismatch: {output / (name + '.diff')}")
 
 
+# Explicit additive members only. Keep every published descriptor, generic declaration and modifier exact.
+ADDITIVE_API_MEMBERS = {
+    "public-api": (
+        "  public static <A> io.github.shiftinglabs.codej.Tool withParameters(java.lang.String, java.lang.String, "
+        "io.github.shiftinglabs.codej.tool.ToolParameters<A>, io.github.shiftinglabs.codej.Tool$Handler<A>);\n"
+        "    descriptor: (Ljava/lang/String;Ljava/lang/String;Lio/github/shiftinglabs/codej/tool/ToolParameters;"
+        "Lio/github/shiftinglabs/codej/Tool$Handler;)Lio/github/shiftinglabs/codej/Tool;\n\n",
+    ),
+}
+
+
+def published_surface(group, text):
+    for member in ADDITIVE_API_MEMBERS.get(group, ()):
+        if text.count(member) > 1:
+            raise RuntimeError("Duplicate allowed additive member")
+        text = text.replace(member, "")
+    return text
+
+
+def codex_version(jar):
+    declaration = run([jdk_tool("javap"), "-constants", "-classpath", str(jar), "io.github.shiftinglabs.codej.Codex"])
+    version = re.search(r'^  public static final java\.lang\.String VERSION = "([^"]+)";$', declaration, re.MULTILINE)
+    if not version or version.group(1) not in CODEX_CHECKSUMS:
+        raise RuntimeError("Unreviewed Codex version constant")
+    return version.group(1)
+
+
+def check_codex_checksums(data, version):
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != CODEX_CHECKSUMS.get(version):
+        raise RuntimeError(f"Codex {version} checksum resource does not match the reviewed pin")
+    return digest
+
+
+def normalize_codex_version(group, text, version):
+    if version not in CODEX_CHECKSUMS:
+        raise RuntimeError("Unreviewed Codex version constant")
+    if group == "public-api":
+        prefix = "public final class io.github.shiftinglabs.codej.Codex {\n  public static final java.lang.String VERSION = "
+        before, after = prefix + f'"{version}";', prefix + f'"{BASE_CODEX_VERSION}";'
+    elif group == "records-enums-runtime-constants":
+        prefix = "io.github.shiftinglabs.codej.Codex.VERSION="
+        before, after = prefix + version + "\n", prefix + BASE_CODEX_VERSION + "\n"
+    else:
+        return text
+    if text.count(before) != 1:
+        raise RuntimeError("Codex version declaration changed or missing")
+    return text.replace(before, after)
+
+
 def check_shading(names):
     for sentinel in ("internal/jackson/databind/ObjectMapper.class", "internal/google/common/base/Preconditions.class"):
         if PREFIX + sentinel not in names:
             raise RuntimeError(f"Missing relocated dependency class: {PREFIX + sentinel}")
-    unrelocated = sorted(n for n in names if re.match(r"^(?:META-INF/versions/\d+/)?com/(google|fasterxml)/.*\.class$", n))
+    unrelocated = sorted(n for n in names if n.endswith(".class") and not n.startswith(PREFIX))
     if unrelocated:
         raise RuntimeError(f"Unrelocated dependency classes in candidate: {unrelocated[:5]}")
 
@@ -66,7 +122,7 @@ def verify(args, report):
                   baseline_sha256=sha256(baseline), candidate_sha256=sha256(candidate))
     with zipfile.ZipFile(baseline) as old, zipfile.ZipFile(candidate) as new:
         check_shading(new.namelist())
-        report["passed"].append("relocated Jackson/Guava sentinels; no unrelocated dependency classes")
+        report["passed"].append("relocated Jackson/Guava sentinels; all classes under the SDK package")
         names = old.namelist()
         groups = {
             "public-api": sorted(n[:-6].replace("/", ".") for n in names
@@ -77,10 +133,14 @@ def verify(args, report):
         }
         if not all(groups.values()):
             raise RuntimeError("Baseline is missing the expected compatibility surface")
+        old_codex, new_codex = codex_version(baseline), codex_version(candidate)
+        if old_codex != BASE_CODEX_VERSION:
+            raise RuntimeError("Baseline has an unexpected Codex version")
         # Bytequay reads this exact path directly from the shaded artifact.
-        if old.read(CHECKSUMS) != new.read(CHECKSUMS):
-            raise RuntimeError("Codex checksum resource changed or moved")
-        report["passed"].append("exact Codex checksum resource bytes/path")
+        report["baseline_codex_checksums_sha256"] = check_codex_checksums(old.read(CHECKSUMS), old_codex)
+        report["candidate_codex_checksums_sha256"] = check_codex_checksums(new.read(CHECKSUMS), new_codex)
+        report["candidate_codex_version"] = new_codex
+        report["passed"].append("exact reviewed Codex version/checksum resource bytes/path")
         manifest = new.read("META-INF/MANIFEST.MF").decode().replace("\r\n ", "")
         version = re.search(r"^Implementation-Version: (.+)$", manifest, re.MULTILINE)
         if not version:
@@ -91,9 +151,10 @@ def verify(args, report):
             raise RuntimeError("Baseline is not the published 0.164.0-1 version")
         for group, classes in groups.items():
             options = [jdk_tool("javap"), "-protected", "-s", "-constants"]
-            compare(output, group,
-                    run(options + ["-classpath", str(baseline), *classes]),
-                    run(options + ["-classpath", str(candidate), *classes]))
+            before = run(options + ["-classpath", str(baseline), *classes])
+            after = run(options + ["-classpath", str(candidate), *classes])
+            (output / f"{group}-candidate-full.txt").write_text(after)
+            compare(output, group, before, normalize_codex_version(group, published_surface(group, after), new_codex))
             report["passed"].append(f"{group}: {len(classes)} class signatures/constructors/constants")
 
     fixture = Path(__file__).parent / "compatibility" / "LegacyConsumer.java"
@@ -109,8 +170,10 @@ def verify(args, report):
                         "LegacyConsumer", *arguments])
 
         inventory = sorted({name for group in groups.values() for name in group})
-        compare(output, "records-enums-runtime-constants",
-                consumer(baseline, "surface", *inventory), consumer(candidate, "surface", *inventory))
+        runtime_surface = consumer(candidate, "surface", *inventory)
+        (output / "records-enums-runtime-constants-candidate-full.txt").write_text(runtime_surface)
+        compare(output, "records-enums-runtime-constants", consumer(baseline, "surface", *inventory),
+                normalize_codex_version("records-enums-runtime-constants", runtime_surface, new_codex))
         report["passed"].append("record components, enum order, sealed status/permitted subclasses, runtime constants")
         for label, jar in (("baseline", baseline), ("candidate", candidate)):
             state = Path(folder) / label
@@ -148,6 +211,78 @@ def verify(args, report):
                           "DeepSeekApiConsumer", str(Path(folder) / "deepseek-api")])
             (output / "deepseek-api-consumer.txt").write_text(result)
             report["passed"].append("DeepSeekApi fake HTTP: private reasoning, host tools, durable resume and key rotation; JDK + jar only")
+
+        with zipfile.ZipFile(candidate) as artifact:
+            has_tool_spi = PREFIX + "tool/ToolParameters.class" in artifact.namelist()
+        if has_tool_spi:
+            tool_fixture = Path(__file__).parent / "compatibility" / "ToolSpiConsumer.java"
+            run([jdk_tool("javac"), "--release", "25", "-cp", str(candidate), "-d", str(classes), str(tool_fixture)])
+            result = run([jdk_tool("java"), "-cp", os.pathsep.join((str(classes), str(candidate))), "ToolSpiConsumer"])
+            (output / "tool-spi-consumer.txt").write_text(result)
+            report["passed"].append("Tool SPI: interface-valued parameters, provider installation, typed results and verified shutdown; JDK + jar only")
+
+        with zipfile.ZipFile(candidate) as artifact:
+            has_compaction = PREFIX + "cli/spi/context/ContextCompactor.class" in artifact.namelist()
+        if has_compaction:
+            context_fixture = Path(__file__).parent / "compatibility" / "ContextCompactionConsumer.java"
+            run([jdk_tool("javac"), "--release", "25", "-cp", str(candidate), "-d", str(classes), str(context_fixture)])
+            result = run([jdk_tool("java"), "-cp", os.pathsep.join((str(classes), str(candidate))),
+                          "ContextCompactionConsumer", str(Path(folder) / "context-api")])
+            (output / "context-compaction-consumer.txt").write_text(result)
+            report["passed"].append("Context compaction: local Claude/DeepSeek replay rewrite, full audit history and durable resume; JDK + jar only")
+
+        with zipfile.ZipFile(candidate) as artifact:
+            has_summary = PREFIX + "cli/spi/context/ContextSummarizationPolicy.class" in artifact.namelist()
+        if has_summary:
+            summary_fixture = Path(__file__).parent / "compatibility" / "ContextSummarizationConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(summary_fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "ContextSummarizationConsumer", str(Path(folder) / "summary-api")])
+            (output / "context-summarization-consumer.txt").write_text(result)
+            report["passed"].append("LLM summarization: budgeted Claude/DeepSeek summary calls and durable replay; JDK + jar only")
+
+        with zipfile.ZipFile(candidate) as artifact:
+            has_incremental = PREFIX + "cli/spi/model/ModelCompactionMemory.class" in artifact.namelist()
+        if has_incremental:
+            fixture = Path(__file__).parent / "compatibility" / "IncrementalSummaryConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "IncrementalSummaryConsumer", str(Path(folder) / "incremental-api")])
+            (output / "incremental-summary-consumer.txt").write_text(result)
+            report["passed"].append("Incremental summaries: bounded Claude/DeepSeek chunks and durable memory; JDK + jar only")
+
+        with zipfile.ZipFile(candidate) as artifact:
+            has_retention = PREFIX + "cli/spi/retention/AuditRetentionPolicy.class" in artifact.namelist()
+        if has_retention:
+            fixture = Path(__file__).parent / "compatibility" / "AuditRetentionConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            fixture_root = Path(folder) / "retention-api"
+            result = run([jdk_tool("java"), "-cp", classpath, "AuditRetentionConsumer", str(fixture_root)])
+            (output / "audit-retention-consumer.txt").write_text(result)
+            (output / "retained-checkpoint.json").write_bytes((fixture_root / "claude-retained-checkpoint.json").read_bytes())
+            report["passed"].append("Audit retention: Claude/DeepSeek pruned format-3 history and durable resume; JDK + jar only")
+
+        with zipfile.ZipFile(candidate) as artifact:
+            has_context_budget = PREFIX + "cli/spi/context/ContextBudget.class" in artifact.namelist()
+        if has_context_budget:
+            fixture = Path(__file__).parent / "compatibility" / "ContextBudgetConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "ContextBudgetConsumer", str(Path(folder) / "context-budget-api")])
+            (output / "context-budget-consumer.txt").write_text(result)
+            report["passed"].append("Context budgets: provider sizing, output caps, pressured compaction and resume; JDK + jar only")
+
+
+        with zipfile.ZipFile(candidate) as artifact:
+            has_command_tools = PREFIX + "cli/api/tools/CommandToolProvider.class" in artifact.namelist()
+        if has_command_tools:
+            fixture = Path(__file__).parent / "compatibility" / "CommandToolsConsumer.java"
+            classpath = os.pathsep.join((str(classes), str(candidate)))
+            run([jdk_tool("javac"), "--release", "25", "-cp", classpath, "-d", str(classes), str(fixture)])
+            result = run([jdk_tool("java"), "-cp", classpath, "CommandToolsConsumer", str(Path(folder) / "command-tools-api")])
+            (output / "command-tools-consumer.txt").write_text(result)
+            report["passed"].append("Command tools: Java host backend, shared admission, typed output and both API facades; JDK + jar only")
 
 
 def main():

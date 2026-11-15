@@ -6,7 +6,7 @@
 
     <groupId>io.github.shifting-labs</groupId>
     <artifactId>shifting-codej-parent</artifactId>
-    <version>0.164.0-1-SNAPSHOT</version>
+    <version>0.169.0-1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
