@@ -590,6 +590,82 @@ class TestClaudeEventMapper
         assertThat(mapper.hasFinishedWork()).isFalse();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"completed", "failed"})
+    void lateAliasForEndedChildKeepsWorkFinished(String status)
+    {
+        startAgent("Agent", true);
+        map("""
+                {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn-1","content":"launched"}]},
+                "tool_use_result":{"status":"async_launched","agentId":"child-1"},"session_id":"session-1","uuid":"launched"}
+                """);
+        map("""
+                {"type":"system","subtype":"task_notification","task_id":"child-1","status":"%s","session_id":"session-1","uuid":"ended"}
+                """.formatted(status));
+        assertThat(mapper.hasRunningBackgroundWork()).isFalse();
+        map("""
+                {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn-1","content":"launched"}]},
+                "tool_use_result":{"status":"async_launched","agentId":"child-alias"},"session_id":"session-1","uuid":"late-alias"}
+                """);
+        map("""
+                {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"child-1","task_type":"local_agent"},
+                {"task_id":"child-alias","task_type":"local_agent"}],"session_id":"session-1","uuid":"late-inventory"}
+                """);
+        result();
+        assertThat(mapper.hasRunningBackgroundWork()).isFalse();
+        assertThat(mapper.hasFinishedWork()).isTrue();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"completed,false", "failed,false", "completed,true", "failed,true"})
+    void lateProgressForNewAliasRequiresAFreshStartToReviveEndedChild(String status, boolean inventoryFirst)
+    {
+        startAgent("Agent", true);
+        map("""
+                {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn-1","content":"launched"}]},
+                "tool_use_result":{"status":"async_launched","agentId":"child-1"},"session_id":"session-1","uuid":"launched"}
+                """);
+        map("""
+                {"type":"system","subtype":"task_notification","task_id":"child-1","status":"%s","session_id":"session-1","uuid":"ended"}
+                """.formatted(status));
+        String inventory = """
+                {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"progress-alias","task_type":"local_agent"},
+                {"task_id":"running-alias","task_type":"local_agent"},{"task_id":"pending-alias","task_type":"local_agent"}],
+                "session_id":"session-1","uuid":"late-inventory"}
+                """;
+        if (inventoryFirst) {
+            map(inventory);
+        }
+        assertThat(map("""
+                {"type":"system","subtype":"task_progress","task_id":"progress-alias","tool_use_id":"spawn-1",
+                "session_id":"session-1","uuid":"late-progress"}
+                """)).isEmpty();
+        for (String lateStatus : ImmutableList.of("running", "pending")) {
+            assertThat(map("""
+                    {"type":"system","subtype":"task_updated","task_id":"%s-alias","tool_use_id":"spawn-1","patch":{"status":"%s"},
+                    "session_id":"session-1","uuid":"late-update-%s"}
+                    """.formatted(lateStatus, lateStatus, lateStatus))).isEmpty();
+        }
+        map(inventory);
+        result();
+        assertThat(mapper.hasRunningBackgroundWork()).isFalse();
+        assertThat(mapper.hasFinishedWork()).isTrue();
+
+        assertThat(map("""
+                {"type":"system","subtype":"task_started","task_id":"restarted-child","tool_use_id":"spawn-1",
+                "task_type":"local_agent","is_backgrounded":true,"session_id":"session-1","uuid":"restarted"}
+                """)).anySatisfy(event -> assertThat(event).isInstanceOfSatisfying(ProviderAgentEvent.Lifecycle.class,
+                        lifecycle -> assertThat(lifecycle.phase()).isEqualTo(ProviderAgentEvent.LifecyclePhase.AGENT_STARTED)));
+        assertThat(mapper.hasRunningBackgroundWork()).isTrue();
+        assertThat(mapper.hasFinishedWork()).isFalse();
+        map("""
+                {"type":"system","subtype":"task_notification","task_id":"restarted-child","status":"completed",
+                "session_id":"session-1","uuid":"restarted-ended"}
+                """);
+        assertThat(mapper.hasRunningBackgroundWork()).isFalse();
+        assertThat(mapper.hasFinishedWork()).isTrue();
+    }
+
     @Test
     void marksEveryEventOfABackgroundBashCall()
     {
