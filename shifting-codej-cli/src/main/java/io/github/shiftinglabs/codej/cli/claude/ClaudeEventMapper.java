@@ -643,7 +643,8 @@ final class ClaudeEventMapper
             activityUncertain = true;
             return;
         }
-        tasks.put(id, new TaskActivity(Optional.of(toolId), Optional.of(taskType), previous != null && previous.terminal()));
+        boolean finished = previous != null && previous.terminal() || agents.containsKey(toolId) && !activeAgents.contains(toolId);
+        tasks.put(id, new TaskActivity(Optional.of(toolId), Optional.of(taskType), finished));
         unidentifiedBackgroundTools.remove(toolId);
     }
 
@@ -710,7 +711,10 @@ final class ClaudeEventMapper
         Optional<String> toolId = conflictingTool ? previous.toolUseId() : reportedToolId;
         boolean finished = terminal(state);
         // Claude resumes an ended task with a fresh task_started; a late progress or status update describes the run that ended.
-        if (previous != null && previous.terminal() && !finished && !message.subtype().equals("task_started")) {
+        if (!finished && !message.subtype().equals("task_started") && (previous != null && previous.terminal()
+                || toolId.filter(agents::containsKey).filter(tool -> !activeAgents.contains(tool)).isPresent())) {
+            // Retain the ended alias so a later inventory cannot reopen it.
+            toolId.filter(agents::containsKey).ifPresent(tool -> rememberTask(id, tool, "local_agent"));
             return ImmutableList.of();
         }
         Optional<String> taskType = message.taskType()

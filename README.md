@@ -29,13 +29,13 @@ Both use the shared API engine and keep conversation replay locally.
 <dependency>
     <groupId>io.github.shifting-labs</groupId>
     <artifactId>shifting-codej</artifactId>
-    <version>0.169.0-1</version>
+    <version>0.169.0-2</version>
 </dependency>
 ```
 
 - The SDK has no dependencies of its own on your classpath.
 - The SDK's version starts with the Codex release it runs: `0.169.0-1` runs Codex 0.169.0, and
-  `0.169.0-2` would be a fix on the same Codex. `Codex.VERSION` names it.
+  `0.169.0-2` contains Codej fixes on the same Codex. `Codex.VERSION` names it.
 - The first `Codex.builder().build()` downloads Codex into `~/Library/Caches/shifting-codej/codex/`
   and checks it against hashes recorded in the SDK; anything else is refused. Later builds reuse that
   copy without a network request. Versions no build has used for 30 days are deleted.
