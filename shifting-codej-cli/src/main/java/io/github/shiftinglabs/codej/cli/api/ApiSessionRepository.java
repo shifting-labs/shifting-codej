@@ -14,6 +14,7 @@
 package io.github.shiftinglabs.codej.cli.api;
 
 import io.github.shiftinglabs.codej.cli.driver.AgentAttachment;
+import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelInput;
 
 import java.nio.file.Path;
@@ -21,11 +22,22 @@ import java.util.List;
 
 /**
  * One acquired session writer. Save acknowledges a durable commit before publishing its snapshot.
- * A failed save retains the previous in-memory snapshot; callers must treat the disk outcome as uncertain.
+ * A failed save retains the previous in-memory snapshot; callers must treat the disk outcome as uncertain,
+ * except for {@link CheckpointFull}, which is refused before anything is written.
  */
 interface ApiSessionRepository
         extends AutoCloseable
 {
+    /**
+     * The snapshot, or the snapshot after every started tool settles with {@link ApiCheckpoint#UNRECORDED_RESULT},
+     * exceeds the checkpoint budget. Nothing was written; the previous snapshot remains committed.
+     */
+    final class CheckpointFull
+            extends AgentUnavailableException
+    {
+        CheckpointFull() { super("API session checkpoint is full; start a new session, or enable context compaction or audit retention to keep sessions below the limit"); }
+    }
+
     @FunctionalInterface
     interface Factory
     {

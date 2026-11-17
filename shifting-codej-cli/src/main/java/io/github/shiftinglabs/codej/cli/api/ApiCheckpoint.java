@@ -35,6 +35,8 @@ record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLa
 {
     static final int CURRENT_VERSION = 2;
     static final int RETENTION_VERSION = 3;
+    /** Recorded for a started tool whose real output no longer fits the checkpoint budget. */
+    static final String UNRECORDED_RESULT = "Tool output was not recorded: the session checkpoint is full";
 
     enum Phase { READY, REQUEST, TOOLS, BLOCKED }
 
@@ -113,7 +115,21 @@ record ApiCheckpoint(int version, String id, ConnectorIdentity identity, AgentLa
     ApiCheckpoint completed(int index, String text, boolean error)
     {
         ApiToolReceipt receipt = receipts.get(index);
-        return replace(index, receipt.completed(text, error)).append(new ApiJournal.ToolResult(receipt.id(), text, error));
+        // The text lives once in the receipt, then in history and replay; the journal keeps only the fact.
+        // ponytail: the empty field keeps older checkpoints and readers compatible; drop it with the next format version.
+        return replace(index, receipt.completed(text, error)).append(new ApiJournal.ToolResult(receipt.id(), "", error));
+    }
+
+    /** This snapshot after every started, unsettled tool records {@link #UNRECORDED_RESULT}; {@code this} when none is uncertain. */
+    ApiCheckpoint settled()
+    {
+        ApiCheckpoint settled = this;
+        for (int index = 0; index < receipts.size(); index++) {
+            if (receipts.get(index).uncertain()) {
+                settled = settled.completed(index, UNRECORDED_RESULT, true);
+            }
+        }
+        return settled;
     }
 
     private ApiCheckpoint replace(int index, ApiToolReceipt receipt)

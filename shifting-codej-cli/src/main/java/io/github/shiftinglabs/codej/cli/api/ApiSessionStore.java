@@ -140,8 +140,11 @@ final class ApiSessionStore
         try {
             validate(next, directory.getFileName().toString());
             byte[] bytes = ApiCheckpointCodec.encode(next);
-            if (bytes.length > config.maximumCheckpointBytes) {
-                throw new IOException("checkpoint budget exceeded");
+            // Keep room for every started tool to settle, so a full checkpoint never strands an uncertain receipt.
+            // ponytail: re-encodes while a tool runs; track per-receipt sizes if TestApiCheckpointCost shows it.
+            ApiCheckpoint settled = next.settled();
+            if (bytes.length > config.maximumCheckpointBytes || (settled != next && ApiCheckpointCodec.encode(settled).length > config.maximumCheckpointBytes)) {
+                throw new CheckpointFull();
             }
             try (FileChannel output = FileChannel.open(temporary, Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE),
                     PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))) {

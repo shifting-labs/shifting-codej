@@ -2840,7 +2840,7 @@ class TestApiAgentDriver
     }
 
     @Test
-    void checkpointFailureBeforeToolAdmissionNeverRunsTheHandler()
+    void unrecordableResponseNeverRunsTheHandlerAndKeepsTheSessionResumable()
             throws Exception
     {
         AtomicInteger executions = new AtomicInteger();
@@ -2852,10 +2852,14 @@ class TestApiAgentDriver
         client.script.add((request, sink) -> completed(toolResponse("lookup", "{\"large\":\"" + "x".repeat(2500) + "\"}")));
         try (ApiAgentDriver driver = new ApiAgentDriver(config(client).maximumCheckpointBytes(2048).build(), connectorContext());
                 AgentSession session = driver.open(context(Optional.empty(), List.of(tool), allow()), event -> {})) {
-            assertThat(done(session.start(command("Lookup"))).state()).isEqualTo(AgentTurnResult.State.FAILED);
+            AgentTurnResult result = done(session.start(command("Lookup")));
+            assertThat(result.state()).isEqualTo(AgentTurnResult.State.FAILED);
+            assertThat(result.terminalReason().orElseThrow()).contains("checkpoint is full");
             assertThat(executions).hasValue(0);
-            assertThat(session.resumable()).isFalse();
-            assertThatThrownBy(() -> session.start(command("Retry"))).isInstanceOf(AgentUnavailableException.class);
+            assertThat(readCheckpoint(session.reference()).phase()).isEqualTo(ApiCheckpoint.Phase.READY);
+            assertThat(session.resumable()).isTrue();
+            assertThat(done(session.start(command("Retry"))).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
+            assertThat(executions).hasValue(0);
         }
     }
 

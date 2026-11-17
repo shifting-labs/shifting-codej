@@ -202,6 +202,9 @@ final class ApiTurn
                     || failure.kind() == ModelClientException.Kind.TEMPORARILY_UNAVAILABLE;
             terminal = terminal(AgentTurnResult.State.FAILED, Optional.empty(), Optional.of(config.redactor().redact(failure.getMessage())), kind, transientFailure);
         }
+        catch (ApiSessionRepository.CheckpointFull failure) {
+            terminal = terminal(AgentTurnResult.State.FAILED, Optional.empty(), Optional.of(failure.getMessage()), Optional.empty(), false);
+        }
         catch (Throwable failure) {
             terminal = terminal(AgentTurnResult.State.FAILED, Optional.empty(), Optional.of("API turn failed; inspect its checkpoint before recovery"),
                     Optional.empty(), false);
@@ -728,10 +731,17 @@ final class ApiTurn
                 }
                 throw failure;
             }
-            if (response.text().length() > config.maximumTextChars || response.replayState().payload().length() > config.maximumCheckpointBytes) {
-                throw new Stopped("API response exceeded its size budget");
+            try {
+                if (response.text().length() > config.maximumTextChars || response.replayState().payload().length() > config.maximumCheckpointBytes) {
+                    throw new Stopped("API response exceeded its size budget");
+                }
+                save(session.store.state().observed(requestId, response));
             }
-            save(session.store.state().observed(requestId, response));
+            catch (Stopped | ApiSessionRepository.CheckpointFull rejected) {
+                // A complete response that cannot be recorded is dropped like a request refused before acceptance; no tool has run.
+                save(before);
+                throw rejected;
+            }
             observe(() -> new EngineObservation.ModelCompleted(observedTurnId(), requestId, response.stopReason(), response.usage().map(sample ->
                     new ProviderUsageSample(Optional.of(requestId), sample.semantics(), sample.inputTokens(), sample.cachedInputTokens(), sample.outputTokens(), sample.cost()))));
             recordUsage(requestId, response);
@@ -1027,7 +1037,16 @@ final class ApiTurn
                     + marker.substring(0, Math.min(marker.length(), config.maximumToolOutputChars));
         }
         String captured = bounded;
-        update(state -> state.completed(index, captured, error));
+        try {
+            update(state -> state.completed(index, captured, error));
+        }
+        catch (ApiSessionRepository.CheckpointFull full) {
+            if (!session.store.state().receipts().get(index).started()) {
+                throw full;
+            }
+            // The store kept room for this marker, so a started tool never stays uncertain.
+            update(state -> state.completed(index, ApiCheckpoint.UNRECORDED_RESULT, true));
+        }
     }
 
     private void update(UnaryOperator<ApiCheckpoint> transition)
@@ -1042,6 +1061,10 @@ final class ApiTurn
         synchronized (session.store) {
             try {
                 session.store.save(state);
+            }
+            catch (ApiSessionRepository.CheckpointFull full) {
+                // Refused before writing: the previous snapshot is still committed, so the session is not damaged.
+                throw full;
             }
             catch (RuntimeException failure) {
                 session.damaged = true;

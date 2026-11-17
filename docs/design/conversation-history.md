@@ -74,6 +74,15 @@ O(checkpoint size), and the unchanged configured size bound includes both native
 history. This history stage adds no background persistence, additional executor or silent truncation.
 The opt-in compaction stage leaves canonical history and its storage bound intact.
 
+A save that would exceed the bound is refused before anything is written (`CheckpointFull`), so it
+does not damage the session. The store also refuses any save after which a started tool could not
+settle with a short "not recorded" marker; a started tool whose real output no longer fits records
+that marker instead and never stays uncertain. A complete response that cannot be recorded is
+dropped and the pre-request snapshot restored, as for a request refused before acceptance. The turn
+fails with "checkpoint is full" and the session stays resumable under a larger bound; compaction or
+retention keep sessions below it. Journal tool-result entries keep only the fact, not a second copy of
+the output. `TestApiCheckpointCost` measures saves, bytes written and time per turn.
+
 ## Plan
 
 - [x] Add immutable history SPI values, additive request access and baseline value/consumer tests.
