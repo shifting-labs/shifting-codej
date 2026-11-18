@@ -145,7 +145,9 @@ final class ClaudeEventMapper
             case "task_progress" -> mapTask(message, ProviderAgentEvent.ActivityState.PROGRESS);
             case "task_notification" -> mapTask(message, switch (message.status().orElse("")) {
                 case "completed" -> ProviderAgentEvent.ActivityState.COMPLETED;
-                case "failed", "stopped" -> ProviderAgentEvent.ActivityState.FAILED;
+                case "failed" -> ProviderAgentEvent.ActivityState.FAILED;
+                // TaskStop, from the agent or the user, reports the task as stopped.
+                case "stopped" -> ProviderAgentEvent.ActivityState.STOPPED;
                 default -> ProviderAgentEvent.ActivityState.PROGRESS;
             });
             case "task_updated" -> {
@@ -158,7 +160,8 @@ final class ClaudeEventMapper
                 }
                 yield mapTask(message, switch (status.orElseThrow()) {
                     case "completed" -> ProviderAgentEvent.ActivityState.COMPLETED;
-                    case "failed", "stopped" -> ProviderAgentEvent.ActivityState.FAILED;
+                    case "failed" -> ProviderAgentEvent.ActivityState.FAILED;
+                    case "stopped" -> ProviderAgentEvent.ActivityState.STOPPED;
                     case "running", "pending" -> ProviderAgentEvent.ActivityState.PROGRESS;
                     default -> {
                         activityUncertain = true;
@@ -663,7 +666,11 @@ final class ClaudeEventMapper
                 agents.get(toolId).withItem(Optional.of(text.itemId())))));
         events.add(new ProviderAgentEvent.Lifecycle(
                 eventId.map(value -> value + ":agent-end:" + toolId),
-                state == ProviderAgentEvent.ActivityState.FAILED ? ProviderAgentEvent.LifecyclePhase.AGENT_FAILED : ProviderAgentEvent.LifecyclePhase.AGENT_COMPLETED,
+                switch (state) {
+                    case FAILED -> ProviderAgentEvent.LifecyclePhase.AGENT_FAILED;
+                    case STOPPED -> ProviderAgentEvent.LifecyclePhase.AGENT_STOPPED;
+                    default -> ProviderAgentEvent.LifecyclePhase.AGENT_COMPLETED;
+                },
                 bounded(summary),
                 agents.get(toolId)));
     }
@@ -692,7 +699,7 @@ final class ClaudeEventMapper
 
     private static boolean terminal(ProviderAgentEvent.ActivityState state)
     {
-        return state == ProviderAgentEvent.ActivityState.COMPLETED || state == ProviderAgentEvent.ActivityState.FAILED;
+        return state == ProviderAgentEvent.ActivityState.COMPLETED || state == ProviderAgentEvent.ActivityState.FAILED || state == ProviderAgentEvent.ActivityState.STOPPED;
     }
 
     private List<ProviderAgentEvent> mapTask(ClaudeProtocol.SystemMessage message, ProviderAgentEvent.ActivityState state)

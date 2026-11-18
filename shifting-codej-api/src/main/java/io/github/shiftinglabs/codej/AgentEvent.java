@@ -183,7 +183,7 @@ public sealed interface AgentEvent
      * A subagent started or ended. Its own events carry the same {@link Source}.
      *
      * @param source the subagent
-     * @param activity {@link Activity#STARTED}, then {@link Activity#COMPLETED} or {@link Activity#FAILED}
+     * @param activity {@link Activity#STARTED}, then {@link Activity#COMPLETED}, {@link Activity#FAILED} or {@link Activity#STOPPED}
      */
     record Subagent(Source source, Activity activity)
             implements AgentEvent {}
@@ -244,7 +244,9 @@ public sealed interface AgentEvent
         /** It ended successfully. */
         COMPLETED,
         /** It ended with an error. */
-        FAILED
+        FAILED,
+        /** It was stopped before it finished, by the agent that started it or by the user, without an error. */
+        STOPPED
     }
 
     /** What kind of thing a command does. */

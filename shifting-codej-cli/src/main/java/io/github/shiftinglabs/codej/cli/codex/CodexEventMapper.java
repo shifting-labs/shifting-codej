@@ -131,9 +131,11 @@ final class CodexEventMapper
                                 source(completed, Optional.empty(), lineage))
                         : lifecycle(
                                 completed.params().turn().id() + ":agent-completed",
-                                completed.params().turn().status() == CodexProtocol.TurnStatus.COMPLETED
-                                        ? ProviderAgentEvent.LifecyclePhase.AGENT_COMPLETED
-                                        : ProviderAgentEvent.LifecyclePhase.AGENT_FAILED,
+                                switch (completed.params().turn().status()) {
+                                    case COMPLETED -> ProviderAgentEvent.LifecyclePhase.AGENT_COMPLETED;
+                                    case INTERRUPTED -> ProviderAgentEvent.LifecyclePhase.AGENT_STOPPED;
+                                    case FAILED, IN_PROGRESS, UNKNOWN -> ProviderAgentEvent.LifecyclePhase.AGENT_FAILED;
+                                },
                                 "Agent " + statusText(completed.params().turn().status()),
                                 source(completed, Optional.empty(), lineage));
                 // A model that labels no message as its final answer still answers with its last

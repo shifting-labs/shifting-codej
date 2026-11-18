@@ -23,6 +23,8 @@ import io.github.shiftinglabs.codej.cli.mcp.ToolServer;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -52,6 +54,17 @@ class TestCodexEventMapper
                 assertThat(event.source().providerTurnId()).contains(turn);
             });
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"completed,AGENT_COMPLETED", "failed,AGENT_FAILED", "interrupted,AGENT_STOPPED"})
+    void endsAChildAsItsTurnReports(String status, ProviderAgentEvent.LifecyclePhase phase)
+    {
+        CodexProtocol.Notification notification = codec.decode("""
+                {"method":"turn/completed","params":{"threadId":"child","turn":{"id":"turn-1","status":"%s","error":null,"items":[]}}}
+                """.formatted(status), CodexProtocol.Notification.class);
+        assertThat(mapper.map(notification, false, CodexEventMapper.ThreadLineage.NONE)).singleElement().isInstanceOfSatisfying(ProviderAgentEvent.Lifecycle.class,
+                event -> assertThat(event.phase()).isEqualTo(phase));
     }
 
     @Test
