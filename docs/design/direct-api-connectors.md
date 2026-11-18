@@ -341,7 +341,8 @@ incomplete responses fail explicitly. Tool JSON must be complete before the shar
 Ordered tool results use native `tool_result` blocks, including `is_error`; cache creation/read and
 normal input tokens are normalized into the existing usage sample. No monetary cost is inferred.
 
-`ClaudeApi.builder()` requires a model and key supplier. It returns the existing `Agent`; durable
+`ClaudeApi.builder()` requires a model and a key source. Use `apiKey()` for `ANTHROPIC_API_KEY`
+or pass a supplier to `apiKey(supplier)`. It returns the existing `Agent`; durable
 resume uses the existing `SessionRef` encoding with a new provider ID, `claude-api`. The default
 state folder is separate from CLI state. Profiles bind the normalized folder and endpoint, so key
 rotation preserves identity and another endpoint cannot silently resume those sessions. Existing

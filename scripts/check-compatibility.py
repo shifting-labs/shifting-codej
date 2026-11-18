@@ -56,6 +56,8 @@ def compare(output, name, before, after):
         raise RuntimeError(f"Compatibility mismatch: {output / (name + '.diff')}")
 
 
+TURN_FAILURE_KIND = "io.github.shiftinglabs.codej.cli.driver.AgentTurnFailureKind"
+
 # Explicit additive members only. Keep every published descriptor, generic declaration and modifier exact.
 ADDITIVE_API_MEMBERS = {
     "public-api": (
@@ -63,7 +65,16 @@ ADDITIVE_API_MEMBERS = {
         "io.github.shiftinglabs.codej.tool.ToolParameters<A>, io.github.shiftinglabs.codej.Tool$Handler<A>);\n"
         "    descriptor: (Ljava/lang/String;Ljava/lang/String;Lio/github/shiftinglabs/codej/tool/ToolParameters;"
         "Lio/github/shiftinglabs/codej/Tool$Handler;)Lio/github/shiftinglabs/codej/Tool;\n\n",
+        "  public io.github.shiftinglabs.codej.Codex$Builder apiKey();\n"
+        "    descriptor: ()Lio/github/shiftinglabs/codej/Codex$Builder;\n\n",
+        "  public io.github.shiftinglabs.codej.Codex$Builder deepSeek();\n"
+        "    descriptor: ()Lio/github/shiftinglabs/codej/Codex$Builder;\n\n",
     ),
+    "legacy-driver-spi": (
+        f"  public static final {TURN_FAILURE_KIND} DELIVERY_UNCERTAIN;\n"
+        f"    descriptor: L{TURN_FAILURE_KIND.replace('.', '/')};\n",
+    ),
+    "records-enums-runtime-constants": (f"{TURN_FAILURE_KIND}.DELIVERY_UNCERTAIN=DELIVERY_UNCERTAIN\n",),
 }
 
 
@@ -72,6 +83,9 @@ def published_surface(group, text):
         if text.count(member) > 1:
             raise RuntimeError("Duplicate allowed additive member")
         text = text.replace(member, "")
+    if group == "records-enums-runtime-constants":
+        text = text.replace(f"{TURN_FAILURE_KIND} enum [AUTHENTICATION_REQUIRED, DELIVERY_UNCERTAIN]\n",
+                            f"{TURN_FAILURE_KIND} enum [AUTHENTICATION_REQUIRED]\n")
     return text
 
 
@@ -170,10 +184,11 @@ def verify(args, report):
                         "LegacyConsumer", *arguments])
 
         inventory = sorted({name for group in groups.values() for name in group})
+        runtime_group = "records-enums-runtime-constants"
         runtime_surface = consumer(candidate, "surface", *inventory)
-        (output / "records-enums-runtime-constants-candidate-full.txt").write_text(runtime_surface)
-        compare(output, "records-enums-runtime-constants", consumer(baseline, "surface", *inventory),
-                normalize_codex_version("records-enums-runtime-constants", runtime_surface, new_codex))
+        (output / f"{runtime_group}-candidate-full.txt").write_text(runtime_surface)
+        compare(output, runtime_group, consumer(baseline, "surface", *inventory),
+                normalize_codex_version(runtime_group, published_surface(runtime_group, runtime_surface), new_codex))
         report["passed"].append("record components, enum order, sealed status/permitted subclasses, runtime constants")
         for label, jar in (("baseline", baseline), ("candidate", candidate)):
             state = Path(folder) / label

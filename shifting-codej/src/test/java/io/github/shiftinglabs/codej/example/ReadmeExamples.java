@@ -74,10 +74,6 @@ final class ReadmeExamples
     interface Vault
     {
         String gatewayToken();
-
-        String deepSeekKey();
-
-        String openAiKey();
     }
 
     static CompletionStage<Decision> askOnSlack(Approval approval)
@@ -242,8 +238,8 @@ final class ReadmeExamples
     {
         Agent work = Codex.builder().home(workHome).account("me@example.com").keepSessionsFor(Duration.ofDays(30)).build();
         Agent proxy = Codex.builder().gateway(URI.create("https://llm.example.com/v1"), vault::gatewayToken).build();
-        Agent deepSeek = Codex.builder().deepSeek(vault::deepSeekKey).build();
-        Agent openAi = Codex.builder().apiKey(vault::openAiKey).build();
+        Agent deepSeek = Codex.builder().deepSeek().build();
+        Agent openAi = Codex.builder().apiKey().build();
         Agent claude = Claude.builder()
                 .runOutsideSandbox("mvn", "./mvnw")
                 .allowUnixSocket(Path.of("/var/run/docker.sock"))

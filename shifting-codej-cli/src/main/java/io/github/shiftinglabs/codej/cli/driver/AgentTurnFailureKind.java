@@ -16,5 +16,6 @@ package io.github.shiftinglabs.codej.cli.driver;
 /** A narrow, machine-readable provider failure that has workflow behavior. */
 public enum AgentTurnFailureKind
 {
-    AUTHENTICATION_REQUIRED
+    AUTHENTICATION_REQUIRED,
+    DELIVERY_UNCERTAIN
 }

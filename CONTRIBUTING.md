@@ -29,8 +29,8 @@ someone's behalf.
 
 - `shifting-codej-api`: the public types. It imports neither of the other modules' packages;
   Checkstyle refuses them.
-- `shifting-codej-cli`: the Codex App Server client, the Claude CLI driver, the MCP server for the
-  application's tools, and process supervision. Internal.
+- `shifting-codej-cli`: the Codex App Server client, the Claude CLI driver, the Antigravity ACP client,
+  the MCP server for the application's tools, and process supervision. Internal.
 - `shifting-codej`: the CLI and direct API facades, provider adapters, the Codex download, and the published jar.
 
 Every Java file starts with `src/main/license/header.txt`, and `src/main/checkstyle/checks.xml`
@@ -46,7 +46,7 @@ base connector tests. The bases live in `shifting-codej/src/test/java/io/github/
   borrowed-service ownership and preservation of saved history.
 - `AbstractTestCliConnector<C>` extends that contract with an explicit missing executable.
   Construction must not start or install it. Implement `connector()` and `configuration(Path)`;
-  `TestCodexConnector` and `TestClaudeConnector` show the concrete bindings.
+  `TestCodexConnector`, `TestClaudeConnector`, and `TestAntigravityConnector` show the concrete bindings.
 - `AbstractTestConnectorDriver` checks metadata, catalogs, quotas, model-specific probing,
   resume/model-aware review capability queries and provider failure propagation. Bind an
   `AgentDriver` delegate through `connector(AgentDriver)`; both existing driver suites inherit it.
@@ -80,12 +80,16 @@ Run only these in-memory/fake-provider suites with one test worker:
 mvn -pl shifting-codej -am -Dcodej.test.forks=1 \
   -Djunit.jupiter.execution.parallel.enabled=false \
   -Dsurefire.failIfNoSpecifiedTests=false \
-  -Dtest=TestConnectorSpi,TestCodexConnector,TestClaudeConnector,TestCodexConnectorDriver,TestClaudeConnectorDriver verify
+  -Dtest=TestConnectorSpi,TestCodexConnector,TestClaudeConnector,TestAntigravityConnector,TestCodexConnectorDriver,TestClaudeConnectorDriver verify
 ```
 
 `codej.test.forks` retains the existing default of four for ordinary builds. The command above
 uses one fork and disables JUnit parallel execution. These suites do not launch a native CLI or
 run process stress tests.
+
+On macOS, `-Dtest=TestAntigravity,TestAntigravityConnector,TestAntigravitySession,TestAntigravityPolicy`
+also checks ACP message handling, process shutdown, and read-only enforcement. The public facade
+tests use a local CLI fixture and require no Google credentials.
 
 ## Direct model SPI contracts
 
