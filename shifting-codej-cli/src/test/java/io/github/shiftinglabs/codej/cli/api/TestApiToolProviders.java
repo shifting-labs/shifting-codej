@@ -352,10 +352,10 @@ class TestApiToolProviders
         public void acknowledge(String id) { throw new AssertionError("No acknowledgement"); }
     }
 
+    // Keeps the engine's default shutdown wait: on a busy CI runner, a finished turn's workers took over 100 ms to exit and failed a clean close.
     private ApiEngineConfig.Builder config(Client client)
     {
-        return ApiEngineConfig.builder(new ConnectorIdentity("sample-api", "work"), new AgentLaneId("sample-api-work"), "model", () -> client)
-                .shutdownTimeout(Duration.ofMillis(100));
+        return ApiEngineConfig.builder(new ConnectorIdentity("sample-api", "work"), new AgentLaneId("sample-api-work"), "model", () -> client);
     }
 
     private ConnectorContext host() { return new ConnectorContext(directory.resolve("profile"), new NoProcesses(), ToolServer.DEFAULT); }
@@ -688,13 +688,14 @@ class TestApiToolProviders
             return CompletableFuture.completedFuture(ProviderApprovalDecision.allow(Optional.empty()));
         };
         try (var callbacks = Executors.newSingleThreadExecutor();
-                ApiAgentDriver driver = new ApiAgentDriver(config(client).toolProvider(provider, SETTINGS).toolExecutor(callbacks).approveTools(false).build(), host());
+                ApiAgentDriver driver = new ApiAgentDriver(config(client).shutdownTimeout(Duration.ofSeconds(5)).toolProvider(provider, SETTINGS).toolExecutor(callbacks)
+                        .approveTools(false).build(), host());
                 AgentSession session = driver.open(context(SessionAccess.TOOLS_ONLY, Optional.empty(), List.of(), approval), event -> {})) {
             provider.reference = session.reference();
             assertThat(provider.assembly.session().access()).isEqualTo(SessionAccess.TOOLS_ONLY);
             assertThat(provider.assembly.connector().profileDirectory()).isEqualTo(directory.resolve("profile"));
             assertThat(provider.assembly.executor()).isSameAs(callbacks);
-            assertThat(provider.assembly.shutdownTimeout()).isEqualTo(Duration.ofMillis(100));
+            assertThat(provider.assembly.shutdownTimeout()).isEqualTo(Duration.ofSeconds(5));
             assertThat(run(session).state()).isEqualTo(AgentTurnResult.State.COMPLETED);
             assertThat(approvals).hasValue(1);
             assertThat(result(client)).isEqualTo(new ModelInput.ToolResult("call", "value:2", false));
