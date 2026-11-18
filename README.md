@@ -29,7 +29,7 @@ Both use the shared API engine and keep conversation replay locally.
 <dependency>
     <groupId>io.github.shifting-labs</groupId>
     <artifactId>shifting-codej</artifactId>
-    <version>0.169.0-2</version>
+    <version>0.169.0-3</version>
 </dependency>
 ```
 
