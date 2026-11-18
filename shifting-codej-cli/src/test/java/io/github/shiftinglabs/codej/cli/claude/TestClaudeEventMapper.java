@@ -591,7 +591,30 @@ class TestClaudeEventMapper
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"completed", "failed"})
+    @CsvSource({"completed,COMPLETED,AGENT_COMPLETED", "failed,FAILED,AGENT_FAILED", "stopped,STOPPED,AGENT_STOPPED"})
+    void endsBackgroundChildAsItsTaskReports(String status, ProviderAgentEvent.ActivityState task, ProviderAgentEvent.LifecyclePhase agent)
+    {
+        startAgent("Agent", true);
+        map("""
+                {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn-1","content":"launched"}]},
+                "tool_use_result":{"status":"async_launched","agentId":"child-1"},"session_id":"session-1","uuid":"launched"}
+                """);
+
+        List<ProviderAgentEvent> events = map("""
+                {"type":"system","subtype":"task_notification","task_id":"child-1","tool_use_id":"spawn-1","status":"%s","session_id":"session-1","uuid":"ended"}
+                """.formatted(status));
+
+        assertThat(events).filteredOn(ProviderAgentEvent.Tool.class::isInstance)
+                .extracting(event -> ((ProviderAgentEvent.Tool) event).state())
+                .containsExactly(task);
+        assertThat(events).filteredOn(ProviderAgentEvent.Lifecycle.class::isInstance)
+                .extracting(event -> ((ProviderAgentEvent.Lifecycle) event).phase(), event -> event.source().providerThreadId().orElseThrow())
+                .containsExactly(tuple(agent, "claude-agent:spawn-1"));
+        assertThat(mapper.hasRunningBackgroundWork()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"completed", "failed", "stopped"})
     void lateAliasForEndedChildKeepsWorkFinished(String status)
     {
         startAgent("Agent", true);

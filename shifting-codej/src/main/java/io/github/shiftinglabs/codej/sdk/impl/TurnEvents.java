@@ -92,6 +92,7 @@ final class TurnEvents
                 case AGENT_STARTED -> Optional.of(new AgentEvent.Subagent(source, AgentEvent.Activity.STARTED));
                 case AGENT_COMPLETED -> Optional.of(new AgentEvent.Subagent(source, AgentEvent.Activity.COMPLETED));
                 case AGENT_FAILED -> Optional.of(new AgentEvent.Subagent(source, AgentEvent.Activity.FAILED));
+                case AGENT_STOPPED -> Optional.of(new AgentEvent.Subagent(source, AgentEvent.Activity.STOPPED));
                 case BACKFILL_STARTED -> Optional.of(new AgentEvent.Replay(source, AgentEvent.Activity.STARTED));
                 case BACKFILL_COMPLETED -> Optional.of(new AgentEvent.Replay(source, AgentEvent.Activity.COMPLETED));
                 // The turn's own start and end are the caller's: it started the turn, and its result says how it ended.
@@ -202,6 +203,7 @@ final class TurnEvents
             case PROGRESS -> AgentEvent.Activity.PROGRESS;
             case COMPLETED -> AgentEvent.Activity.COMPLETED;
             case FAILED -> AgentEvent.Activity.FAILED;
+            case STOPPED -> AgentEvent.Activity.STOPPED;
         };
     }
 

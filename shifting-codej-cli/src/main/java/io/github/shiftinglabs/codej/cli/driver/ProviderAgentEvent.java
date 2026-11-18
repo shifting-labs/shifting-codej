@@ -322,7 +322,9 @@ public sealed interface ProviderAgentEvent
         STARTED,
         PROGRESS,
         COMPLETED,
-        FAILED
+        FAILED,
+        /** Ended before it finished because an agent or the user stopped it; not an error. */
+        STOPPED
     }
 
     enum ChangeKind
@@ -352,6 +354,8 @@ public sealed interface ProviderAgentEvent
         AGENT_STARTED,
         AGENT_COMPLETED,
         AGENT_FAILED,
+        /** A subagent ended because its parent or the user stopped it. */
+        AGENT_STOPPED,
         /** Brackets events recovered from a thread's history rather than seen live. */
         BACKFILL_STARTED,
         BACKFILL_COMPLETED
