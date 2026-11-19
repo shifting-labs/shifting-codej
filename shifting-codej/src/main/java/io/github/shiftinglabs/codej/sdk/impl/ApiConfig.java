@@ -33,15 +33,45 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.github.shiftinglabs.codej.cli.driver.Checks.checkText;
 import static java.util.Objects.requireNonNull;
 
-/** Immutable direct Claude API configuration; no environment credentials or CLI settings are inferred. */
-public final class ClaudeApiConfig
+/**
+ * Immutable direct API configuration; no environment credentials or CLI settings are inferred.
+ * Settings are validated when built, so a builder may be filled in any order.
+ */
+public final class ApiConfig
 {
+    /** A direct inference API: its connector id, default endpoint, built-in context estimates and wire adapter. */
+    public enum Provider
+    {
+        CLAUDE("claude-api", "https://api.anthropic.com", BuiltinContextSizer.CLAUDE, AnthropicModelClient::new),
+        DEEPSEEK("deepseek-api", "https://api.deepseek.com", BuiltinContextSizer.DEEPSEEK, DeepSeekModelClient::new);
+
+        private final String id;
+        private final URI baseUrl;
+        private final ModelContextSizer sizer;
+        private final Function<ApiConfig, ApiModelClient> clients;
+
+        Provider(String id, String baseUrl, ModelContextSizer sizer, Function<ApiConfig, ApiModelClient> clients)
+        {
+            this.id = id;
+            this.baseUrl = URI.create(baseUrl);
+            this.sizer = sizer;
+            this.clients = clients;
+        }
+
+        /** The connector id, also the default state folder name. */
+        public String id() { return id; }
+
+        ApiModelClient client(ApiConfig config) { return clients.apply(config); }
+    }
+
+    final Provider provider;
     final String model;
     final Supplier<String> key;
     final URI baseUrl;
@@ -61,13 +91,17 @@ public final class ClaudeApiConfig
     final Optional<ContextBudget> contextBudget;
     final Optional<ModelContextSizer> contextSizer;
 
-    private ClaudeApiConfig(Builder builder)
+    private ApiConfig(Builder builder)
     {
-        model = builder.model;
-        key = builder.key;
-        baseUrl = builder.baseUrl;
+        provider = builder.provider;
+        model = checkText(requireNonNull(builder.model, "model is required"), "model");
+        checkArgument(model.matches("[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}"), "invalid model identifier");
+        key = requireNonNull(builder.key, "apiKey is required");
+        baseUrl = ApiHttpTransport.checkBaseUrl(builder.baseUrl);
         timeout = builder.timeout;
+        checkArgument(timeout.isPositive() && timeout.compareTo(Duration.ofHours(1)) <= 0, "invalid API timeout");
         maximumOutputTokens = builder.maximumOutputTokens;
+        checkArgument(maximumOutputTokens > 0, "maximumOutputTokens must be positive");
         callbacks = builder.callbacks;
         codingTools = builder.codingTools;
         toolProviders = List.copyOf(builder.toolProviders);
@@ -80,18 +114,19 @@ public final class ClaudeApiConfig
         maximumSummaryInputCharacters = builder.maximumSummaryInputCharacters;
         auditRetention = builder.auditRetention;
         contextBudget = builder.contextBudget;
-        contextSizer = builder.contextSizer.or(() -> contextBudget.map(ignored -> BuiltinContextSizer.CLAUDE));
+        contextSizer = builder.contextSizer.or(() -> contextBudget.map(ignored -> provider.sizer));
         checkArgument(contextCompactor.isEmpty() || contextSummarization.isEmpty(), "choose local compaction or engine summarization");
         checkArgument(maximumParallelTools == 1 || toolExecutionBudget.isPresent(), "parallel tools require a shared execution budget");
     }
 
-    public static Builder builder(String model, Supplier<String> key) { return new Builder(model, key); }
+    public static Builder builder(Provider provider) { return new Builder(provider); }
 
     public static final class Builder
     {
-        private final String model;
-        private final Supplier<String> key;
-        private URI baseUrl = URI.create("https://api.anthropic.com");
+        private final Provider provider;
+        private String model;
+        private Supplier<String> key;
+        private URI baseUrl;
         private Duration timeout = Duration.ofMinutes(2);
         private int maximumOutputTokens = 4096;
         private Optional<Executor> callbacks = Optional.empty();
@@ -108,37 +143,47 @@ public final class ClaudeApiConfig
         private Optional<ContextBudget> contextBudget = Optional.empty();
         private Optional<ModelContextSizer> contextSizer = Optional.empty();
 
-        private Builder(String model, Supplier<String> key)
+        private Builder(Provider provider)
         {
-            this.model = checkText(model, "model");
-            checkArgument(model.matches("[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}"), "invalid model identifier");
-            this.key = requireNonNull(key, "key is null");
+            this.provider = requireNonNull(provider, "provider is null");
+            baseUrl = provider.baseUrl;
+        }
+
+        /** Sets the required model identifier; no model release is inferred. */
+        public Builder model(String value)
+        {
+            model = requireNonNull(value, "model is null");
+            return this;
+        }
+
+        /** Sets the required credential supplier, called afresh for each HTTP operation. */
+        public Builder apiKey(Supplier<String> value)
+        {
+            key = requireNonNull(value, "apiKey is null");
+            return this;
         }
 
         public Builder baseUrl(URI value)
         {
-            baseUrl = ApiHttpTransport.checkBaseUrl(value);
+            baseUrl = requireNonNull(value, "baseUrl is null");
             return this;
         }
 
         public Builder requestTimeout(Duration value)
         {
-            requireNonNull(value, "timeout is null");
-            checkArgument(!value.isNegative() && !value.isZero() && value.compareTo(Duration.ofHours(1)) <= 0, "invalid API timeout");
-            timeout = value;
+            timeout = requireNonNull(value, "requestTimeout is null");
             return this;
         }
 
         public Builder maximumOutputTokens(int value)
         {
-            checkArgument(value > 0, "maximumOutputTokens must be positive");
             maximumOutputTokens = value;
             return this;
         }
 
         public Builder callbackExecutor(Executor value)
         {
-            callbacks = Optional.of(requireNonNull(value, "executor is null"));
+            callbacks = Optional.of(requireNonNull(value, "callbackExecutor is null"));
             return this;
         }
 
@@ -205,73 +250,42 @@ public final class ClaudeApiConfig
             return this;
         }
 
-        /**
-         * Borrows a policy enabling bounded tool-free summary inferences charged to the current turn.
-         * Cannot be combined with a local context compactor. Disabled by default.
-         *
-         * @param policy thread-safe selector; the engine performs inference with its existing budgets
-         * @return this builder
-         */
+        /** Borrows a policy enabling bounded tool-free summary inferences; cannot be combined with a compactor. */
         public Builder contextSummarization(ContextSummarizationPolicy policy)
         {
             contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
             return this;
         }
 
-        /**
-         * Bounds each encoded summary input, including prior memory and complete new tool groups.
-         * The engine text limit also applies; an indivisible oversized group fails without truncation.
-         *
-         * @param value positive maximum UTF-16 character count; defaults to 65,536, not a token estimate
-         * @return this builder
-         */
+        /** Bounds each encoded summary input in UTF-16 characters; not a token estimate. */
         public Builder maximumSummaryInputCharacters(int value)
         {
-            if (value <= 0) {
-                throw new IllegalArgumentException("summary input limit must be positive");
-            }
+            checkArgument(value > 0, "summary input limit must be positive");
             maximumSummaryInputCharacters = value;
             return this;
         }
 
-        /**
-         * Borrows an opt-in audit retention policy. Covered history is irreversibly removed;
-         * physical staged-attachment cleanup requires a separately positive deletion bound.
-         *
-         * @param policy thread-safe host selector; the engine performs safe commits and owned cleanup
-         * @return this builder
-         */
+        /** Borrows an opt-in audit retention policy; covered history is irreversibly removed. */
         public Builder auditRetention(AuditRetentionPolicy policy)
         {
             auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
             return this;
         }
 
-        /**
-         * Enables provider-aware preflight of actual input plus reserved output and a safety margin.
-         * Disabled by default; uses built-in text estimates unless a custom sizer is installed.
-         *
-         * @param budget immutable policy, including explicit handling of unknown sizes
-         * @return this builder
-         */
+        /** Enables preflight of actual input plus reserved output; built-in estimates apply unless a sizer is installed. */
         public Builder contextBudget(ContextBudget budget)
         {
             contextBudget = Optional.of(requireNonNull(budget, "contextBudget is null"));
             return this;
         }
 
-        /**
-         * Borrows a local provider-specific sizing service, overriding built-in estimates even when it returns unknown.
-         *
-         * @param sizer thread-safe service receiving private, adapter-projected active input
-         * @return this builder
-         */
+        /** Borrows a local sizing service that overrides built-in estimates even when it returns unknown. */
         public Builder contextSizer(ModelContextSizer sizer)
         {
             contextSizer = Optional.of(requireNonNull(sizer, "contextSizer is null"));
             return this;
         }
 
-        public ClaudeApiConfig build() { return new ClaudeApiConfig(this); }
+        public ApiConfig build() { return new ApiConfig(this); }
     }
 }

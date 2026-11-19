@@ -108,10 +108,7 @@ final class CodexAgentGraph
 
     boolean readyThreadStarted(CodexProtocol.Notification notification)
     {
-        if (!(notification instanceof CodexProtocol.ThreadStartedNotification started)) {
-            return false;
-        }
-        return started.params().thread().parentThreadId()
+        return notification instanceof CodexProtocol.ThreadStartedNotification started && started.params().thread().parentThreadId()
                 .filter(parent -> parent.equals(rootThreadId) || confirmedLineage(parent))
                 .isPresent();
     }

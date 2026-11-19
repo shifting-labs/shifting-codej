@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestClaudeApiConnector
-        extends AbstractTestApiConnector<ClaudeApiConfig>
+        extends AbstractTestApiConnector<ApiConfig>
 {
     private AnthropicHttpFixture http;
 
@@ -48,7 +48,7 @@ class TestClaudeApiConnector
         ModelContextSizer firstSizer = context -> { throw new AssertionError("No eager sizing"); };
         ModelContextSizer secondSizer = context -> Optional.empty();
         var budget = new ContextBudget(128, true);
-        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key");
         assertThat(builder.build().contextBudget).isEmpty();
         assertThat(builder.build().contextSizer).isEmpty();
         var first = builder.contextBudget(budget).contextSizer(firstSizer).build();
@@ -65,7 +65,7 @@ class TestClaudeApiConnector
     {
         AuditRetentionPolicy firstPolicy = context -> { throw new AssertionError("No eager callback"); };
         AuditRetentionPolicy secondPolicy = context -> Optional.empty();
-        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key");
         assertThat(builder.build().auditRetention).isEmpty();
         var first = builder.auditRetention(firstPolicy).build();
         builder.auditRetention(secondPolicy);
@@ -77,7 +77,7 @@ class TestClaudeApiConnector
     @Test
     void summaryInputBoundsAreValidatedAndSnapshotBuilderState()
     {
-        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key");
         assertThat(builder.build().maximumSummaryInputCharacters).isEqualTo(65536);
         var first = builder.maximumSummaryInputCharacters(1024).build();
         builder.maximumSummaryInputCharacters(2048);
@@ -92,7 +92,7 @@ class TestClaudeApiConnector
     {
         ContextSummarizationPolicy firstPolicy = context -> { throw new AssertionError("No eager callback"); };
         ContextSummarizationPolicy secondPolicy = context -> Optional.empty();
-        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key");
         assertThat(builder.build().contextSummarization).isEmpty();
         var first = builder.contextSummarization(firstPolicy).build();
         builder.contextSummarization(secondPolicy);
@@ -107,7 +107,7 @@ class TestClaudeApiConnector
     {
         ContextCompactor firstPolicy = context -> { throw new AssertionError("No eager compaction"); };
         ContextCompactor secondPolicy = context -> java.util.Optional.empty();
-        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key");
         assertThat(builder.build().contextCompactor).isEmpty();
         var first = builder.contextCompactor(firstPolicy).build();
         builder.contextCompactor(secondPolicy);
@@ -121,7 +121,7 @@ class TestClaudeApiConnector
     {
         var firstBudget = ToolExecutionBudget.bounded(1);
         var secondBudget = ToolExecutionBudget.bounded(2);
-        var builder = ClaudeApiConfig.builder("model", () -> "key");
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key");
         assertThat(builder.build().toolExecutionBudget).isEmpty();
         assertThat(builder.build().maximumParallelTools).isEqualTo(1);
         assertThatThrownBy(() -> builder.maximumParallelTools(2).build()).isInstanceOf(IllegalArgumentException.class);
@@ -142,7 +142,7 @@ class TestClaudeApiConnector
     {
         var provider = new ConfiguredExtensions("policy");
         var binding = EngineExtensionBinding.of(provider, true);
-        var builder = ClaudeApiConfig.builder("model", () -> "key").extension(binding);
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key").extension(binding);
         var first = builder.build();
         builder.extension(new ConfiguredExtensions("other"), false);
         assertThat(first.extensions).containsExactly(binding);
@@ -158,7 +158,7 @@ class TestClaudeApiConnector
     {
         var provider = new ConfiguredPrompts("project");
         var binding = PromptProviderBinding.of(provider, "first");
-        var builder = ClaudeApiConfig.builder("model", () -> "key").promptProvider(binding);
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key").promptProvider(binding);
         var first = builder.build();
         builder.promptProvider(new ConfiguredPrompts("second"), "next");
         assertThat(first.promptProviders).containsExactly(binding);
@@ -173,7 +173,7 @@ class TestClaudeApiConnector
     {
         var provider = new ConfiguredLookupTools();
         var binding = ToolProviderBinding.of(provider, new ConfiguredLookupTools.Configuration("configured:"));
-        var builder = ClaudeApiConfig.builder("model", () -> "key").toolProvider(binding);
+        var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model("model").apiKey(() -> "key").toolProvider(binding);
         var first = builder.build();
         builder.toolProvider(provider, new ConfiguredLookupTools.Configuration("second:"));
         assertThat(first.toolProviders).containsExactly(binding);
@@ -193,11 +193,11 @@ class TestClaudeApiConnector
     void cleanup() { http.close(); }
 
     @Override
-    protected AgentConnector<ClaudeApiConfig> connector() { return new ClaudeApiConnector(); }
+    protected AgentConnector<ApiConfig> connector() { return new DirectApiConnector(ApiConfig.Provider.CLAUDE); }
 
     @Override
-    protected ClaudeApiConfig configuration()
+    protected ApiConfig configuration()
     {
-        return ClaudeApiConfig.builder(AnthropicHttpFixture.MODEL, () -> "sk-test-contract").baseUrl(http.baseUrl()).build();
+        return ApiConfig.builder(ApiConfig.Provider.CLAUDE).model(AnthropicHttpFixture.MODEL).apiKey(() -> "sk-test-contract").baseUrl(http.baseUrl()).build();
     }
 }

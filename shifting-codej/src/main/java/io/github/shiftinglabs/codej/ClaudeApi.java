@@ -16,23 +16,18 @@ package io.github.shiftinglabs.codej;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextBudget;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextCompactor;
 import io.github.shiftinglabs.codej.cli.spi.context.ContextSummarizationPolicy;
-import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionBinding;
 import io.github.shiftinglabs.codej.cli.spi.extension.EngineExtensionProvider;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelContextSizer;
 import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProvider;
-import io.github.shiftinglabs.codej.cli.spi.prompt.PromptProviderBinding;
 import io.github.shiftinglabs.codej.cli.spi.retention.AuditRetentionPolicy;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolExecutionBudget;
 import io.github.shiftinglabs.codej.cli.spi.tool.ToolProvider;
-import io.github.shiftinglabs.codej.cli.spi.tool.ToolProviderBinding;
-import io.github.shiftinglabs.codej.sdk.impl.ClaudeApiConfig;
+import io.github.shiftinglabs.codej.sdk.impl.ApiConfig;
 import io.github.shiftinglabs.codej.sdk.impl.DriverAgent;
 
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
@@ -62,26 +57,9 @@ public final class ClaudeApi
     /** Settings for a direct Claude API agent. Not safe to share between threads. */
     public static final class Builder
     {
-        private String model;
-        private Supplier<String> key;
-        private URI baseUrl = URI.create("https://api.anthropic.com");
+        private final ApiConfig.Builder settings = ApiConfig.builder(ApiConfig.Provider.CLAUDE);
         private Optional<Path> state = Optional.empty();
         private Optional<Path> profile = Optional.empty();
-        private Duration timeout = Duration.ofMinutes(2);
-        private int maximumOutputTokens = 4096;
-        private Optional<Executor> callbacks = Optional.empty();
-        private Optional<CodingTools> codingTools = Optional.empty();
-        private final List<ToolProviderBinding> toolProviders = new ArrayList<>();
-        private final List<PromptProviderBinding> promptProviders = new ArrayList<>();
-        private final List<EngineExtensionBinding> extensions = new ArrayList<>();
-        private Optional<ToolExecutionBudget> toolExecutionBudget = Optional.empty();
-        private int maximumParallelTools = 1;
-        private Optional<ContextCompactor> contextCompactor = Optional.empty();
-        private Optional<ContextSummarizationPolicy> contextSummarization = Optional.empty();
-        private int maximumSummaryInputCharacters = 65536;
-        private Optional<AuditRetentionPolicy> auditRetention = Optional.empty();
-        private Optional<ContextBudget> contextBudget = Optional.empty();
-        private Optional<ModelContextSizer> contextSizer = Optional.empty();
 
         private Builder() {}
 
@@ -93,7 +71,7 @@ public final class ClaudeApi
          */
         public Builder model(String value)
         {
-            model = requireNonNull(value, "model is null");
+            settings.model(value);
             return this;
         }
 
@@ -105,7 +83,7 @@ public final class ClaudeApi
          */
         public Builder apiKey(Supplier<String> value)
         {
-            key = requireNonNull(value, "apiKey is null");
+            settings.apiKey(value);
             return this;
         }
 
@@ -117,7 +95,7 @@ public final class ClaudeApi
          */
         public Builder baseUrl(URI value)
         {
-            baseUrl = requireNonNull(value, "baseUrl is null");
+            settings.baseUrl(value);
             return this;
         }
 
@@ -154,7 +132,7 @@ public final class ClaudeApi
          */
         public Builder requestTimeout(Duration value)
         {
-            timeout = requireNonNull(value, "requestTimeout is null");
+            settings.requestTimeout(value);
             return this;
         }
 
@@ -166,7 +144,7 @@ public final class ClaudeApi
          */
         public Builder maximumOutputTokens(int value)
         {
-            maximumOutputTokens = value;
+            settings.maximumOutputTokens(value);
             return this;
         }
 
@@ -178,7 +156,7 @@ public final class ClaudeApi
          */
         public Builder callbackExecutor(Executor value)
         {
-            callbacks = Optional.of(requireNonNull(value, "callbackExecutor is null"));
+            settings.callbackExecutor(value);
             return this;
         }
 
@@ -191,7 +169,7 @@ public final class ClaudeApi
          */
         public Builder codingTools(CodingTools value)
         {
-            codingTools = Optional.of(requireNonNull(value, "codingTools is null"));
+            settings.codingTools(value);
             return this;
         }
 
@@ -205,7 +183,7 @@ public final class ClaudeApi
          */
         public <C> Builder toolProvider(ToolProvider<C> provider, C configuration)
         {
-            toolProviders.add(ToolProviderBinding.of(provider, configuration));
+            settings.toolProvider(provider, configuration);
             return this;
         }
 
@@ -219,7 +197,7 @@ public final class ClaudeApi
          */
         public <C> Builder promptProvider(PromptProvider<C> provider, C configuration)
         {
-            promptProviders.add(PromptProviderBinding.of(provider, configuration));
+            settings.promptProvider(provider, configuration);
             return this;
         }
 
@@ -233,7 +211,7 @@ public final class ClaudeApi
          */
         public <C> Builder extension(EngineExtensionProvider<C> provider, C configuration)
         {
-            extensions.add(EngineExtensionBinding.of(provider, configuration));
+            settings.extension(provider, configuration);
             return this;
         }
 
@@ -246,7 +224,7 @@ public final class ClaudeApi
          */
         public Builder toolExecutionBudget(ToolExecutionBudget budget)
         {
-            toolExecutionBudget = Optional.of(requireNonNull(budget, "toolExecutionBudget is null"));
+            settings.toolExecutionBudget(budget);
             return this;
         }
 
@@ -259,10 +237,7 @@ public final class ClaudeApi
          */
         public Builder maximumParallelTools(int value)
         {
-            if (value < 1 || value > 64) {
-                throw new IllegalArgumentException("parallel tool window must be between 1 and 64");
-            }
-            maximumParallelTools = value;
+            settings.maximumParallelTools(value);
             return this;
         }
 
@@ -274,7 +249,7 @@ public final class ClaudeApi
          */
         public Builder contextCompactor(ContextCompactor compactor)
         {
-            contextCompactor = Optional.of(requireNonNull(compactor, "contextCompactor is null"));
+            settings.contextCompactor(compactor);
             return this;
         }
 
@@ -287,7 +262,7 @@ public final class ClaudeApi
          */
         public Builder contextSummarization(ContextSummarizationPolicy policy)
         {
-            contextSummarization = Optional.of(requireNonNull(policy, "contextSummarization is null"));
+            settings.contextSummarization(policy);
             return this;
         }
 
@@ -300,10 +275,7 @@ public final class ClaudeApi
          */
         public Builder maximumSummaryInputCharacters(int value)
         {
-            if (value <= 0) {
-                throw new IllegalArgumentException("summary input limit must be positive");
-            }
-            maximumSummaryInputCharacters = value;
+            settings.maximumSummaryInputCharacters(value);
             return this;
         }
 
@@ -316,7 +288,7 @@ public final class ClaudeApi
          */
         public Builder auditRetention(AuditRetentionPolicy policy)
         {
-            auditRetention = Optional.of(requireNonNull(policy, "auditRetention is null"));
+            settings.auditRetention(policy);
             return this;
         }
 
@@ -329,7 +301,7 @@ public final class ClaudeApi
          */
         public Builder contextBudget(ContextBudget budget)
         {
-            contextBudget = Optional.of(requireNonNull(budget, "contextBudget is null"));
+            settings.contextBudget(budget);
             return this;
         }
 
@@ -341,7 +313,7 @@ public final class ClaudeApi
          */
         public Builder contextSizer(ModelContextSizer sizer)
         {
-            contextSizer = Optional.of(requireNonNull(sizer, "contextSizer is null"));
+            settings.contextSizer(sizer);
             return this;
         }
 
@@ -354,22 +326,7 @@ public final class ClaudeApi
          */
         public Agent build()
         {
-            var settings = ClaudeApiConfig.builder(requireNonNull(model, "model is required"), requireNonNull(key, "apiKey is required"))
-                    .baseUrl(baseUrl).requestTimeout(timeout).maximumOutputTokens(maximumOutputTokens);
-            callbacks.ifPresent(settings::callbackExecutor);
-            codingTools.ifPresent(settings::codingTools);
-            toolProviders.forEach(settings::toolProvider);
-            promptProviders.forEach(settings::promptProvider);
-            extensions.forEach(settings::extension);
-            toolExecutionBudget.ifPresent(settings::toolExecutionBudget);
-            settings.maximumParallelTools(maximumParallelTools);
-            contextCompactor.ifPresent(settings::contextCompactor);
-            contextSummarization.ifPresent(settings::contextSummarization);
-            settings.maximumSummaryInputCharacters(maximumSummaryInputCharacters);
-            auditRetention.ifPresent(settings::auditRetention);
-            contextBudget.ifPresent(settings::contextBudget);
-            contextSizer.ifPresent(settings::contextSizer);
-            return DriverAgent.claudeApi(settings.build(), state, profile);
+            return DriverAgent.api(settings.build(), state, profile);
         }
     }
 }

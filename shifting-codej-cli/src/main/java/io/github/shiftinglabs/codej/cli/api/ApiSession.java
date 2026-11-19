@@ -233,10 +233,8 @@ final class ApiSession
             throw new AgentUnavailableException("API turn input exceeds its limits or uses unsupported attachments");
         }
         ModelInput.UserMessage input = store.stage(command.message(), command.attachments());
-        if (before.phase() == ApiCheckpoint.Phase.TOOLS) {
-            if (!tools.matches(before.setup().orElseThrow())) {
-                throw new AgentUnavailableException("Pending API tool batch requires its original tool definitions");
-            }
+        if (before.phase() == ApiCheckpoint.Phase.TOOLS && !tools.matches(before.setup().orElseThrow())) {
+            throw new AgentUnavailableException("Pending API tool batch requires its original tool definitions");
         }
         store.save(before.append(new ApiJournal.User(command.turnId(), input)));
         ApiTurn turn = new ApiTurn(this, command, input, model, effort);
