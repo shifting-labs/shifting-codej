@@ -318,12 +318,12 @@ class TestApiContextBudget
         ModelClient client(Optional<ContextBudget> budget, Optional<ModelContextSizer> sizer)
         {
             if (anthropic != null) {
-                var builder = ClaudeApiConfig.builder(model, () -> "sk-budget-test").baseUrl(anthropic.baseUrl());
+                var builder = ApiConfig.builder(ApiConfig.Provider.CLAUDE).model(model).apiKey(() -> "sk-budget-test").baseUrl(anthropic.baseUrl());
                 budget.ifPresent(builder::contextBudget);
                 sizer.ifPresent(builder::contextSizer);
                 return new AnthropicModelClient(builder.build());
             }
-            var builder = DeepSeekApiConfig.builder(model, () -> "sk-budget-test").baseUrl(deepseek.baseUrl());
+            var builder = ApiConfig.builder(ApiConfig.Provider.DEEPSEEK).model(model).apiKey(() -> "sk-budget-test").baseUrl(deepseek.baseUrl());
             budget.ifPresent(builder::contextBudget);
             sizer.ifPresent(builder::contextSizer);
             return new DeepSeekModelClient(builder.build());

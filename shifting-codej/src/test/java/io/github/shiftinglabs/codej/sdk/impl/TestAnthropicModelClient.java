@@ -60,7 +60,8 @@ class TestAnthropicModelClient
     @Override
     protected ModelClient client()
     {
-        return new AnthropicModelClient(ClaudeApiConfig.builder(MODEL, key::get).baseUrl(http.baseUrl()).requestTimeout(Duration.ofSeconds(5)).build());
+        return new AnthropicModelClient(ApiConfig.builder(ApiConfig.Provider.CLAUDE).model(MODEL).apiKey(key::get).baseUrl(http.baseUrl())
+                .requestTimeout(Duration.ofSeconds(5)).build());
     }
 
     private static ModelRequest.Builder request(String text)
@@ -280,7 +281,7 @@ class TestAnthropicModelClient
     void boundsAStalledResponseStreamWithTheConfiguredTimeout()
             throws Exception
     {
-        try (ModelClient client = new AnthropicModelClient(ClaudeApiConfig.builder(MODEL, key::get).baseUrl(http.baseUrl())
+        try (ModelClient client = new AnthropicModelClient(ApiConfig.builder(ApiConfig.Provider.CLAUDE).model(MODEL).apiKey(key::get).baseUrl(http.baseUrl())
                 .requestTimeout(Duration.ofMillis(250)).build())) {
             ModelCall call = client.generate(request("Wait").build(), text -> {});
             http.awaitWaiting();

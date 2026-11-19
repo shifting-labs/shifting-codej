@@ -27,7 +27,6 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderModel;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
-import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
@@ -64,12 +63,12 @@ import static java.util.Objects.requireNonNull;
 
 /** Direct DeepSeek Chat Completions; all agent/session/tool orchestration remains in the shared engine. */
 public final class DeepSeekModelClient
-        implements ModelClient
+        implements ApiModelClient
 {
     static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
     private static final List<String> EFFORTS = List.of("none", "low", "high", "max");
-    private final DeepSeekApiConfig config;
+    private final ApiConfig config;
     private final ApiHttpTransport transport;
     private final ExecutorService workers = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(16),
             Thread.ofPlatform().daemon().name("codej-deepseek-stream-", 0).factory());
@@ -77,12 +76,13 @@ public final class DeepSeekModelClient
     private final AtomicReference<SecretRedactor> redactor = new AtomicReference<>(SecretRedactor.fromEnvironment(Map.of()));
     private volatile boolean closed;
 
-    public DeepSeekModelClient(DeepSeekApiConfig config)
+    public DeepSeekModelClient(ApiConfig config)
     {
         this.config = requireNonNull(config, "config is null");
         transport = new ApiHttpTransport(config.timeout);
     }
 
+    @Override
     public SecretRedactor redactor() { return redactor.get(); }
 
     @Override

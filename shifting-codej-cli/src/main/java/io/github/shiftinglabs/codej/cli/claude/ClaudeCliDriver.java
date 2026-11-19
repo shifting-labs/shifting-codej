@@ -1516,7 +1516,7 @@ public final class ClaudeCliDriver
             }
             return attachments.build();
         }
-        catch (java.io.IOException e) {
+        catch (IOException e) {
             throw new AgentUnavailableException("Cannot resolve Claude attachment", e);
         }
     }

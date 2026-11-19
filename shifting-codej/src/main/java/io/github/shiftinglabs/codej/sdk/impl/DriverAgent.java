@@ -168,21 +168,13 @@ public final class DriverAgent
                 settings.callbackExecutor().orElse(VIRTUAL_THREADS), UnaryOperator.identity(), driver.unavailable(), driver.testedVersion());
     }
 
-    public static Agent claudeApi(ClaudeApiConfig settings, Optional<Path> stateDirectory, Optional<Path> profileDirectory)
+    public static Agent api(ApiConfig settings, Optional<Path> stateDirectory, Optional<Path> profileDirectory)
     {
-        StateFolder state = StateFolder.open(stateDirectory.orElse(DEFAULT_STATE.resolve("claude-api")));
+        String id = settings.provider.id();
+        StateFolder state = StateFolder.open(stateDirectory.orElse(DEFAULT_STATE.resolve(id)));
         Path profile = profileDirectory.orElse(state.root().resolve("profile")).toAbsolutePath();
-        ConnectorDriver driver = new ClaudeApiConnector().create(settings, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
-        return new DriverAgent(driver, "claude-api", state, ImmutableList.of(driver), settings.callbacks.orElse(VIRTUAL_THREADS),
-                UnaryOperator.identity(), Optional.empty(), Optional.empty(), !settings.toolProviders.isEmpty());
-    }
-
-    public static Agent deepSeekApi(DeepSeekApiConfig settings, Optional<Path> stateDirectory, Optional<Path> profileDirectory)
-    {
-        StateFolder state = StateFolder.open(stateDirectory.orElse(DEFAULT_STATE.resolve("deepseek-api")));
-        Path profile = profileDirectory.orElse(state.root().resolve("profile")).toAbsolutePath();
-        ConnectorDriver driver = new DeepSeekApiConnector().create(settings, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
-        return new DriverAgent(driver, "deepseek-api", state, ImmutableList.of(driver), settings.callbacks.orElse(VIRTUAL_THREADS),
+        ConnectorDriver driver = new DirectApiConnector(settings.provider).create(settings, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
+        return new DriverAgent(driver, id, state, ImmutableList.of(driver), settings.callbacks.orElse(VIRTUAL_THREADS),
                 UnaryOperator.identity(), Optional.empty(), Optional.empty(), !settings.toolProviders.isEmpty());
     }
 

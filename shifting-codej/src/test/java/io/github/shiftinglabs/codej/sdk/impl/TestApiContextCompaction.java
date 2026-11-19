@@ -354,11 +354,11 @@ class TestApiContextCompaction
             deepseek = claude ? null : new DeepSeekHttpFixture();
             model = claude ? AnthropicHttpFixture.MODEL : DeepSeekHttpFixture.MODEL;
             if (claude) {
-                client = new AnthropicModelClient(ClaudeApiConfig.builder(model, () -> "sk-context-test")
+                client = new AnthropicModelClient(ApiConfig.builder(ApiConfig.Provider.CLAUDE).model(model).apiKey(() -> "sk-context-test")
                         .baseUrl(anthropic.baseUrl()).requestTimeout(Duration.ofSeconds(5)).build());
             }
             else {
-                client = new DeepSeekModelClient(DeepSeekApiConfig.builder(model, () -> "sk-context-test")
+                client = new DeepSeekModelClient(ApiConfig.builder(ApiConfig.Provider.DEEPSEEK).model(model).apiKey(() -> "sk-context-test")
                         .baseUrl(deepseek.baseUrl()).requestTimeout(Duration.ofSeconds(5)).build());
             }
         }

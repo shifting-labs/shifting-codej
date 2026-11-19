@@ -69,7 +69,7 @@ flowchart TD
 
 | Component | Owns |
 | --- | --- |
-| `ClaudeApiConnector implements AgentConnector<ClaudeApiConfig>` | Typed configuration and runtime assembly; no inference at construction |
+| `DirectApiConnector implements AgentConnector<ApiConfig>` | One connector per `ApiConfig.Provider`; typed configuration and runtime assembly; no inference at construction |
 | `ApiConnector` / `ApiEngineConfig` / `ApiAgentDriver implements ConnectorDriver` | Provider-bound runtime assembly and shared driver/session/turn behavior |
 | `ModelClient` | One inference response, model metadata, protocol translation, replay encoding and normalized failures |
 | Internal `ApiSessionStore` | Durable checkpoints, execution journal, profile ownership and single-writer locking |

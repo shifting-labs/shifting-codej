@@ -61,7 +61,8 @@ class TestDeepSeekModelClient
     @Override
     protected ModelClient client()
     {
-        return new DeepSeekModelClient(DeepSeekApiConfig.builder(MODEL, key::get).baseUrl(http.baseUrl()).requestTimeout(Duration.ofSeconds(5)).build());
+        return new DeepSeekModelClient(ApiConfig.builder(ApiConfig.Provider.DEEPSEEK).model(MODEL).apiKey(key::get).baseUrl(http.baseUrl())
+                .requestTimeout(Duration.ofSeconds(5)).build());
     }
 
     private static ModelRequest.Builder request(String text)
@@ -305,7 +306,7 @@ class TestDeepSeekModelClient
     void boundsStalledStreamsAndRedactsSplitCredentials()
             throws Exception
     {
-        try (ModelClient client = new DeepSeekModelClient(DeepSeekApiConfig.builder(MODEL, key::get).baseUrl(http.baseUrl())
+        try (ModelClient client = new DeepSeekModelClient(ApiConfig.builder(ApiConfig.Provider.DEEPSEEK).model(MODEL).apiKey(key::get).baseUrl(http.baseUrl())
                 .requestTimeout(Duration.ofMillis(250)).build())) {
             ModelCall call = client.generate(request("Wait").build(), text -> {});
             http.awaitWaiting();

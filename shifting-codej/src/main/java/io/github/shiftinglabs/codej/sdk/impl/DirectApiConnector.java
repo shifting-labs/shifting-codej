@@ -24,26 +24,35 @@ import io.github.shiftinglabs.codej.cli.spi.ConnectorIdentity;
 
 import java.nio.charset.StandardCharsets;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
-/** The direct Messages connector: the adapter owns HTTP; the shared engine owns sessions and host tools. */
-public final class ClaudeApiConnector
-        implements AgentConnector<ClaudeApiConfig>
+/** A direct inference connector: the provider's adapter owns HTTP; the shared engine owns sessions and host tools. */
+public final class DirectApiConnector
+        implements AgentConnector<ApiConfig>
 {
-    @Override
-    public String id() { return "claude-api"; }
+    private final ApiConfig.Provider provider;
+
+    public DirectApiConnector(ApiConfig.Provider provider)
+    {
+        this.provider = requireNonNull(provider, "provider is null");
+    }
 
     @Override
-    public Class<ClaudeApiConfig> configurationType() { return ClaudeApiConfig.class; }
+    public String id() { return provider.id(); }
 
     @Override
-    public ConnectorDriver create(ClaudeApiConfig config, ConnectorContext context)
+    public Class<ApiConfig> configurationType() { return ApiConfig.class; }
+
+    @Override
+    public ConnectorDriver create(ApiConfig config, ConnectorContext context)
     {
         requireNonNull(config, "configuration is null");
         requireNonNull(context, "context is null");
+        checkArgument(config.provider == provider, "configuration is for %s, not %s", config.provider.id(), id());
         String profile = Hashing.sha256().hashString(context.profileDirectory().toAbsolutePath().normalize() + "\n" + config.baseUrl,
                 StandardCharsets.UTF_8).toString().substring(0, 16);
-        AnthropicModelClient client = new AnthropicModelClient(config);
+        ApiModelClient client = provider.client(config);
         try {
             ApiEngineConfig.Builder engine = ApiEngineConfig.builder(new ConnectorIdentity(id(), "profile-" + profile),
                             new AgentLaneId(id() + "-" + profile), config.model, () -> client)

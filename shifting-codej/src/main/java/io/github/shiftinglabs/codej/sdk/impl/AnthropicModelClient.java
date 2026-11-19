@@ -40,7 +40,6 @@ import io.github.shiftinglabs.codej.cli.driver.ProviderModel;
 import io.github.shiftinglabs.codej.cli.process.SecretRedactor;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCall;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCapabilities;
-import io.github.shiftinglabs.codej.cli.spi.model.ModelClient;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelClientException;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionMemory;
 import io.github.shiftinglabs.codej.cli.spi.model.ModelCompactionRequest;
@@ -77,7 +76,7 @@ import static java.util.Objects.requireNonNull;
 
 /** Anthropic Messages adapter. SDK HTTP/stream/error handling stays here; tools are executed only by the shared engine. */
 public final class AnthropicModelClient
-        implements ModelClient
+        implements ApiModelClient
 {
     static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
@@ -85,7 +84,7 @@ public final class AnthropicModelClient
     private static final JsonMapper WIRE = AnthropicJson.mapper();
     private static final int MAX_REPLAY = 8 * 1024 * 1024;
     private static final Set<String> IMAGES = Set.of("image/png", "image/jpeg", "image/gif", "image/webp");
-    private final ClaudeApiConfig config;
+    private final ApiConfig config;
     private final AnthropicClient sdk;
     private final ExecutorService workers = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(16),
             Thread.ofPlatform().daemon().name("codej-anthropic-stream-", 0).factory());
@@ -93,7 +92,7 @@ public final class AnthropicModelClient
     private final AtomicReference<SecretRedactor> redactor = new AtomicReference<>(SecretRedactor.fromEnvironment(Map.of()));
     private volatile boolean closed;
 
-    public AnthropicModelClient(ClaudeApiConfig config)
+    public AnthropicModelClient(ApiConfig config)
     {
         this.config = requireNonNull(config, "config is null");
         sdk = new AnthropicClientImpl(ClientOptions.builder().httpClient(new AnthropicHttpTransport(config.timeout))
@@ -101,6 +100,7 @@ public final class AnthropicModelClient
                 .jsonMapper(WIRE).maxRetries(0).timeout(config.timeout).streamHandlerExecutor(Runnable::run).openTelemetry(false).logLevel(LogLevel.OFF).build());
     }
 
+    @Override
     public SecretRedactor redactor() { return redactor.get(); }
 
     @Override

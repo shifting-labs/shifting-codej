@@ -15,7 +15,6 @@ package io.github.shiftinglabs.codej.cli.driver;
 
 import com.google.common.collect.ImmutableList;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -59,11 +58,6 @@ public record ProviderApprovalScope(Operation operation, List<String> hosts, Opt
         public String key()
         {
             return key;
-        }
-
-        public static Optional<Operation> fromKey(String key)
-        {
-            return Arrays.stream(values()).filter(operation -> operation.key.equals(key)).findFirst();
         }
     }
 }

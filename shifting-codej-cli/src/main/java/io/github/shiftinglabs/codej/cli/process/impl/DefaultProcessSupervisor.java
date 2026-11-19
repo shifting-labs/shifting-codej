@@ -214,10 +214,7 @@ public final class DefaultProcessSupervisor
      */
     private static boolean impossibleOrdering(LaunchMarker marker, Optional<Boolean> attempted)
     {
-        if (marker.phase() == LaunchPhase.PREPARED) {
-            return false;
-        }
-        return !attempted.orElse(false);
+        return marker.phase() != LaunchPhase.PREPARED && !attempted.orElse(false);
     }
 
     private OwnedProcessRecovery reconcile(LaunchMarker marker, Optional<Boolean> attempted, boolean retryUnverifiable)
