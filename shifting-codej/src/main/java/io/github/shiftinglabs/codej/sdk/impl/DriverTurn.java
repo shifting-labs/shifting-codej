@@ -25,7 +25,6 @@ import io.github.shiftinglabs.codej.TurnResult;
 import io.github.shiftinglabs.codej.Usage;
 import io.github.shiftinglabs.codej.cli.driver.AgentAttachment;
 import io.github.shiftinglabs.codej.cli.driver.AgentDeliveryUncertainException;
-import io.github.shiftinglabs.codej.cli.driver.AgentTurnFailureKind;
 import io.github.shiftinglabs.codej.cli.driver.AgentTurnInput;
 import io.github.shiftinglabs.codej.cli.driver.AgentTurnResult;
 import io.github.shiftinglabs.codej.cli.driver.ProviderAgentEvent;
@@ -251,11 +250,10 @@ final class DriverTurn
 
     private TurnResult.Failure failure(AgentTurnResult outcome)
     {
-        if (outcome.failureKind().filter(AgentTurnFailureKind.AUTHENTICATION_REQUIRED::equals).isPresent()) {
-            return TurnResult.Failure.SIGN_IN_REQUIRED;
-        }
-        // ponytail: the drivers tag only sign-in; a usage limit or a lost process stays a provider error until they say so.
-        return timeLimitReached() ? TurnResult.Failure.TIME_LIMIT : TurnResult.Failure.PROVIDER_ERROR;
+        return outcome.failureKind().map(kind -> switch (kind) {
+            case AUTHENTICATION_REQUIRED -> TurnResult.Failure.SIGN_IN_REQUIRED;
+            case DELIVERY_UNCERTAIN -> TurnResult.Failure.DELIVERY_UNCERTAIN;
+        }).orElseGet(() -> timeLimitReached() ? TurnResult.Failure.TIME_LIMIT : TurnResult.Failure.PROVIDER_ERROR);
     }
 
     /** Measured from this turn's start, before the driver's own timer starts, so a turn its driver stopped for the limit has reached it. */

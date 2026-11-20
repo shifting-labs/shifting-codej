@@ -140,6 +140,16 @@ public final class Codex
         }
 
         /**
+         * Runs DeepSeek models through the local Responses adapter using {@code DEEPSEEK_API_KEY}.
+         *
+         * @return this builder
+         */
+        public Builder deepSeek()
+        {
+            return deepSeek(() -> System.getenv("DEEPSEEK_API_KEY"));
+        }
+
+        /**
          * Runs DeepSeek models through a local Responses adapter instead of using a ChatGPT login.
          *
          * @param apiKey read as {@link #gateway(URI, Supplier)} reads its token
@@ -149,6 +159,16 @@ public final class Codex
         {
             this.deepSeekKey = Optional.of(apiKey);
             return this;
+        }
+
+        /**
+         * Signs Codex in with the OpenAI API key from {@code OPENAI_API_KEY}.
+         *
+         * @return this builder
+         */
+        public Builder apiKey()
+        {
+            return apiKey(() -> System.getenv("OPENAI_API_KEY"));
         }
 
         /**

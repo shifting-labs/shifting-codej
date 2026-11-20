@@ -1,6 +1,7 @@
 # shifting-codej
 
-Run [Codex](https://github.com/openai/codex) and [Claude Code](https://github.com/anthropics/claude-code)
+Run [Codex](https://github.com/openai/codex), [Claude Code](https://github.com/anthropics/claude-code)
+and [Antigravity CLI](https://antigravity.google/docs/cli/acp/)
 from Java through one small API: sessions, turns, live events, approvals, questions, and tools of
 your own. Direct Anthropic and DeepSeek API sessions use the same API through `ClaudeApi` and `DeepSeekApi`.
 
@@ -20,6 +21,7 @@ Both use the shared API engine and keep conversation replay locally.
   OpenAI built and signed it. To run your own Codex instead, pass `Codex.builder().executable(path)`.
 - Internet access the first time, unless you pass `executable(path)`.
 - Claude Code 2.1.200 or newer, installed as `claude`.
+- For Google, install Antigravity CLI 1.5.10 or newer as `agy`, or pass its path to `Antigravity.builder().executable(path)`.
 - Run with `--enable-native-access=ALL-UNNAMED`, or the JDK warns: the SDK starts each CLI in its own
   process session through the JDK's foreign-function API, so it can stop the CLI's whole process tree.
 
@@ -84,7 +86,7 @@ A new session can only read, and every request beyond that is denied. Turn on wh
 
 | Type | What it is |
 | --- | --- |
-| `Agent` | One provider account. Build it with `Codex.builder()` or `Claude.builder()`. |
+| `Agent` | One provider account. CLI builders include `Codex.builder()`, `Claude.builder()`, and `Antigravity.builder()`. |
 | `Session` | One conversation in one working directory. |
 | `Turn` | One message you sent, and the agent's work on it. |
 | `AgentEvent` | What the agent does during a turn, as it happens. |
@@ -307,12 +309,37 @@ static <T> ListenableFuture<T> listenable(CompletionStage<T> stage)
 }
 ```
 
+## Antigravity CLI
+
+`Antigravity` uses the installed CLI's Agent Client Protocol (ACP). The CLI runs the agent loop
+and saves conversation history in its private profile. Java callers use the same `Agent`, `Session`, and `Turn` types
+as the other connectors.
+
+```java
+try (Agent google = Antigravity.builder().apiKey().build();
+        Session session = google.startSession(SessionOptions.in(checkout).build())) {
+    TurnResult result = session.run(Input.text("Read " + checkout.resolve("pom.xml").toAbsolutePath() + " and summarize the build requirements."));
+}
+```
+
+`apiKey()` reads `GEMINI_API_KEY` and passes it to the CLI. To use a secret store, pass a supplier
+such as `apiKey(vault::geminiKey)`.
+For Google sign-in, omit `apiKey(...)` and run the command from `google.status().signInCommand()`
+when prompted. Each authentication mode has its own directory under the agent's private profile.
+`status()` checks the executable, model catalog, and SDK-managed read-only agent.
+Google validates the API key on inference.
+
+The connector supports read-only file inspection, streamed text, tool activity, model selection,
+interruption, and token counts. Give it the path of each file to inspect. A saved conversation can
+be resumed through the same connector profile and checkout. The private profile must be outside
+the checkout. Shell commands, workspace edits, web search, and host tools are unavailable.
+
 ## Direct Claude API
 
 ```java
 try (Agent agent = ClaudeApi.builder()
         .model(modelId) // An explicit model identifier available to your Anthropic account.
-        .apiKey(vault::anthropicKey) // Read afresh for each HTTP operation.
+        .apiKey() // Reads ANTHROPIC_API_KEY for each HTTP operation.
         .stateDirectory(stateDir)
         .build();
      Session session = agent.startSession(SessionOptions.in(workDir)
@@ -352,7 +379,7 @@ show durable resume and host tools using only the existing public session API.
 ```java
 try (Agent agent = DeepSeekApi.builder()
         .model(modelId)
-        .apiKey(vault::deepSeekKey)
+        .apiKey() // Reads DEEPSEEK_API_KEY for each HTTP operation.
         .stateDirectory(stateDir)
         .build();
      Session session = agent.startSession(SessionOptions.in(workDir)
@@ -379,8 +406,8 @@ and cannot resume a Codex or Claude conversation.
 ```java
 Agent work = Codex.builder().home(workHome).account("me@example.com").keepSessionsFor(Duration.ofDays(30)).build();
 Agent proxy = Codex.builder().gateway(URI.create("https://llm.example.com/v1"), vault::gatewayToken).build();
-Agent deepSeek = Codex.builder().deepSeek(vault::deepSeekKey).build();
-Agent openAi = Codex.builder().apiKey(vault::openAiKey).build();
+Agent deepSeek = Codex.builder().deepSeek().build();
+Agent openAi = Codex.builder().apiKey().build();
 Agent claude = Claude.builder()
         .runOutsideSandbox("mvn", "./mvnw")
         .allowUnixSocket(Path.of("/var/run/docker.sock"))
@@ -391,13 +418,15 @@ Agent claude = Claude.builder()
 - Every session API works the same on each agent.
 - Each agent keeps its login in its own folder, never `~/.codex` or `~/.claude`, so your own CLI
   settings never reach a session.
-- Secrets are a `Supplier<String>`, read when a process starts, passed only in its environment, and
-  never written to disk.
-- `deepSeek(key)` runs DeepSeek models through Codex, with no ChatGPT login.
-- `apiKey(key)` signs Codex in with an OpenAI API key instead. Each Codex process signs in with it
-  right after it starts and keeps it only in memory, so Codex's environment, its home and the
+- For a custom gateway, pass its URL and a token supplier to `gateway(url, token)`. The CLI
+  receives the token in its process environment.
+- `deepSeek()` runs DeepSeek models through Codex using `DEEPSEEK_API_KEY`. Pass
+  `deepSeek(vault::deepSeekKey)` to supply the key yourself.
+- `apiKey()` signs Codex in using `OPENAI_API_KEY`. Pass `apiKey(vault::openAiKey)` to supply
+  the key yourself. Each Codex process signs in with it right after it starts and keeps it only
+  in memory, so Codex's environment, its home and the
   commands the agent runs never see it.
-- Both CLIs keep every conversation's transcript forever. `keepSessionsFor(age)` has the agent delete
+- Codex and Claude Code keep every conversation's transcript forever. `keepSessionsFor(age)` has the agent delete
   the ones unused for longer, while it runs; a deleted conversation can't be resumed.
 - On Claude, `runOutsideSandbox` and `allowUnixSocket` apply only to sessions that may use the
   network. `autoModeRules` turns on Claude's own reviewer, which checks the agent's actions before

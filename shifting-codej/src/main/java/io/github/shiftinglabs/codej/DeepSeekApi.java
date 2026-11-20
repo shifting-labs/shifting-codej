@@ -40,7 +40,7 @@ import static java.util.Objects.requireNonNull;
  * Conversation replay is private local state, so keep the profile folder to resume a {@link SessionRef}.
  *
  * <pre>{@code
- * Agent agent = DeepSeekApi.builder().model(modelId).apiKey(() -> secretStore.read("deepseek")).build();
+ * Agent agent = DeepSeekApi.builder().model(modelId).apiKey().build();
  * }</pre>
  */
 public final class DeepSeekApi
@@ -48,7 +48,7 @@ public final class DeepSeekApi
     private DeepSeekApi() {}
 
     /**
-     * Creates a builder. A model and an explicit key supplier are required.
+     * Creates a builder. Select a model and an API key source before building.
      *
      * @return a new builder
      */
@@ -76,9 +76,19 @@ public final class DeepSeekApi
         }
 
         /**
+         * Reads the API key from the {@code DEEPSEEK_API_KEY} environment variable for each HTTP operation.
+         *
+         * @return this builder
+         */
+        public Builder apiKey()
+        {
+            return apiKey(() -> System.getenv("DEEPSEEK_API_KEY"));
+        }
+
+        /**
          * Supplies the API key afresh for each HTTP operation. Credentials are never persisted.
          *
-         * @param value the credential supplier; environment variables are not consulted
+         * @param value the credential supplier
          * @return this builder
          */
         public Builder apiKey(Supplier<String> value)
@@ -322,7 +332,7 @@ public final class DeepSeekApi
          *
          * @return the agent; close it to stop its sessions and HTTP workers
          * @throws IllegalArgumentException for invalid settings
-         * @throws NullPointerException when a model or credential supplier is missing
+         * @throws NullPointerException when a model or API key source is missing
          */
         public Agent build()
         {

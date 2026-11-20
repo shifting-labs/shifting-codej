@@ -194,6 +194,15 @@ public final class DriverAgent
                 settings.callbackExecutor().orElse(VIRTUAL_THREADS), sandbox, Optional.empty(), Optional.empty());
     }
 
+    public static Agent antigravity(AntigravityConnectorConfig config, Optional<Path> stateDirectory, Optional<Path> configDir, Optional<Executor> callbackExecutor)
+    {
+        StateFolder state = StateFolder.open(stateDirectory.orElse(DEFAULT_STATE));
+        Path profile = configDir.orElse(state.root().resolve("antigravity")).toAbsolutePath();
+        ConnectorDriver driver = new AntigravityConnector().create(config, new ConnectorContext(profile, state.supervisor(), ToolServer.DEFAULT));
+        return new DriverAgent(driver, driver.id().value(), state, ImmutableList.of(driver),
+                callbackExecutor.orElse(VIRTUAL_THREADS), UnaryOperator.identity(), Optional.empty(), Optional.empty());
+    }
+
     @Override
     public AgentStatus status()
     {
