@@ -221,6 +221,7 @@ final class AntigravityCommands
         Path home = Path.of(provider.environment().get("HOME"));
         Path runtimePath = AntigravityPolicy.canonicalPath(runtime);
         StringBuilder rules = new StringBuilder(PROFILE);
+        allowSelectedXcode(rules);
         directoryRules(rules, worktree);
         directoryRules(rules, scratch);
         for (Path root : scope.writableRoots()) {
@@ -238,6 +239,19 @@ final class AntigravityCommands
         }
         return rules.append("(deny file-link)\n").append(AntigravityPolicy.PROTECTED_READS)
                 .append(AntigravityPolicy.denyReads(scope.sessionDeniedReads())).toString();
+    }
+
+    private static void allowSelectedXcode(StringBuilder rules)
+    {
+        try {
+            Path developer = Path.of("/private/var/db/xcode_select_link").toRealPath();
+            if (developer.toString().matches("/Applications/Xcode[^/]*\\.app/Contents/Developer")) {
+                rules.append("(allow file-read-data (subpath ").append(quote(developer.getParent())).append("))\n");
+            }
+        }
+        catch (IOException ignored) {
+            // macOS can use its default tools without an explicit developer directory selection.
+        }
     }
 
     static void validatePaths(AgentSessionContext context, Path providerHome)
