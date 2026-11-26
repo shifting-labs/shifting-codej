@@ -28,7 +28,7 @@ case "$1" in
             if [ "$1" = --agent ]; then agent=$2; shift; fi
             shift
         done
-        case "$agent" in codej-reader*|codej-writer*) ;; *) exit 1 ;; esac
+        case "$agent" in codej-reader*|codej-writer*|codej-tools) ;; *) exit 1 ;; esac
         agent_file="$HOME/.gemini/config/agents/$agent/agent.md" ;;
     *) exit 1 ;;
 esac
@@ -56,6 +56,20 @@ permission() {
     printf '{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"sessionId":"%s","toolCall":{"toolCallId":"edit","kind":"edit","title":"Edit file","locations":[{"path":"%s"}]},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}]}}\n' "$session_id" "$1"
     IFS= read -r decision
     case "$decision" in *'"id":"permission-1"'*'"outcome":"selected"'*'"optionId":"'"$2"'"'*) ;; *) fixture_error "Unexpected decision for $1" ;; esac
+}
+
+mcp_call() {
+    curl --max-time 15 -fsS -H "Authorization: $authorization" -H "Content-Type: application/json" \
+        --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":'"$1"'}' "$endpoint"
+}
+
+command_tool() {
+    reply=$(mcp_call '{"name":"codej_run_command","arguments":{"argv":'"$1"'}}')
+    if ! printf '%s\n' "$reply" | grep -qF "$2"; then
+        command=$(printf '%s' "$1" | tr -cd '[:alnum:] ./,:' | cut -c1-100)
+        diagnostic=$(printf '%s' "$reply" | tr -cd '[:alnum:] ./,:' | tail -c 360)
+        fixture_error "Unexpected result for $command. $diagnostic"
+    fi
 }
 
 while IFS= read -r frame; do
@@ -120,6 +134,9 @@ while IFS= read -r frame; do
             case "$frame" in *'Use the host lookup tool.'*) exit 1 ;; esac
             permission protected.txt deny
             if (printf 'unexpected\n' > protected.txt) 2>/dev/null; then exit 1; fi
+            for denied in denied-read.txt denied-alias; do
+                if cat "$denied" >/dev/null 2>&1; then fixture_error "Read a denied file"; fi
+            done
             reply=$(curl --max-time 5 -fsS -H "Authorization: $authorization" -H "Content-Type: application/json" \
                 --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup","arguments":{"key":"alpha"}}}' "$endpoint")
             case "$reply" in *'"text":"looked up alpha"'*) ;; *) exit 1 ;; esac
@@ -127,6 +144,46 @@ while IFS= read -r frame; do
             IFS= read -r answer
             case "$answer" in *'"id":91,'*'"action":"accept"'*'"plan":"fast"'*) ;; *) exit 1 ;; esac
             text_update "Tool and question complete"
+            result='{"stopReason":"end_turn"}' ;;
+        *'"method":"session/prompt"'*'"text":"run-commands"'*)
+            command_tool '["/usr/bin/make","test"]' '"exitCode\":0'
+            command_tool '["/bin/cp","built.txt","../granted/copied.txt"]' '"exitCode\":0'
+            command_tool '["/bin/cp","built.txt","../outside.txt"]' '"exitCode\":1'
+            command_tool '["/usr/bin/touch","denied-command.txt"]' 'Command is denied'
+            command_tool '["/bin/cp","built.txt","unapproved.txt"]' 'Command approval was denied'
+            command_tool '["/bin/cat","denied-read.txt"]' '"exitCode\":1'
+            command_tool '["/usr/bin/printenv","GEMINI_API_KEY"]' '"exitCode\":1'
+            text_update "Commands complete"
+            result='{"stopReason":"end_turn"}' ;;
+        *'"method":"session/prompt"'*'"text":"command-network-'*)
+            expected='"exitCode\":0'
+            case "$frame" in *'"text":"command-network-off"'*) expected='"exitCode\":7' ;; esac
+            command_tool '["/usr/bin/curl","--noproxy","*","--max-time","3","-s","-o","/dev/null","'"$endpoint"'"]' "$expected"
+            text_update "Network check complete"
+            result='{"stopReason":"end_turn"}' ;;
+        *'"method":"session/prompt"'*'"text":"hold-command"'*)
+            mcp_call '{"name":"codej_run_command","arguments":{"argv":["/bin/sh","-c","echo $$ > command.tmp; /bin/mv command.tmp command.pid; exec /bin/sleep 90"]}}' >/dev/null 2>&1 &
+            continue ;;
+        *'"method":"session/prompt"'*'"text":"local-commit"'*)
+            command_tool '["git","add","change.txt"]' '"exitCode\":0'
+            command_tool '["git","commit","-m","Local task"]' '"exitCode\":0'
+            command_tool '["git","update-ref","refs/remotes/origin/main","HEAD"]' '"exitCode\":128'
+            command_tool '["/bin/cp","change.txt","../main/foreign.txt"]' '"exitCode\":1'
+            text_update "Local commit complete"
+            result='{"stopReason":"end_turn"}' ;;
+        *'"method":"session/prompt"'*'"text":"tools-only"'*|*'"method":"session/prompt"'*'"text":"text-only"'*)
+            [ "$agent" = codej-tools ] && [ -z "$mode" ] || fixture_error "Expected tools-only agent"
+            grep -qF 'tools: []' "$agent_file" && grep -qF 'commandExecutionPolicy: off' "$agent_file"
+            if cat protected.txt >/dev/null 2>&1; then fixture_error "Tools-only checkout read succeeded"; fi
+            if (printf 'unexpected\n' > protected.txt) 2>/dev/null; then fixture_error "Tools-only checkout write succeeded"; fi
+            case "$frame" in
+                *'"text":"tools-only"'*)
+                    reply=$(mcp_call '{"name":"lookup","arguments":{"key":"alpha"}}')
+                    case "$reply" in *'"text":"looked up alpha"'*) ;; *) fixture_error "Host tool failed" ;; esac
+                    command_tool '["/usr/bin/true"]' 'Unknown tool' ;;
+                *) [ -z "$endpoint" ] || fixture_error "Unexpected MCP endpoint" ;;
+            esac
+            text_update "Tools-only check complete"
             result='{"stopReason":"end_turn"}' ;;
         *'"method":"session/prompt"'*'"text":"hold-approval"'*)
             permission pending.txt deny

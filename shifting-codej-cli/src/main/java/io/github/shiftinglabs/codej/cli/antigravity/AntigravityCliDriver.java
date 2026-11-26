@@ -271,7 +271,7 @@ public final class AntigravityCliDriver
             throws IOException, InterruptedException
     {
         ProcessSpec spec = new ProcessSpec(new ProcessOwner(ProcessOwner.Kind.CLI_PROBE, "antigravity-cli"),
-                AntigravityPolicy.command(ImmutableList.of(binary, argument), home, home, SessionAccess.READ_ONLY), home, environment,
+                AntigravityPolicy.command(ImmutableList.of(binary, argument), home, home, SessionAccess.READ_ONLY, ImmutableList.of()), home, environment,
                 OptionalInt.of(OUTPUT_LIMIT), OUTPUT_LIMIT, PROBE_TIMEOUT, STOP_GRACE);
         return ProviderCli.run(supervisor, spec, label());
     }
@@ -288,6 +288,12 @@ public final class AntigravityCliDriver
             verifyReference(reference, context);
         });
         AntigravityPolicy.validate(context);
+        try {
+            AntigravityCommands.validatePaths(context, home);
+        }
+        catch (IOException failure) {
+            throw new AgentUnavailableException("Unable to verify Antigravity permission paths", failure);
+        }
     }
 
     @Override
@@ -376,7 +382,7 @@ public final class AntigravityCliDriver
             Map<String, String> environment = environment();
             AntigravityPolicy.prepareAgent(home, context);
             List<String> command = AntigravityPolicy.acpCommand(binary, context);
-            List<String> argv = AntigravityPolicy.command(command, home, context.worktree(), context.access());
+            List<String> argv = AntigravityPolicy.command(command, home, context.worktree(), context.access(), context.scope().sessionDeniedReads());
             return new ProcessSpec(new ProcessOwner(ProcessOwner.Kind.DISCUSSION, context.taskId()), argv, context.worktree().toRealPath(),
                     environment, OptionalInt.empty(), OUTPUT_LIMIT, Duration.ZERO, STOP_GRACE);
         }

@@ -155,7 +155,7 @@ public final class PermissionBroker
         Path configFile = providerDirectory.resolve("codej-mcp.json");
         Path settingsFile = providerDirectory.resolve("sandbox-settings.json");
         Path childGateFile = providerDirectory.resolve("review-child-gate.sh");
-        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), true, true, sessionTools);
+        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), true, true, sessionTools, Optional.empty());
         URI uri = open(token, context);
         Runnable release = () -> {
             forget(token);
@@ -205,7 +205,7 @@ public final class PermissionBroker
             String taskId, Path worktree, AgentPermissionScope scope, AgentApprovalHandler approvals, SecretRedactor redactor,
             List<Tool> sessionTools)
     {
-        return registerTools(taskId, worktree, scope, approvals, redactor, sessionTools, false);
+        return registerTools(taskId, worktree, scope, approvals, redactor, sessionTools, false, Optional.empty());
     }
 
     /**
@@ -215,14 +215,14 @@ public final class PermissionBroker
      */
     public Optional<McpRegistration> registerSessionTools(
             String taskId, Path worktree, AgentPermissionScope scope, AgentApprovalHandler approvals, SecretRedactor redactor,
-            List<Tool> sessionTools)
+            List<Tool> sessionTools, Optional<Tool> internalTool)
     {
-        return registerTools(taskId, worktree, scope, approvals, redactor, sessionTools, true);
+        return registerTools(taskId, worktree, scope, approvals, redactor, sessionTools, true, internalTool);
     }
 
     private Optional<McpRegistration> registerTools(
             String taskId, Path worktree, AgentPermissionScope scope, AgentApprovalHandler approvals, SecretRedactor redactor,
-            List<Tool> sessionTools, boolean trackCallbacks)
+            List<Tool> sessionTools, boolean trackCallbacks, Optional<Tool> internalTool)
     {
         requireNonNull(taskId, "taskId is null");
         requireNonNull(worktree, "worktree is null");
@@ -230,7 +230,7 @@ public final class PermissionBroker
         requireNonNull(approvals, "approvals is null");
         requireNonNull(redactor, "redactor is null");
         String token = token();
-        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), false, trackCallbacks, sessionTools);
+        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), false, trackCallbacks, sessionTools, internalTool);
         if (tools(context).isEmpty()) {
             return Optional.empty();
         }
@@ -327,14 +327,17 @@ public final class PermissionBroker
             SecretRedactor redactor,
             boolean permissionTools,
             boolean trackCallbacks,
-            List<Tool> sessionTools)
+            List<Tool> sessionTools,
+            Optional<Tool> internalTool)
     {
         // Claude's gate admits read-only children through this flag. Codex registers no permission tools and
         // gates its children through its own launch-time PreToolUse hook.
         boolean readOnlyChildren = permissionTools && scope.readOnlySubagents() && !scope.noSubagents();
+        var tools = ImmutableList.<Tool>builder().addAll(sessionTools);
+        internalTool.ifPresent(tools::add);
         return new PermissionContext(
-                taskId, worktree, scope, approvals, redactor, permissionTools, sessionTools, readOnlyChildren, new AtomicReference<>(),
-                trackCallbacks ? Optional.of(new ToolCallbacks()) : Optional.empty());
+                taskId, worktree, scope, approvals, redactor, permissionTools, tools.build(), readOnlyChildren, new AtomicReference<>(),
+                trackCallbacks ? Optional.of(new ToolCallbacks()) : Optional.empty(), internalTool.map(Tool::name));
     }
 
     /** Combines the fixed capabilities' guidance for the session's instruction channel. */
@@ -465,7 +468,8 @@ public final class PermissionBroker
         String text;
         boolean failed = false;
         try {
-            text = invocation.execute(toolExecutor);
+            // The internal command tool may wait for an approval that runs on the caller's executor.
+            text = invocation.execute(context.internalTool().filter(params.name()::equals).isPresent() ? Thread::startVirtualThread : toolExecutor);
         }
         catch (Exception failure) {
             text = failureReason(failure);
@@ -863,7 +867,8 @@ public final class PermissionBroker
             List<Tool> sessionTools,
             boolean readOnlyChildren,
             AtomicReference<CodexRootTools> codexReviewTools,
-            Optional<ToolCallbacks> toolCallbacks)
+            Optional<ToolCallbacks> toolCallbacks,
+            Optional<String> internalTool)
     {
         private PermissionContext
         {
@@ -874,6 +879,7 @@ public final class PermissionBroker
             requireNonNull(redactor, "redactor is null");
             requireNonNull(codexReviewTools, "codexReviewTools is null");
             requireNonNull(toolCallbacks, "toolCallbacks is null");
+            requireNonNull(internalTool, "internalTool is null");
             sessionTools = ImmutableList.copyOf(sessionTools);
         }
     }

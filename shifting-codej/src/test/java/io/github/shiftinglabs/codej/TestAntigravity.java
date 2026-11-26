@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -30,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -161,7 +163,7 @@ class TestAntigravity
         Path checkout = Files.createDirectory(folder.resolve("checkout"));
         try (Agent agent = Antigravity.builder().executable(fakeCli()).stateDirectory(folder.resolve("state"))
                 .apiKey(() -> "fixture-key-first").build()) {
-            assertThatThrownBy(() -> agent.startSession(SessionOptions.in(checkout).access(Access.WORKSPACE_WRITE).allowNetwork().build()))
+            assertThatThrownBy(() -> agent.startSession(SessionOptions.in(checkout).allowNetwork().build()))
                     .isInstanceOf(AgentException.class).hasMessageContaining("does not support the requested permission scope");
             assertThat(agent.unconfirmedDirectories()).isEmpty();
             assertThat(folder.resolve("state/processes/intents")).isEmptyDirectory();
@@ -213,6 +215,8 @@ class TestAntigravity
     {
         Path checkout = Files.createDirectory(folder.resolve("checkout"));
         Path protectedFile = Files.writeString(checkout.resolve("protected.txt"), "protected\n");
+        Path denied = Files.writeString(checkout.resolve("denied-read.txt"), "denied\n");
+        Files.createSymbolicLink(checkout.resolve("denied-alias"), denied);
         List<String> calls = new CopyOnWriteArrayList<>();
         List<String> callbackThreads = new CopyOnWriteArrayList<>();
         List<Question> questions = new CopyOnWriteArrayList<>();
@@ -221,7 +225,7 @@ class TestAntigravity
             callbackThreads.add(Thread.currentThread().getName());
             return "looked up " + input.key();
         });
-        SessionOptions options = SessionOptions.in(checkout).instructions("Use the host lookup tool.").tool(lookup)
+        SessionOptions options = SessionOptions.in(checkout).instructions("Use the host lookup tool.").tool(lookup).denyRead(denied)
                 .questions(question -> {
                     questions.add(question);
                     return CompletableFuture.completedStage(Map.of(question.items().getFirst().id(), List.of("Fast plan")));
@@ -250,6 +254,121 @@ class TestAntigravity
     }
 
     @Test
+    void runsApprovedCommandsWithinWorkspaceAndExplicitGrants()
+            throws Exception
+    {
+        Path checkout = Files.createDirectory(folder.resolve("checkout"));
+        Path allowed = Files.createDirectory(folder.resolve("granted"));
+        Path denied = Files.writeString(checkout.resolve("denied-read.txt"), "keep");
+        Files.writeString(checkout.resolve("Makefile"), "test:\n\tprintf 'built' > built.txt\n");
+        List<Approval.Command> asked = new CopyOnWriteArrayList<>();
+        SessionOptions options = SessionOptions.in(checkout).access(Access.WORKSPACE_WRITE).writableRoot(allowed)
+                .denyRead(denied).denyCommand("touch").approveEveryCommand()
+                .approvals(approval -> {
+                    Approval.Command command = (Approval.Command) approval;
+                    asked.add(command);
+                    return CompletableFuture.completedStage(command.command().endsWith("unapproved.txt") ? Decision.DENY : Decision.ALLOW_ONCE);
+                }).build();
+        try (ExecutorService callbacks = Executors.newSingleThreadExecutor();
+                Agent agent = Antigravity.builder().executable(fakeCli()).stateDirectory(folder.resolve("state"))
+                        .apiKey(() -> "fixture-key-first").callbackExecutor(callbacks).build();
+                Session session = agent.startSession(options)) {
+            assertThat(session.run(Input.text("run-commands"))).isInstanceOf(TurnResult.Completed.class);
+        }
+        assertThat(checkout.resolve("built.txt")).hasContent("built");
+        assertThat(allowed.resolve("copied.txt")).hasContent("built");
+        assertThat(checkout.resolve("denied-command.txt")).doesNotExist();
+        assertThat(checkout.resolve("unapproved.txt")).doesNotExist();
+        assertThat(folder.resolve("outside.txt")).doesNotExist();
+        assertThat(asked).hasSize(6).allMatch(Approval.Command::sandboxed);
+    }
+
+    @Test
+    void controlsCommandNetworkIndependentlyOfProviderNetwork()
+            throws Exception
+    {
+        Path checkout = Files.createDirectory(folder.resolve("checkout"));
+        try (Agent agent = Antigravity.builder().executable(fakeCli()).stateDirectory(folder.resolve("state"))
+                .apiKey(() -> "fixture-key-first").build()) {
+            try (Session session = agent.startSession(SessionOptions.in(checkout).access(Access.WORKSPACE_WRITE).build())) {
+                assertThat(session.run(Input.text("command-network-off"))).isInstanceOf(TurnResult.Completed.class);
+            }
+            try (Session session = agent.startSession(SessionOptions.in(checkout).access(Access.WORKSPACE_WRITE).allowNetwork().build())) {
+                assertThat(session.run(Input.text("command-network-on"))).isInstanceOf(TurnResult.Completed.class);
+            }
+        }
+    }
+
+    @Test
+    void interruptsAnOwnedWorkspaceCommand()
+            throws Exception
+    {
+        Path checkout = Files.createDirectory(folder.resolve("checkout"));
+        Path marker = checkout.resolve("command.pid");
+        try (Agent agent = Antigravity.builder().executable(fakeCli()).stateDirectory(folder.resolve("state"))
+                .apiKey(() -> "fixture-key-first").build();
+                Session session = agent.startSession(SessionOptions.in(checkout).access(Access.WORKSPACE_WRITE).build())) {
+            Turn turn = session.start(Input.text("hold-command"), _ -> {});
+            long deadline = System.nanoTime() + SECONDS.toNanos(10);
+            while (!Files.exists(marker) && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+            long pid = Long.parseLong(Files.readString(marker).strip());
+            assertThat(turn.interrupt().toCompletableFuture().get(20, SECONDS)).isInstanceOf(TurnResult.Interrupted.class);
+            assertThat(ProcessHandle.of(pid).filter(ProcessHandle::isAlive)).isEmpty();
+        }
+        assertThat(folder.resolve("state/processes/intents")).isEmptyDirectory();
+    }
+
+    @Test
+    void allowsLocalCommitsInOnlyTheLinkedWorktree()
+            throws Exception
+    {
+        Path main = Files.createDirectory(folder.resolve("main")).toRealPath();
+        Path checkout = main.resolveSibling("checkout");
+        git(main, "init", "-b", "main");
+        git(main, "config", "user.name", "Antigravity fixture");
+        git(main, "config", "user.email", "fixture@example.invalid");
+        git(main, "commit", "--allow-empty", "-m", "Initial");
+        git(main, "update-ref", "refs/remotes/origin/main", "HEAD");
+        String original = git(main, "rev-parse", "HEAD");
+        git(main, "worktree", "add", "-b", "task", checkout.toString());
+        Files.writeString(checkout.resolve("change.txt"), "committed");
+        try (Agent agent = Antigravity.builder().executable(fakeCli()).stateDirectory(folder.resolve("state"))
+                .apiKey(() -> "fixture-key-first").build()) {
+            assertThatThrownBy(() -> agent.startSession(SessionOptions.in(main).access(Access.WORKSPACE_WRITE).allowCommits().build()))
+                    .isInstanceOf(AgentException.class).hasMessageContaining("linked worktree");
+            try (Session session = agent.startSession(SessionOptions.in(checkout).access(Access.WORKSPACE_WRITE).allowCommits().build())) {
+                assertThat(session.run(Input.text("local-commit"))).isInstanceOf(TurnResult.Completed.class);
+            }
+        }
+        assertThat(git(checkout, "log", "-1", "--format=%s")).isEqualTo("Local task");
+        assertThat(git(checkout, "show", "HEAD:change.txt")).isEqualTo("committed");
+        assertThat(git(main, "rev-parse", "HEAD")).isEqualTo(original);
+        assertThat(git(main, "rev-parse", "refs/remotes/origin/main")).isEqualTo(original);
+        assertThat(main.resolve("foreign.txt")).doesNotExist();
+    }
+
+    @Test
+    void supportsToolsOnlyAndTextOnlyWithoutNativeTools()
+            throws Exception
+    {
+        Path checkout = Files.createDirectory(folder.resolve("checkout"));
+        Files.writeString(checkout.resolve("protected.txt"), "checkout");
+        Tool lookup = Tool.of("lookup", "Look up a key", Lookup.class, input -> "looked up " + input.key());
+        try (Agent agent = Antigravity.builder().executable(fakeCli()).stateDirectory(folder.resolve("state"))
+                .apiKey(() -> "fixture-key-first").build()) {
+            try (Session session = agent.startSession(SessionOptions.in(checkout).access(Access.TOOLS_ONLY).tool(lookup).build())) {
+                assertThat(session.run(Input.text("tools-only"))).isInstanceOf(TurnResult.Completed.class);
+            }
+            try (Session session = agent.startSession(SessionOptions.in(checkout).access(Access.TOOLS_ONLY).build())) {
+                assertThat(session.run(Input.text("text-only"))).isInstanceOf(TurnResult.Completed.class);
+            }
+        }
+        assertThat(checkout.resolve("protected.txt")).hasContent("checkout");
+    }
+
+    @Test
     void withdrawsAcpApprovalWhenTheTurnIsInterrupted()
             throws Exception
     {
@@ -271,6 +390,20 @@ class TestAntigravity
     }
 
     public record Lookup(String key) {}
+
+    private static String git(Path checkout, String... arguments)
+            throws Exception
+    {
+        var command = new ArrayList<>(List.of("/usr/bin/git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"));
+        command.addAll(List.of(arguments));
+        var builder = new ProcessBuilder(command).directory(checkout.toFile()).redirectErrorStream(true);
+        builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null");
+        Process process = builder.start();
+        assertThat(process.waitFor(10, SECONDS)).isTrue();
+        String output = new String(process.getInputStream().readAllBytes(), UTF_8).strip();
+        assertThat(process.exitValue()).as("%s: %s", arguments, output).isZero();
+        return output;
+    }
 
     private Path fakeCli()
             throws IOException

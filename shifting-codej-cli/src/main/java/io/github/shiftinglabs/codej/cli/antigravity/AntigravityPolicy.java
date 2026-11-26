@@ -55,11 +55,15 @@ final class AntigravityPolicy
             inheritMcp: false
             inheritCustomizations: false
             commandExecutionPolicy: off
-            tools:
-              - read_file
             %s---
             %s
             """;
+
+    static final String PROTECTED_READS = """
+            (deny file-read* file-read-data (regex #"/[._][aA][gG][eE][nN][tT][sS]?(/|$)" #"/[.]ssh(/|$)" #"/[.]config/gh(/|$)" #"/[.]git-credentials$" #"/[.]netrc$"))
+            (deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.xpc"))
+            """;
+    private static final String READ_TOOL = "tools:\n  - read_file\n";
 
     // The provider needs its own network connection and local session store. Only the writer gets checkout writes.
     private static final String PROFILE = """
@@ -67,7 +71,7 @@ final class AntigravityPolicy
             (allow default)
             (deny file-read-data)
             (allow file-read-data
-                (subpath (param "WORKTREE")) (subpath (param "PROFILE")) (literal (param "EXECUTABLE"))
+                %s(subpath (param "PROFILE")) (literal (param "EXECUTABLE"))
                 (literal "/") (subpath "/System/Library") (subpath "/System/Cryptexes") (subpath "/usr/lib") (subpath "/usr/share")
                 (subpath "/usr/bin") (subpath "/bin") (subpath "/sbin") (subpath "/dev")
                 (subpath "/private/etc") (subpath "/Library/Preferences") (subpath "/private/var/run"))
@@ -77,8 +81,7 @@ final class AntigravityPolicy
             (deny file-write-unlink (literal (param "PROFILE")) (literal (param "GEMINI")) (literal (param "CLI")))
             (deny file-write* (literal (param "SETTINGS")) (subpath (param "CONFIG")))
             (deny file-link)
-            (deny file-read* (regex #"/[._][aA][gG][eE][nN][tT][sS]?(/|$)" #"/[.]ssh(/|$)" #"/[.]config/gh(/|$)" #"/[.]git-credentials$" #"/[.]netrc$"))
-            (deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.xpc"))
+            %s
             """;
 
     private AntigravityPolicy() {}
@@ -87,15 +90,16 @@ final class AntigravityPolicy
     {
         requireNonNull(context, "context is null");
         var scope = context.scope();
-        if (context.access() != SessionAccess.READ_ONLY && context.access() != SessionAccess.FULL || scope.policy() != AgentPermissionPolicy.AUTO) {
-            throw new AgentUnavailableException("Antigravity CLI supports read-only and workspace-write access with the AUTO permission policy");
-        }
-        if (scope.network() || scope.webSearch() || scope.commits() ||
-                !scope.writableRoots().isEmpty() || !scope.unsandboxedCommands().isEmpty() || !scope.unixSockets().isEmpty() ||
+        if (scope.policy() != AgentPermissionPolicy.AUTO || context.access() == SessionAccess.REVIEW_READ_ONLY ||
+                context.restricted() && (scope.network() || scope.commits() || !scope.writableRoots().isEmpty() ||
+                        scope.approveEveryCommand() || scope.approveEveryEdit()) ||
+                scope.webSearch() || !scope.unsandboxedCommands().isEmpty() || !scope.unixSockets().isEmpty() ||
                 !scope.reviewerRules().isEmpty() || !scope.reviewerContext().isEmpty() || scope.reviewSandboxedCommands() ||
-                !scope.sessionDeniedReads().isEmpty() || !scope.sessionDeniedCommands().isEmpty() ||
-                scope.review() || scope.publicationProtected() || scope.approveEveryCommand()) {
+                scope.review() || scope.publicationProtected()) {
             throw new AgentUnavailableException("Antigravity CLI does not support the requested permission scope");
+        }
+        if (!context.restricted() && context.sessionTools().stream().anyMatch(tool -> tool.name().equals(AntigravityCommands.NAME))) {
+            throw new AgentUnavailableException("Antigravity workspace-write reserves the tool name " + AntigravityCommands.NAME);
         }
     }
 
@@ -121,15 +125,23 @@ final class AntigravityPolicy
         Optional<String> key = Optional.ofNullable(overrides.get("GEMINI_API_KEY"));
         key.ifPresent(value -> environment.put("GEMINI_API_KEY", value));
         CliSettings settings = new CliSettings("", "request-review", false, true, permissions, key.map(_ -> "gemini"));
-        writeAgent(profile, READER, "", "Read files in the checkout to answer the user's request.");
+        writeAgent(profile, READER, READ_TOOL, "Read files in the checkout to answer the user's request.");
         writePolicy(cli.resolve("settings.json"), JSON.writeValueAsBytes(settings));
         return environment.buildOrThrow();
     }
 
     static String agentName(AgentSessionContext context)
     {
+        if (!hasCheckoutTools(context.access())) {
+            return "codej-tools";
+        }
         String role = context.restricted() ? READER : "codej-writer";
         return context.asksUser() ? role + "-questions" : role;
+    }
+
+    private static boolean hasCheckoutTools(SessionAccess access)
+    {
+        return access != SessionAccess.TOOLS_ONLY && access != SessionAccess.TEXT_ONLY;
     }
 
     static void prepareAgent(Path home, AgentSessionContext context)
@@ -139,11 +151,16 @@ final class AntigravityPolicy
         if (name.equals(READER)) {
             return;
         }
-        String tools = context.restricted() ? "" : "  - write_file\n  - edit_file\n";
+        if (!hasCheckoutTools(context.access())) {
+            writeAgent(home.toRealPath(), name, "tools: []\n", "Answer using the conversation and any tools provided by the host.");
+            return;
+        }
+        String tools = READ_TOOL + (context.restricted() ? "" : "  - write_file\n  - edit_file\n");
         if (context.asksUser()) {
             tools += "  - ask_question\n";
         }
-        String role = context.restricted() ? "Read files in the checkout." : "Read and edit files in the checkout.";
+        String role = context.restricted() ? "Read files in the checkout." :
+                "Read and edit files in the checkout. Use the " + AntigravityCommands.NAME + " tool to run build and test commands.";
         writeAgent(home.toRealPath(), name, tools, role);
     }
 
@@ -173,14 +190,14 @@ final class AntigravityPolicy
     {
         var command = ImmutableList.<String>builder()
                 .add(binary, "acp", "--sandbox", "--agent", agentName(context), "--include-default-customizations=false", "--disable-telemetry");
-        if (!context.sessionTools().isEmpty()) {
+        if (!context.sessionTools().isEmpty() || !context.restricted()) {
             // Antigravity only connects to editor-supplied HTTP MCP servers in this mode.
             command.add("--process-per-session");
         }
         return command.build();
     }
 
-    static List<String> command(List<String> argv, Path home, Path worktree, SessionAccess access)
+    static List<String> command(List<String> argv, Path home, Path worktree, SessionAccess access, List<String> deniedReads)
             throws IOException
     {
         if (!Files.isExecutable(SANDBOX)) {
@@ -201,11 +218,13 @@ final class AntigravityPolicy
                 (allow file-write* (subpath (param "WORKTREE")))
                 (deny file-write* (literal (param "WORKTREE")) (subpath (param "GIT_DIR")) (regex #"/[.][gG][iI][tT](/|$)"))
                 """ : "";
+        String workspaceReads = hasCheckoutTools(access) ? "(subpath (param \"WORKTREE\")) " : "";
+        String profileRules = PROFILE.formatted(workspaceReads, workspaceWrites, PROTECTED_READS) + denyReads(deniedReads);
         return ImmutableList.<String>builder()
                 .add(SANDBOX.toString(), "-D", "PROFILE=" + profile, "-D", "WORKTREE=" + workspace,
                         "-D", "GIT_DIR=" + workspace.resolve(".git"), "-D", "GEMINI=" + gemini, "-D", "CLI=" + cli, "-D", "CONFIG=" + gemini.resolve("config"),
                         "-D", "SETTINGS=" + cli.resolve("settings.json"), "-D", "EXECUTABLE=" + executable.toRealPath(),
-                        "-p", PROFILE.formatted(workspaceWrites))
+                        "-p", profileRules)
                 .addAll(argv)
                 .build();
     }
@@ -214,13 +233,20 @@ final class AntigravityPolicy
             throws IOException
     {
         Path workspace = worktree.toRealPath();
-        Path absolute = home.toAbsolutePath().normalize();
+        Path profile = canonicalPath(home);
+        if (profile.startsWith(workspace) || workspace.startsWith(profile)) {
+            throw new AgentUnavailableException("Antigravity CLI needs its private profile outside the checkout");
+        }
+    }
+
+    static Path canonicalPath(Path path)
+            throws IOException
+    {
+        Path absolute = path.toAbsolutePath().normalize();
         Path parent = absolute;
-        Path profile;
         while (true) {
             try {
-                profile = parent.toRealPath().resolve(parent.relativize(absolute));
-                break;
+                return parent.toRealPath().resolve(parent.relativize(absolute));
             }
             catch (NoSuchFileException e) {
                 if (Files.isSymbolicLink(parent) || parent.getParent() == null) {
@@ -229,9 +255,34 @@ final class AntigravityPolicy
                 parent = parent.getParent();
             }
         }
-        if (profile.startsWith(workspace) || workspace.startsWith(profile)) {
-            throw new AgentUnavailableException("Antigravity CLI needs its private profile outside the checkout");
+    }
+
+    static String denyReads(List<String> deniedReads)
+            throws IOException
+    {
+        StringBuilder rules = new StringBuilder();
+        for (String denied : deniedReads) {
+            Path path = Path.of(denied);
+            if (!path.isAbsolute()) {
+                throw new AgentUnavailableException("Antigravity denyRead requires an absolute path");
+            }
+            Path target = canonicalPath(path);
+            rules.append("(deny file-read* file-read-data file-write* (subpath ").append(quote(target)).append("))\n");
+            // A writable ancestor could otherwise be renamed, moving a denied file out of the rule.
+            for (Path parent = target.getParent(); parent != null; parent = parent.getParent()) {
+                rules.append("(deny file-write-unlink (literal ").append(quote(parent)).append("))\n");
+            }
         }
+        return rules.toString();
+    }
+
+    static String quote(Path path)
+    {
+        String value = path.toString();
+        if (value.chars().anyMatch(character -> character < 32 || character == 127)) {
+            throw new AgentUnavailableException("Control characters are unsupported in Antigravity sandbox paths");
+        }
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
     private static Path privateDirectory(Path path)

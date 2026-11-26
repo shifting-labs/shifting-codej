@@ -125,6 +125,7 @@ final class AntigravitySession
     private volatile boolean saved;
     private AcpClient client;
     private Optional<McpRegistration> registration = Optional.empty();
+    private Optional<AntigravityCommands> commands = Optional.empty();
     private List<ConfigOption> configOptions;
     private List<ModelOption> models;
     private boolean canCloseSession;
@@ -158,8 +159,18 @@ final class AntigravitySession
         ProcessSpec spec = launch.get();
         checkout = spec.workingDirectory();
         redactor = SecretRedactor.fromEnvironment(spec.environment());
-        if (!context.sessionTools().isEmpty()) {
-            registration = permissions.registerSessionTools(context.taskId(), checkout, context.scope(), context.approvals(), redactor, context.sessionTools());
+        if (!context.sessionTools().isEmpty() || !context.restricted()) {
+            if (!context.restricted()) {
+                commands = Optional.of(new AntigravityCommands(supervisor, spec, context.scope(), context.runtimeDirectory()));
+            }
+            registration = permissions.registerSessionTools(context.taskId(), checkout, context.scope(), context.approvals(), redactor, context.sessionTools(),
+                    commands.map(runner -> AntigravityCommands.tool(arguments -> {
+                        AcpTurn current = turn;
+                        if (current == null || current.terminal) {
+                            throw new AgentUnavailableException("No Antigravity turn is accepting commands");
+                        }
+                        return runner.run(arguments, current.source, redactor, current::ask);
+                    })));
             redactor = redactor.withSecret(registration.orElseThrow().token());
         }
         try {
@@ -367,7 +378,7 @@ final class AntigravitySession
             }
         }
         finally {
-            if (!stopTools(tools)) {
+            if (!stopTools(tools, commands)) {
                 throw new AgentUnavailableException("Antigravity host tool callbacks could not be verified stopped");
             }
         }
@@ -379,13 +390,13 @@ final class AntigravitySession
         }
     }
 
-    private static boolean stopTools(Optional<McpRegistration> registration)
+    private static boolean stopTools(Optional<McpRegistration> registration, Optional<AntigravityCommands> commands)
     {
         if (registration.isEmpty()) {
             return true;
         }
         try (McpRegistration tools = registration.orElseThrow()) {
-            return tools.stopToolCallbacks(Duration.ofSeconds(2));
+            return tools.stopToolCallbacks(Duration.ofSeconds(3)) && commands.map(AntigravityCommands::stop).orElse(true);
         }
     }
 
@@ -395,6 +406,7 @@ final class AntigravitySession
         private final ProviderTurnRef id;
         private final AcpClient child;
         private final Optional<McpRegistration> registration = AntigravitySession.this.registration;
+        private final Optional<AntigravityCommands> commands = AntigravitySession.this.commands;
         private final ProviderAgentEventSource source;
         private final long started = System.nanoTime();
         private final CompletableFuture<AgentTurnResult> completion = new CompletableFuture<>();
@@ -404,7 +416,7 @@ final class AntigravitySession
         private final Set<CompletableFuture<ProviderApprovalDecision>> approvals = new HashSet<>();
         private String held = "";
         private Optional<ProviderUsageSample> usage = Optional.empty();
-        private boolean terminal;
+        private volatile boolean terminal;
 
         private AcpTurn(ProviderTurnRef id, AcpClient child)
         {
@@ -601,7 +613,7 @@ final class AntigravitySession
                             stopped = true;
                         }
                         finally {
-                            toolsStopped = stopTools(registration);
+                            toolsStopped = stopTools(registration, commands);
                         }
                         if (!toolsStopped) {
                             throw new AgentUnavailableException("Antigravity host tool callbacks could not be verified stopped");
@@ -632,6 +644,7 @@ final class AntigravitySession
                     if (stopped && toolsStopped) {
                         client = null;
                         AntigravitySession.this.registration = Optional.empty();
+                        AntigravitySession.this.commands = Optional.empty();
                     }
                     else {
                         closed = true;

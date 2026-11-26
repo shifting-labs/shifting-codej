@@ -94,11 +94,11 @@ class TestAntigravityPolicy
         var baseline = new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.READ_ONLY, false);
         AntigravityPolicy.validate(context(baseline));
         AntigravityPolicy.validate(context(baseline.withNoSubagents(true)));
+        AntigravityPolicy.validate(context(baseline.withSessionDenials(List.of("git push"), List.of("/private/location"))));
+        AntigravityPolicy.validate(context(new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.TEXT_ONLY, false)));
         AntigravityPolicy.validate(context(new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.FULL, false)));
         for (var scope : List.of(new AgentPermissionScope(AgentPermissionPolicy.CI_AUTOFIX, SessionAccess.FULL, false),
-                new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.TEXT_ONLY, false),
-                baseline.withWebSearch(true), baseline.withNetwork(true), baseline.withWritableRoots(List.of(directory)),
-                baseline.withSessionDenials(List.of(), List.of("/private/location")))) {
+                baseline.withWebSearch(true), baseline.withNetwork(true), baseline.withWritableRoots(List.of(directory)))) {
             assertThatThrownBy(() -> AntigravityPolicy.validate(context(scope))).isInstanceOf(AgentUnavailableException.class);
         }
         assertThat(directory.resolve("runtime")).doesNotExist();
@@ -129,7 +129,7 @@ class TestAntigravityPolicy
     private int run(Path work, Path home, Map<String, String> env, List<String> command)
             throws Exception
     {
-        ProcessBuilder builder = new ProcessBuilder(AntigravityPolicy.command(command, home, work, SessionAccess.READ_ONLY)).directory(work.toFile());
+        ProcessBuilder builder = new ProcessBuilder(AntigravityPolicy.command(command, home, work, SessionAccess.READ_ONLY, List.of())).directory(work.toFile());
         builder.environment().clear();
         builder.environment().putAll(env);
         return builder.redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start().waitFor();
