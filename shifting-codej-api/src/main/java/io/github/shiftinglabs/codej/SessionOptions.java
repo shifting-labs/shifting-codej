@@ -40,8 +40,7 @@ import static java.util.Objects.requireNonNull;
  * @param questions answers the agent's questions; when empty, the agent is told it cannot ask
  * @param writableRoots folders besides the working directory the agent may write, such as the caches a build fills
  * @param deniedCommands command prefixes the agent may never run; they are refused without asking {@code approvals}
- * @param deniedReads files and folders the agent may never read, such as credentials; Claude only, since Codex's sandbox has no
- *         read rules
+ * @param deniedReads files and folders the agent may never read, such as credentials; supported by Claude CLI and Antigravity
  * @param webSearch whether the agent may search and fetch the web with its own tools, apart from its commands' network
  * @param commits whether commands may commit, which makes a linked Git worktree's own metadata writable too
  * @param subagents whether the agent may start subagents, and what they may do
@@ -282,7 +281,7 @@ public record SessionOptions(
         }
 
         /**
-         * Keeps the agent from reading a file or folder. Claude only: Codex's sandbox has no read rules.
+         * Keeps the agent from reading a file or folder in Claude CLI and Antigravity sessions.
          *
          * @param path an absolute path
          * @return this builder

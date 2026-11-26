@@ -13,8 +13,9 @@
  */
 package io.github.shiftinglabs.codej.cli.antigravity;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.github.shiftinglabs.codej.cli.driver.AgentPermissionPolicy;
@@ -30,49 +31,57 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
+import static com.fasterxml.jackson.annotation.JsonInclude.Include.NON_ABSENT;
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardCopyOption.ATOMIC_MOVE;
 import static java.util.Objects.requireNonNull;
 
-/** Launch policy shared by Antigravity metadata probes and read-only ACP sessions. */
+/** Launch policy shared by Antigravity metadata probes and ACP sessions. */
 final class AntigravityPolicy
 {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    static final String READER = "codej-reader";
+    static final String TOOL_SERVER = "codej_session";
+    private static final ObjectMapper JSON = new ObjectMapper().registerModule(new Jdk8Module());
     private static final Path SANDBOX = Path.of("/usr/bin/sandbox-exec");
-    private static final String READER = """
+    private static final String AGENT = """
             ---
-            name: codej-reader
-            description: Read checkout files for analysis
+            name: %s
+            description: CodeJ checkout agent
             mainAgent: true
             subagent: false
             model: inherit
             inheritMcp: false
             inheritCustomizations: false
             commandExecutionPolicy: off
-            tools:
-              - read_file
-            ---
-            Read files in the checkout to answer the user's request.
+            %s---
+            %s
             """;
 
-    // The provider itself needs its network connection and local session store. Its file tools get only the checkout.
-    private static final String READ_ONLY_PROFILE = """
+    static final String PROTECTED_READS = """
+            (deny file-read* file-read-data (regex #"/[._][aA][gG][eE][nN][tT][sS]?(/|$)" #"/[.]ssh(/|$)" #"/[.]config/gh(/|$)" #"/[.]git-credentials$" #"/[.]netrc$"))
+            (deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.xpc"))
+            """;
+    private static final String READ_TOOL = "tools:\n  - read_file\n";
+
+    // The provider needs its own network connection and local session store. Only the writer gets checkout writes.
+    private static final String PROFILE = """
             (version 1)
             (allow default)
             (deny file-read-data)
             (allow file-read-data
-                (subpath (param "WORKTREE")) (subpath (param "PROFILE")) (literal (param "EXECUTABLE"))
+                %s(subpath (param "PROFILE")) (literal (param "EXECUTABLE"))
                 (literal "/") (subpath "/System/Library") (subpath "/System/Cryptexes") (subpath "/usr/lib") (subpath "/usr/share")
                 (subpath "/usr/bin") (subpath "/bin") (subpath "/sbin") (subpath "/dev")
                 (subpath "/private/etc") (subpath "/Library/Preferences") (subpath "/private/var/run"))
             (deny file-write*)
             (allow file-write* (subpath (param "PROFILE")) (literal "/dev/null"))
+            %s
             (deny file-write-unlink (literal (param "PROFILE")) (literal (param "GEMINI")) (literal (param "CLI")))
             (deny file-write* (literal (param "SETTINGS")) (subpath (param "CONFIG")))
             (deny file-link)
-            (deny file-read* (regex #"/[._][aA][gG][eE][nN][tT][sS]?(/|$)" #"/[.]ssh(/|$)" #"/[.]config/gh(/|$)" #"/[.]git-credentials$" #"/[.]netrc$"))
-            (deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.xpc"))
+            %s
             """;
 
     private AntigravityPolicy() {}
@@ -81,17 +90,16 @@ final class AntigravityPolicy
     {
         requireNonNull(context, "context is null");
         var scope = context.scope();
-        if (context.access() != SessionAccess.READ_ONLY || scope.policy() != AgentPermissionPolicy.AUTO) {
-            throw new AgentUnavailableException("Antigravity CLI requires read-only checkout access");
-        }
-        if (!context.sessionTools().isEmpty() || context.asksUser() || !context.managedInstructions().isBlank() || !scope.standingInstructions().isBlank()) {
-            throw new AgentUnavailableException("Antigravity CLI does not support host tools, user questions or managed instructions");
-        }
-        if (scope.network() || scope.webSearch() || scope.commits() ||
-                !scope.writableRoots().isEmpty() || !scope.unsandboxedCommands().isEmpty() || !scope.unixSockets().isEmpty() ||
+        if (scope.policy() != AgentPermissionPolicy.AUTO || context.access() == SessionAccess.REVIEW_READ_ONLY ||
+                context.restricted() && (scope.network() || scope.commits() || !scope.writableRoots().isEmpty() ||
+                        scope.approveEveryCommand() || scope.approveEveryEdit()) ||
+                scope.webSearch() || !scope.unsandboxedCommands().isEmpty() || !scope.unixSockets().isEmpty() ||
                 !scope.reviewerRules().isEmpty() || !scope.reviewerContext().isEmpty() || scope.reviewSandboxedCommands() ||
-                !scope.sessionDeniedReads().isEmpty() || !scope.sessionDeniedCommands().isEmpty()) {
+                scope.review() || scope.publicationProtected()) {
             throw new AgentUnavailableException("Antigravity CLI does not support the requested permission scope");
+        }
+        if (!context.restricted() && context.sessionTools().stream().anyMatch(tool -> tool.name().equals(AntigravityCommands.NAME))) {
+            throw new AgentUnavailableException("Antigravity workspace-write reserves the tool name " + AntigravityCommands.NAME);
         }
     }
 
@@ -103,17 +111,10 @@ final class AntigravityPolicy
         Path cli = privateDirectory(gemini.resolve("antigravity-cli"));
         Path config = privateDirectory(gemini.resolve("config"));
         privateDirectory(config.resolve("codej-sessions"));
-        Path agents = privateDirectory(config.resolve("agents"));
-        Path reader = privateDirectory(agents.resolve("codej-reader"));
         Path scratch = privateDirectory(profile.resolve("tmp"));
-        ObjectNode settings = JSON.createObjectNode();
-        settings.put("agentMode", "");
-        settings.put("toolPermission", "request-review");
-        settings.put("allowNonWorkspaceAccess", false);
-        settings.put("enableTerminalSandbox", true);
-        settings.putObject("permissions").putArray("deny")
-                .add("write_file(*)").add("command(*)").add("mcp(*)").add("read_url(*)").add("execute_url(*)")
-                .add("read_file(" + profile + ")");
+        ToolPermissions permissions = new ToolPermissions(
+                ImmutableList.of("command(*)", "read_url(*)", "execute_url(*)", "read_file(" + profile + ")", "write_file(" + profile + ")"),
+                ImmutableList.of("mcp(" + TOOL_SERVER + "/*)"));
         var environment = ImmutableMap.<String, String>builder()
                 .put("HOME", profile.toString())
                 .put("TMPDIR", scratch.toString())
@@ -121,14 +122,54 @@ final class AntigravityPolicy
                 .put("LANG", overrides.getOrDefault("LANG", "en_US.UTF-8"))
                 .put("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
                 .put("GEMINI_FORCE_FILE_STORAGE", "true");
-        String key = overrides.get("GEMINI_API_KEY");
-        if (key != null) {
-            settings.put("modelProvider", "gemini");
-            environment.put("GEMINI_API_KEY", key);
-        }
-        writePolicy(reader.resolve("agent.md"), READER.getBytes(StandardCharsets.UTF_8));
+        Optional<String> key = Optional.ofNullable(overrides.get("GEMINI_API_KEY"));
+        key.ifPresent(value -> environment.put("GEMINI_API_KEY", value));
+        CliSettings settings = new CliSettings("", "request-review", false, true, permissions, key.map(_ -> "gemini"));
+        writeAgent(profile, READER, READ_TOOL, "Read files in the checkout to answer the user's request.");
         writePolicy(cli.resolve("settings.json"), JSON.writeValueAsBytes(settings));
         return environment.buildOrThrow();
+    }
+
+    static String agentName(AgentSessionContext context)
+    {
+        if (!hasCheckoutTools(context.access())) {
+            return "codej-tools";
+        }
+        String role = context.restricted() ? READER : "codej-writer";
+        return context.asksUser() ? role + "-questions" : role;
+    }
+
+    private static boolean hasCheckoutTools(SessionAccess access)
+    {
+        return access != SessionAccess.TOOLS_ONLY && access != SessionAccess.TEXT_ONLY;
+    }
+
+    static void prepareAgent(Path home, AgentSessionContext context)
+            throws IOException
+    {
+        String name = agentName(context);
+        if (name.equals(READER)) {
+            return;
+        }
+        if (!hasCheckoutTools(context.access())) {
+            writeAgent(home.toRealPath(), name, "tools: []\n", "Answer using the conversation and any tools provided by the host.");
+            return;
+        }
+        String tools = READ_TOOL + (context.restricted() ? "" : "  - write_file\n  - edit_file\n");
+        if (context.asksUser()) {
+            tools += "  - ask_question\n";
+        }
+        String role = context.restricted() ? "Read files in the checkout." :
+                "Read and edit files in the checkout. Use the " + AntigravityCommands.NAME + " tool to run build and test commands.";
+        writeAgent(home.toRealPath(), name, tools, role);
+    }
+
+    private static void writeAgent(Path home, String name, String tools, String instructions)
+            throws IOException
+    {
+        Path agents = privateDirectory(home.resolve(".gemini/config/agents"));
+        Path agent = privateDirectory(agents.resolve(name));
+        writePolicy(agent.resolve("agent.md"), AGENT.formatted(name, tools, instructions).getBytes(StandardCharsets.UTF_8));
     }
 
     private static void writePolicy(Path file, byte[] contents)
@@ -145,16 +186,22 @@ final class AntigravityPolicy
         }
     }
 
-    static List<String> acpCommand(String binary)
+    static List<String> acpCommand(String binary, AgentSessionContext context)
     {
-        return List.of(binary, "acp", "--sandbox", "--agent", "codej-reader", "--include-default-customizations=false", "--disable-telemetry");
+        var command = ImmutableList.<String>builder()
+                .add(binary, "acp", "--sandbox", "--agent", agentName(context), "--include-default-customizations=false", "--disable-telemetry");
+        if (!context.sessionTools().isEmpty() || !context.restricted()) {
+            // Antigravity only connects to editor-supplied HTTP MCP servers in this mode.
+            command.add("--process-per-session");
+        }
+        return command.build();
     }
 
-    static List<String> command(List<String> argv, Path home, Path worktree)
+    static List<String> command(List<String> argv, Path home, Path worktree, SessionAccess access, List<String> deniedReads)
             throws IOException
     {
         if (!Files.isExecutable(SANDBOX)) {
-            throw new AgentUnavailableException("Antigravity CLI requires macOS Seatbelt for read-only checkout access");
+            throw new AgentUnavailableException("Antigravity CLI requires macOS Seatbelt for checkout access");
         }
         if (argv.contains("acp")) {
             checkDirectories(home, worktree);
@@ -167,11 +214,17 @@ final class AntigravityPolicy
         }
         Path gemini = profile.resolve(".gemini");
         Path cli = gemini.resolve("antigravity-cli");
+        String workspaceWrites = access == SessionAccess.FULL ? """
+                (allow file-write* (subpath (param "WORKTREE")))
+                (deny file-write* (literal (param "WORKTREE")) (subpath (param "GIT_DIR")) (regex #"/[.][gG][iI][tT](/|$)"))
+                """ : "";
+        String workspaceReads = hasCheckoutTools(access) ? "(subpath (param \"WORKTREE\")) " : "";
+        String profileRules = PROFILE.formatted(workspaceReads, workspaceWrites, PROTECTED_READS) + denyReads(deniedReads);
         return ImmutableList.<String>builder()
                 .add(SANDBOX.toString(), "-D", "PROFILE=" + profile, "-D", "WORKTREE=" + workspace,
-                        "-D", "GEMINI=" + gemini, "-D", "CLI=" + cli, "-D", "CONFIG=" + gemini.resolve("config"),
+                        "-D", "GIT_DIR=" + workspace.resolve(".git"), "-D", "GEMINI=" + gemini, "-D", "CLI=" + cli, "-D", "CONFIG=" + gemini.resolve("config"),
                         "-D", "SETTINGS=" + cli.resolve("settings.json"), "-D", "EXECUTABLE=" + executable.toRealPath(),
-                        "-p", READ_ONLY_PROFILE)
+                        "-p", profileRules)
                 .addAll(argv)
                 .build();
     }
@@ -180,13 +233,20 @@ final class AntigravityPolicy
             throws IOException
     {
         Path workspace = worktree.toRealPath();
-        Path absolute = home.toAbsolutePath().normalize();
+        Path profile = canonicalPath(home);
+        if (profile.startsWith(workspace) || workspace.startsWith(profile)) {
+            throw new AgentUnavailableException("Antigravity CLI needs its private profile outside the checkout");
+        }
+    }
+
+    static Path canonicalPath(Path path)
+            throws IOException
+    {
+        Path absolute = path.toAbsolutePath().normalize();
         Path parent = absolute;
-        Path profile;
         while (true) {
             try {
-                profile = parent.toRealPath().resolve(parent.relativize(absolute));
-                break;
+                return parent.toRealPath().resolve(parent.relativize(absolute));
             }
             catch (NoSuchFileException e) {
                 if (Files.isSymbolicLink(parent) || parent.getParent() == null) {
@@ -195,9 +255,34 @@ final class AntigravityPolicy
                 parent = parent.getParent();
             }
         }
-        if (profile.startsWith(workspace) || workspace.startsWith(profile)) {
-            throw new AgentUnavailableException("Antigravity CLI needs its private profile outside the checkout");
+    }
+
+    static String denyReads(List<String> deniedReads)
+            throws IOException
+    {
+        StringBuilder rules = new StringBuilder();
+        for (String denied : deniedReads) {
+            Path path = Path.of(denied);
+            if (!path.isAbsolute()) {
+                throw new AgentUnavailableException("Antigravity denyRead requires an absolute path");
+            }
+            Path target = canonicalPath(path);
+            rules.append("(deny file-read* file-read-data file-write* (subpath ").append(quote(target)).append("))\n");
+            // A writable ancestor could otherwise be renamed, moving a denied file out of the rule.
+            for (Path parent = target.getParent(); parent != null; parent = parent.getParent()) {
+                rules.append("(deny file-write-unlink (literal ").append(quote(parent)).append("))\n");
+            }
         }
+        return rules.toString();
+    }
+
+    static String quote(Path path)
+    {
+        String value = path.toString();
+        if (value.chars().anyMatch(character -> character < 32 || character == 127)) {
+            throw new AgentUnavailableException("Control characters are unsupported in Antigravity sandbox paths");
+        }
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
     private static Path privateDirectory(Path path)
@@ -209,5 +294,27 @@ final class AntigravityPolicy
         }
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"));
         return path;
+    }
+
+    @JsonInclude(NON_ABSENT)
+    private record CliSettings(String agentMode, String toolPermission, boolean allowNonWorkspaceAccess, boolean enableTerminalSandbox,
+            ToolPermissions permissions, Optional<String> modelProvider)
+    {
+        private CliSettings
+        {
+            requireNonNull(agentMode, "agentMode is null");
+            requireNonNull(toolPermission, "toolPermission is null");
+            requireNonNull(permissions, "permissions is null");
+            requireNonNull(modelProvider, "modelProvider is null");
+        }
+    }
+
+    private record ToolPermissions(List<String> deny, List<String> allow)
+    {
+        private ToolPermissions
+        {
+            deny = ImmutableList.copyOf(deny);
+            allow = ImmutableList.copyOf(allow);
+        }
     }
 }

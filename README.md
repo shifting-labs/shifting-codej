@@ -329,10 +329,27 @@ when prompted. Each authentication mode has its own directory under the agent's 
 `status()` checks the executable, model catalog, and SDK-managed read-only agent.
 Google validates the API key on inference.
 
-The connector supports read-only file inspection, streamed text, tool activity, model selection,
-interruption, and token counts. Give it the path of each file to inspect. A saved conversation can
-be resumed through the same connector profile and checkout. The private profile must be outside
-the checkout. Shell commands, workspace edits, web search, and host tools are unavailable.
+On macOS, read-only sessions can inspect checkout files and call registered host tools.
+`denyRead(path)` also applies to workspace-write sessions and their sandboxed commands.
+Both access modes support managed instructions and a question handler through `SessionOptions`.
+`Access.TOOLS_ONLY` supports registered host tools and text-only conversations. It disables
+native file and shell tools.
+
+`Access.WORKSPACE_WRITE` adds checkout edits and the `codej_run_command` tool. Commands receive
+an executable and arguments and run from the checkout, with writes confined to the checkout,
+private scratch space, and directories granted by `writableRoot(path)`. For an external build
+cache, grant its directory and point the build at that path. `allowNetwork()` enables
+command networking. `denyCommand(prefix)` checks the submitted command before approval.
+Use `approveEveryCommand()` or `approveEveryEdit()` with `approvals(handler)` to review
+individual actions. Approval leaves the sandbox in effect.
+
+`allowCommits()` requires a linked worktree on a named local branch. It grants direct
+`git add` and `git commit` access to that worktree's metadata, shared objects, and its branch
+ref and reflog. These two commands run offline, with other worktree metadata and remote refs
+protected from writes.
+
+A saved conversation resumes with the same profile, checkout, access, and question setting.
+The private profile must be outside the checkout. Antigravity sessions do not support native web search.
 
 ## Direct Claude API
 
