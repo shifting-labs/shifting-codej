@@ -17,8 +17,10 @@ import com.google.common.collect.ImmutableList;
 
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 import static java.util.Objects.requireNonNull;
 
@@ -42,6 +44,7 @@ public record McpRegistration(
         Optional<String> instruction,
         Optional<Path> configFile,
         Optional<Path> settingsFile,
+        Predicate<Duration> toolShutdown,
         Runnable release)
         implements AutoCloseable
 {
@@ -54,12 +57,20 @@ public record McpRegistration(
         requireNonNull(instruction, "instruction is null");
         requireNonNull(configFile, "configFile is null");
         requireNonNull(settingsFile, "settingsFile is null");
+        requireNonNull(toolShutdown, "toolShutdown is null");
         requireNonNull(release, "release is null");
+    }
+
+    /** Withdraws tool admission, interrupts active callbacks, and checks whether they returned. */
+    public boolean stopToolCallbacks(Duration timeout)
+    {
+        return toolShutdown.test(timeout);
     }
 
     @Override
     public void close()
     {
+        stopToolCallbacks(Duration.ZERO);
         release.run();
     }
 }

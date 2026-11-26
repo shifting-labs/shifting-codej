@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.concurrent.Executor;
 
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.util.Objects.requireNonNull;
@@ -47,6 +48,11 @@ public final class AntigravityConnector
     @Override
     public ConnectorDriver create(AntigravityConnectorConfig config, ConnectorContext context)
     {
+        return create(config, context, Runnable::run);
+    }
+
+    ConnectorDriver create(AntigravityConnectorConfig config, ConnectorContext context, Executor toolExecutor)
+    {
         requireNonNull(config, "config is null");
         requireNonNull(context, "context is null");
         Path profile = context.profileDirectory().normalize();
@@ -62,6 +68,6 @@ public final class AntigravityConnector
             throw new AgentException("Antigravity's profile directory could not be prepared: " + profile, failure);
         }
         String executable = config.executable().map(Path::toAbsolutePath).map(Path::toString).orElse("agy");
-        return new AntigravityCliDriver(executable, context, config.apiKey());
+        return new AntigravityCliDriver(executable, context, config.apiKey(), toolExecutor);
     }
 }

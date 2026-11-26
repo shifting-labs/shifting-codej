@@ -55,11 +55,12 @@ class TestAntigravityPolicy
         Path settings = cli.resolve("settings.json");
         var json = new ObjectMapper().readTree(settings.toFile());
         assertThat(json.path("modelProvider").asText()).isEqualTo("gemini");
-        assertThat(json.path("permissions").path("deny").toString()).contains("write_file(*)", "command(*)", "mcp(*)", "read_url(*)", "execute_url(*)");
+        assertThat(json.path("permissions").path("deny").toString()).contains("command(*)", "read_url(*)", "execute_url(*)");
+        assertThat(json.path("permissions").path("allow").toString()).contains("mcp(codej_session/*)");
         assertThat(json.toString()).doesNotContain("example-key", "other-secret");
         assertThat(Files.readString(home.resolve(".gemini/config/agents/codej-reader/agent.md")))
                 .contains("inheritCustomizations: false", "inheritMcp: false", "tools:\n  - read_file\n---");
-        assertThat(AntigravityPolicy.acpCommand("/bin/agy"))
+        assertThat(AntigravityPolicy.acpCommand("/bin/agy", context(new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.READ_ONLY, false))))
                 .containsSubsequence("--agent", "codej-reader").contains("--include-default-customizations=false");
         AntigravityPolicy.environment(home, Map.of("GEMINI_API_KEY", "rotated"));
         assertThat(history).hasContent("keep");
@@ -93,7 +94,8 @@ class TestAntigravityPolicy
         var baseline = new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.READ_ONLY, false);
         AntigravityPolicy.validate(context(baseline));
         AntigravityPolicy.validate(context(baseline.withNoSubagents(true)));
-        for (var scope : List.of(new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.FULL, false),
+        AntigravityPolicy.validate(context(new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.FULL, false)));
+        for (var scope : List.of(new AgentPermissionScope(AgentPermissionPolicy.CI_AUTOFIX, SessionAccess.FULL, false),
                 new AgentPermissionScope(AgentPermissionPolicy.AUTO, SessionAccess.TEXT_ONLY, false),
                 baseline.withWebSearch(true), baseline.withNetwork(true), baseline.withWritableRoots(List.of(directory)),
                 baseline.withSessionDenials(List.of(), List.of("/private/location")))) {
@@ -127,7 +129,7 @@ class TestAntigravityPolicy
     private int run(Path work, Path home, Map<String, String> env, List<String> command)
             throws Exception
     {
-        ProcessBuilder builder = new ProcessBuilder(AntigravityPolicy.command(command, home, work)).directory(work.toFile());
+        ProcessBuilder builder = new ProcessBuilder(AntigravityPolicy.command(command, home, work, SessionAccess.READ_ONLY)).directory(work.toFile());
         builder.environment().clear();
         builder.environment().putAll(env);
         return builder.redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start().waitFor();

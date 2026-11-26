@@ -13,6 +13,8 @@
  */
 package io.github.shiftinglabs.codej.cli.antigravity;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
 import com.google.common.hash.Hashing;
 import io.github.shiftinglabs.codej.cli.driver.AgentCapabilities;
 import io.github.shiftinglabs.codej.cli.driver.AgentEventSink;
@@ -25,6 +27,8 @@ import io.github.shiftinglabs.codej.cli.driver.AgentSessionOpenException;
 import io.github.shiftinglabs.codej.cli.driver.AgentSessionRef;
 import io.github.shiftinglabs.codej.cli.driver.AgentUnavailableException;
 import io.github.shiftinglabs.codej.cli.driver.ProviderModel;
+import io.github.shiftinglabs.codej.cli.driver.SessionAccess;
+import io.github.shiftinglabs.codej.cli.mcp.PermissionBroker;
 import io.github.shiftinglabs.codej.cli.process.ProcessOwner;
 import io.github.shiftinglabs.codej.cli.process.ProcessSpec;
 import io.github.shiftinglabs.codej.cli.process.ProcessSupervisor;
@@ -47,9 +51,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static java.nio.file.StandardOpenOption.WRITE;
@@ -72,6 +78,7 @@ public final class AntigravityCliDriver
     private final Optional<Supplier<String>> apiKey;
     private final Path home;
     private final ConnectorIdentity identity;
+    private final PermissionBroker permissions;
     // An open that failed after launch keeps its cleanup here until shutdown has been verified.
     private final Map<Object, Runnable> sessions = new ConcurrentHashMap<>();
     private volatile boolean closed;
@@ -79,8 +86,14 @@ public final class AntigravityCliDriver
 
     public AntigravityCliDriver(String executable, ConnectorContext context, Optional<Supplier<String>> apiKey)
     {
+        this(executable, context, apiKey, Runnable::run);
+    }
+
+    public AntigravityCliDriver(String executable, ConnectorContext context, Optional<Supplier<String>> apiKey, Executor toolExecutor)
+    {
         this.executable = requireNonNull(executable, "executable is null");
         this.supervisor = requireNonNull(context, "context is null").processSupervisor();
+        this.permissions = new PermissionBroker(new ObjectMapper(), context.toolServer(), toolExecutor);
         this.apiKey = requireNonNull(apiKey, "apiKey is null");
         // agy persists its model provider in settings.json. A key-based connection must never change an OAuth profile.
         this.home = context.profileDirectory().normalize().resolve(apiKey.isPresent() ? "gemini-api-key" : "google");
@@ -139,7 +152,7 @@ public final class AntigravityCliDriver
                 return status(Readiness.TEMPORARILY_UNAVAILABLE, version, "Antigravity returned an empty model catalog");
             }
             ProviderCli.Result agents = run(binary, environment, "agents");
-            if (agents.exitCode() != 0 || agents.truncated() || agents.stdout().lines().noneMatch("codej-reader"::equals)) {
+            if (agents.exitCode() != 0 || agents.truncated() || agents.stdout().lines().noneMatch(AntigravityPolicy.READER::equals)) {
                 return status(Readiness.UNSUPPORTED, version, "Antigravity could not load the SDK's read-only agent");
             }
             return status(Readiness.READY, version, "Antigravity CLI is ready");
@@ -205,8 +218,8 @@ public final class AntigravityCliDriver
         // agy models prints one slug and its display label per tab-separated line.
         return stdout.lines().map(line -> line.strip().split("\\t+", 2))
                 .filter(row -> row.length == 2 && !row[0].isBlank() && !row[1].isBlank())
-                .map(row -> new ProviderModel(row[0], row[1], "", List.of(), Optional.empty(), false, List.of("text"), List.of()))
-                .toList();
+                .map(row -> new ProviderModel(row[0], row[1], "", ImmutableList.of(), Optional.empty(), false, ImmutableList.of("text"), ImmutableList.of()))
+                .collect(toImmutableList());
     }
 
     private String resolveExecutable()
@@ -258,7 +271,8 @@ public final class AntigravityCliDriver
             throws IOException, InterruptedException
     {
         ProcessSpec spec = new ProcessSpec(new ProcessOwner(ProcessOwner.Kind.CLI_PROBE, "antigravity-cli"),
-                AntigravityPolicy.command(List.of(binary, argument), home, home), home, environment, OptionalInt.of(OUTPUT_LIMIT), OUTPUT_LIMIT, PROBE_TIMEOUT, STOP_GRACE);
+                AntigravityPolicy.command(ImmutableList.of(binary, argument), home, home, SessionAccess.READ_ONLY), home, environment,
+                OptionalInt.of(OUTPUT_LIMIT), OUTPUT_LIMIT, PROBE_TIMEOUT, STOP_GRACE);
         return ProviderCli.run(supervisor, spec, label());
     }
 
@@ -271,7 +285,7 @@ public final class AntigravityCliDriver
             if (!reference.laneId().equals(LANE) || reference.contractVersion() != 1) {
                 throw new AgentUnavailableException("Unsupported Antigravity session reference");
             }
-            verifyReference(reference, context.worktree());
+            verifyReference(reference, context);
         });
         AntigravityPolicy.validate(context);
     }
@@ -290,8 +304,8 @@ public final class AntigravityCliDriver
                     throw new AgentUnavailableException(status.diagnostic());
                 }
             }
-            AntigravitySession session = AntigravitySession.open(supervisor, () -> sessionSpec(context), context, events, STARTUP_TIMEOUT,
-                    id -> recordReference(id, context.worktree()), () -> sessions.remove(token));
+            AntigravitySession session = AntigravitySession.open(supervisor, () -> sessionSpec(context), permissions, context, events, STARTUP_TIMEOUT,
+                    id -> recordReference(id, context), () -> sessions.remove(token));
             sessions.put(token, session::close);
             return session;
         }
@@ -305,44 +319,66 @@ public final class AntigravityCliDriver
     }
 
     // ACP resume restores the original agent's tools even when --agent selects a different role.
-    // Only accept sessions this connector opened for the same checkout. The child cannot write the config directory.
+    // Bind the original agent configuration and checkout. The child cannot write the receipts or agent definitions.
     private Path receipt(String id)
     {
         String name = Hashing.sha256().hashString(id, StandardCharsets.UTF_8).toString();
         return home.resolve(".gemini/config/codej-sessions").resolve(name);
     }
 
-    private void recordReference(String id, Path checkout)
+    private void recordReference(String id, AgentSessionContext context)
     {
         try {
-            Files.writeString(receipt(id), checkout.toRealPath().toString(), CREATE_NEW, WRITE);
+            Files.writeString(receipt(id), receiptContents(context, context.worktree().toRealPath()), CREATE_NEW, WRITE);
         }
         catch (IOException failure) {
             throw new AgentUnavailableException("Unable to record the Antigravity session for this checkout", failure);
         }
     }
 
-    private void verifyReference(AgentSessionRef reference, Path checkout)
+    private void verifyReference(AgentSessionRef reference, AgentSessionContext context)
     {
         Path receipt = receipt(reference.providerValue());
         try {
-            if (Files.isRegularFile(receipt, NOFOLLOW_LINKS) && Files.readString(receipt).equals(checkout.toRealPath().toString())) {
-                return;
+            if (Files.isRegularFile(receipt, NOFOLLOW_LINKS)) {
+                String saved = Files.readString(receipt);
+                Path checkout = context.worktree().toRealPath();
+                if (saved.equals(receiptContents(context, checkout))
+                        || AntigravityPolicy.agentName(context).equals(AntigravityPolicy.READER) && saved.equals(checkout.toString())) {
+                    return;
+                }
             }
         }
         catch (IOException failure) {
             throw new AgentUnavailableException("Unable to verify the saved Antigravity session", failure);
         }
-        throw new AgentUnavailableException("This Antigravity session was not created by this connector for this checkout");
+        throw new AgentUnavailableException("This Antigravity session requires its original checkout, access and question setting");
+    }
+
+    private static String receiptContents(AgentSessionContext context, Path checkout)
+    {
+        return AcpClient.encode(new SessionReceipt(AntigravityPolicy.agentName(context), checkout.toString()));
+    }
+
+    private record SessionReceipt(String agent, String checkout)
+    {
+        private SessionReceipt
+        {
+            requireNonNull(agent, "agent is null");
+            requireNonNull(checkout, "checkout is null");
+        }
     }
 
     private ProcessSpec sessionSpec(AgentSessionContext context)
     {
         try {
-            List<String> command = AntigravityPolicy.acpCommand(resolveExecutable());
-            List<String> argv = AntigravityPolicy.command(command, home, context.worktree());
-            return new ProcessSpec(new ProcessOwner(ProcessOwner.Kind.DISCUSSION, context.taskId()), argv, context.worktree(),
-                    environment(), OptionalInt.empty(), OUTPUT_LIMIT, Duration.ZERO, STOP_GRACE);
+            String binary = resolveExecutable();
+            Map<String, String> environment = environment();
+            AntigravityPolicy.prepareAgent(home, context);
+            List<String> command = AntigravityPolicy.acpCommand(binary, context);
+            List<String> argv = AntigravityPolicy.command(command, home, context.worktree(), context.access());
+            return new ProcessSpec(new ProcessOwner(ProcessOwner.Kind.DISCUSSION, context.taskId()), argv, context.worktree().toRealPath(),
+                    environment, OptionalInt.empty(), OUTPUT_LIMIT, Duration.ZERO, STOP_GRACE);
         }
         catch (IOException failure) {
             throw new AgentUnavailableException("Unable to prepare Antigravity session", failure);
@@ -361,7 +397,7 @@ public final class AntigravityCliDriver
     {
         closed = true;
         RuntimeException failure = null;
-        for (Runnable stop : List.copyOf(sessions.values())) {
+        for (Runnable stop : ImmutableList.copyOf(sessions.values())) {
             try {
                 stop.run();
             }

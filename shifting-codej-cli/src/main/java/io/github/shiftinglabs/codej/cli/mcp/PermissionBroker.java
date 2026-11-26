@@ -50,14 +50,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -101,6 +106,7 @@ public final class PermissionBroker
 
     private final ObjectMapper objectMapper;
     private final ToolServer toolServer;
+    private final Executor toolExecutor;
     private final ClaudeSandboxSettings sandbox;
     private final Map<String, PermissionContext> contexts = new ConcurrentHashMap<>();
     private final Set<String> nativeOnlyTokens = ConcurrentHashMap.newKeySet();
@@ -114,11 +120,17 @@ public final class PermissionBroker
 
     public PermissionBroker(ObjectMapper objectMapper, ToolServer toolServer)
     {
+        this(objectMapper, toolServer, Runnable::run);
+    }
+
+    public PermissionBroker(ObjectMapper objectMapper, ToolServer toolServer, Executor toolExecutor)
+    {
         this.objectMapper = requireNonNull(objectMapper, "objectMapper is null")
                 .copy()
                 .registerModule(new Jdk8Module())
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
         this.toolServer = requireNonNull(toolServer, "toolServer is null");
+        this.toolExecutor = requireNonNull(toolExecutor, "toolExecutor is null");
         this.sandbox = new ClaudeSandboxSettings(this.objectMapper, this.toolServer);
     }
 
@@ -143,7 +155,7 @@ public final class PermissionBroker
         Path configFile = providerDirectory.resolve("codej-mcp.json");
         Path settingsFile = providerDirectory.resolve("sandbox-settings.json");
         Path childGateFile = providerDirectory.resolve("review-child-gate.sh");
-        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), true, sessionTools);
+        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), true, true, sessionTools);
         URI uri = open(token, context);
         Runnable release = () -> {
             forget(token);
@@ -172,7 +184,7 @@ public final class PermissionBroker
                     .collect(toImmutableList());
             return new McpRegistration(
                     token, uri, toolNames, toolsDigest(exposed), rootTools(context), managedInstruction(context),
-                    Optional.of(configFile), Optional.of(settingsFile), release);
+                    Optional.of(configFile), Optional.of(settingsFile), context.toolCallbacks().orElseThrow()::stop, release);
         }
         catch (IOException e) {
             release.run();
@@ -193,13 +205,32 @@ public final class PermissionBroker
             String taskId, Path worktree, AgentPermissionScope scope, AgentApprovalHandler approvals, SecretRedactor redactor,
             List<Tool> sessionTools)
     {
+        return registerTools(taskId, worktree, scope, approvals, redactor, sessionTools, false);
+    }
+
+    /**
+     * Registers the same host tools as {@link #registerTools}, with opt-in tracking of in-flight
+     * callbacks. The connector owns the registration and can withdraw admission, cancel callbacks,
+     * and check that they returned before it reports session shutdown.
+     */
+    public Optional<McpRegistration> registerSessionTools(
+            String taskId, Path worktree, AgentPermissionScope scope, AgentApprovalHandler approvals, SecretRedactor redactor,
+            List<Tool> sessionTools)
+    {
+        return registerTools(taskId, worktree, scope, approvals, redactor, sessionTools, true);
+    }
+
+    private Optional<McpRegistration> registerTools(
+            String taskId, Path worktree, AgentPermissionScope scope, AgentApprovalHandler approvals, SecretRedactor redactor,
+            List<Tool> sessionTools, boolean trackCallbacks)
+    {
         requireNonNull(taskId, "taskId is null");
         requireNonNull(worktree, "worktree is null");
         requireNonNull(scope, "scope is null");
         requireNonNull(approvals, "approvals is null");
         requireNonNull(redactor, "redactor is null");
         String token = token();
-        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), false, sessionTools);
+        PermissionContext context = resolveContext(taskId, worktree, scope, approvals, redactor.withSecret(token), false, trackCallbacks, sessionTools);
         if (tools(context).isEmpty()) {
             return Optional.empty();
         }
@@ -208,7 +239,7 @@ public final class PermissionBroker
         return Optional.of(new McpRegistration(
                 token, uri, exposed.stream().map(ToolDefinition::name).collect(toImmutableList()), toolsDigest(exposed),
                 rootTools(context), managedInstruction(context),
-                Optional.empty(), Optional.empty(), () -> forget(token)));
+                Optional.empty(), Optional.empty(), timeout -> context.toolCallbacks().map(callbacks -> callbacks.stop(timeout)).orElse(true), () -> forget(token)));
     }
 
     private synchronized URI open(String token, PermissionContext context)
@@ -295,13 +326,15 @@ public final class PermissionBroker
             AgentApprovalHandler approvals,
             SecretRedactor redactor,
             boolean permissionTools,
+            boolean trackCallbacks,
             List<Tool> sessionTools)
     {
         // Claude's gate admits read-only children through this flag. Codex registers no permission tools and
         // gates its children through its own launch-time PreToolUse hook.
         boolean readOnlyChildren = permissionTools && scope.readOnlySubagents() && !scope.noSubagents();
         return new PermissionContext(
-                taskId, worktree, scope, approvals, redactor, permissionTools, sessionTools, readOnlyChildren, new AtomicReference<>());
+                taskId, worktree, scope, approvals, redactor, permissionTools, sessionTools, readOnlyChildren, new AtomicReference<>(),
+                trackCallbacks ? Optional.of(new ToolCallbacks()) : Optional.empty());
     }
 
     /** Combines the fixed capabilities' guidance for the session's instruction channel. */
@@ -425,17 +458,21 @@ public final class PermissionBroker
         }
         JsonNode arguments = params.arguments().isObject() ? redacted(params.arguments().deepCopy(), context.redactor()) : objectMapper.createObjectNode();
         String json = objectMapper.writeValueAsString(arguments);
+        ToolInvocation invocation = new ToolInvocation(() -> tool.orElseThrow().call(json));
+        if (!context.toolCallbacks().map(callbacks -> callbacks.begin(invocation)).orElse(true)) {
+            return toolResponse(id, "This turn no longer accepts tool calls", true);
+        }
         String text;
         boolean failed = false;
         try {
-            text = tool.orElseThrow().call(json);
+            text = invocation.execute(toolExecutor);
         }
         catch (Exception failure) {
-            if (failure instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
             text = failureReason(failure);
             failed = true;
+        }
+        finally {
+            context.toolCallbacks().ifPresent(callbacks -> callbacks.finished(invocation));
         }
         return toolResponse(id, context.redactor().redact(text), failed);
     }
@@ -825,7 +862,8 @@ public final class PermissionBroker
             boolean permissionTools,
             List<Tool> sessionTools,
             boolean readOnlyChildren,
-            AtomicReference<CodexRootTools> codexReviewTools)
+            AtomicReference<CodexRootTools> codexReviewTools,
+            Optional<ToolCallbacks> toolCallbacks)
     {
         private PermissionContext
         {
@@ -835,7 +873,137 @@ public final class PermissionBroker
             requireNonNull(approvals, "approvals is null");
             requireNonNull(redactor, "redactor is null");
             requireNonNull(codexReviewTools, "codexReviewTools is null");
+            requireNonNull(toolCallbacks, "toolCallbacks is null");
             sessionTools = ImmutableList.copyOf(sessionTools);
+        }
+    }
+
+    private static final class ToolCallbacks
+    {
+        private final List<ToolInvocation> active = new ArrayList<>();
+        private boolean accepting = true;
+
+        synchronized boolean begin(ToolInvocation invocation)
+        {
+            if (!accepting) {
+                return false;
+            }
+            active.add(invocation);
+            return true;
+        }
+
+        synchronized void finished(ToolInvocation invocation)
+        {
+            active.remove(invocation);
+            notifyAll();
+        }
+
+        synchronized boolean stop(Duration timeout)
+        {
+            accepting = false;
+            active.forEach(ToolInvocation::cancel);
+            long deadline = System.nanoTime() + timeout.toNanos();
+            while (!active.isEmpty()) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    return false;
+                }
+                try {
+                    TimeUnit.NANOSECONDS.timedWait(this, remaining);
+                }
+                catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    private static final class ToolInvocation
+            implements Runnable
+    {
+        private final Callable<String> callback;
+        private final CompletableFuture<String> result = new CompletableFuture<>();
+        private Thread runner;
+
+        private ToolInvocation(Callable<String> callback)
+        {
+            this.callback = callback;
+        }
+
+        String execute(Executor executor)
+                throws Exception
+        {
+            try {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("Tool call cancelled");
+                }
+                executor.execute(this);
+                return result.get();
+            }
+            catch (InterruptedException failure) {
+                cancelAndWait();
+                Thread.currentThread().interrupt();
+                throw new InterruptedException("Tool call cancelled");
+            }
+            catch (ExecutionException failure) {
+                if (failure.getCause() instanceof Exception cause) {
+                    throw cause;
+                }
+                throw (Error) failure.getCause();
+            }
+            catch (RuntimeException | Error failure) {
+                cancelAndWait();
+                throw failure;
+            }
+        }
+
+        @Override
+        public void run()
+        {
+            synchronized (this) {
+                if (result.isDone() || runner != null) {
+                    return;
+                }
+                runner = Thread.currentThread();
+            }
+            try {
+                String text = callback.call();
+                synchronized (this) {
+                    runner = null;
+                    result.complete(text);
+                }
+            }
+            catch (Throwable failure) {
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                synchronized (this) {
+                    runner = null;
+                    result.completeExceptionally(failure);
+                }
+            }
+        }
+
+        synchronized void cancel()
+        {
+            if (result.isDone()) {
+                return;
+            }
+            if (runner == null) {
+                result.completeExceptionally(new InterruptedException("Tool call cancelled"));
+            }
+            else {
+                runner.interrupt();
+            }
+        }
+
+        private void cancelAndWait()
+        {
+            cancel();
+            // The Codex root worker must stay alive until a borrowed callback actually returns.
+            result.handle((value, failure) -> null).join();
         }
     }
 

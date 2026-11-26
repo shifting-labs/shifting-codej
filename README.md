@@ -329,10 +329,13 @@ when prompted. Each authentication mode has its own directory under the agent's 
 `status()` checks the executable, model catalog, and SDK-managed read-only agent.
 Google validates the API key on inference.
 
-The connector supports read-only file inspection, streamed text, tool activity, model selection,
-interruption, and token counts. Give it the path of each file to inspect. A saved conversation can
-be resumed through the same connector profile and checkout. The private profile must be outside
-the checkout. Shell commands, workspace edits, web search, and host tools are unavailable.
+Antigravity supports read-only file inspection and `Access.WORKSPACE_WRITE` on macOS.
+Workspace writes are confined to the checkout. Use `approveEveryEdit()` and
+`approvals(handler)` to review edits individually. Both access modes support managed
+instructions, session tools, and a question handler through `SessionOptions`.
+A saved conversation resumes with the same profile, checkout, access, and question setting.
+The private profile must be outside the checkout. Shell commands,
+extra writable roots, and web search are unsupported.
 
 ## Direct Claude API
 
